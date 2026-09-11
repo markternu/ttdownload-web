@@ -1,0 +1,13 @@
+node_modules/
+dist/
+public/
+.runtime/
+.env
+*.log
+web/node_modules/
+web/dist/
+
+# 测试/运行产生的临时媒体文件
+*.mp4
+*.mkv
+*.part

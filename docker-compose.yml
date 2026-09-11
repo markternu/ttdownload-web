@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  ttdownload-web:
+    build: .
+    image: ttdownload-web:latest
+    container_name: ttdownload-web
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      DOWNLOAD_ROOT: /ttdownload
+      ENCRYPT_PASSWORD: ${ENCRYPT_PASSWORD:-ec3e458fcde2582e079f19368abc780f}
+      RESERVE_FREE_BYTES: ${RESERVE_FREE_BYTES:-10737418240}
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-3}
+      ANDROID_TOKEN: ${ANDROID_TOKEN:-change-me-please}
+      # 容器内 RPC 指向同一个容器里的 aria2（应用会自动拉起）；transmission 需单独服务时改这里
+      ARIA2_RPC_HOST: 127.0.0.1
+      ARIA2_RPC_PORT: 6800
+      TRANSMISSION_RPC_HOST: 127.0.0.1
+      TRANSMISSION_RPC_PORT: 9091
+    volumes:
+      - ${DOWNLOAD_ROOT:-/ttdownload}:/ttdownload

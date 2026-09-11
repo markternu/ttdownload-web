@@ -1,0 +1,507 @@
+import Database from 'better-sqlite3';
+import fs from 'node:fs';
+import path from 'node:path';
+import { config, ensureDirs } from './config';
+import type { ModuleId, SeedItem, Task, TaskStatus } from '../types';
+
+ensureDirs();
+
+export const db: Database.Database = new Database(config.dbPath);
+db.pragma('journal_mode = WAL');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  module TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  platform TEXT,
+  url TEXT,
+  status TEXT NOT NULL DEFAULT 'waiting',
+  priority INTEGER NOT NULL DEFAULT 0,
+  progress REAL NOT NULL DEFAULT 0,
+  speed_bps INTEGER NOT NULL DEFAULT 0,
+  eta_sec INTEGER,
+  total_bytes INTEGER NOT NULL DEFAULT 0,
+  downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+  expect_bytes INTEGER NOT NULL DEFAULT 0,
+  output_path TEXT,
+  published_name TEXT,
+  error TEXT,
+  meta_json TEXT,
+  payload_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_module ON tasks(module);
+
+CREATE TABLE IF NOT EXISTS published_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER,
+  name TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  module TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  path TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  downloaded INTEGER NOT NULL DEFAULT 0,
+  downloaded_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS seeds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  path TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  file_count INTEGER NOT NULL DEFAULT 0,
+  task_id INTEGER,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS event_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  level TEXT NOT NULL DEFAULT 'info',
+  message TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`);
+
+const nowIso = (): string => new Date().toISOString();
+
+interface TaskRow {
+  id: number;
+  module: ModuleId;
+  title: string;
+  platform: string | null;
+  url: string | null;
+  status: TaskStatus;
+  priority: number;
+  progress: number;
+  speed_bps: number;
+  eta_sec: number | null;
+  total_bytes: number;
+  downloaded_bytes: number;
+  expect_bytes: number;
+  output_path: string | null;
+  published_name: string | null;
+  error: string | null;
+  meta_json: string | null;
+  payload_json: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  retry_count: number;
+}
+
+export function rowToTask(row: TaskRow): Task & { payload?: Record<string, unknown>; retryCount: number } {
+  let meta: Task['meta'] = null;
+  if (row.meta_json) {
+    try {
+      meta = JSON.parse(row.meta_json);
+    } catch {
+      meta = null;
+    }
+  }
+  let payload: Record<string, unknown> | undefined;
+  if (row.payload_json) {
+    try {
+      payload = JSON.parse(row.payload_json);
+    } catch {
+      payload = undefined;
+    }
+  }
+  return {
+    id: row.id,
+    module: row.module,
+    title: row.title,
+    platform: row.platform,
+    url: row.url,
+    status: row.status,
+    progress: row.progress,
+    speedBps: row.speed_bps,
+    etaSec: row.eta_sec,
+    totalBytes: row.total_bytes,
+    downloadedBytes: row.downloaded_bytes,
+    expectBytes: row.expect_bytes,
+    outputPath: row.output_path,
+    publishedName: row.published_name,
+    error: row.error,
+    meta,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    payload,
+    retryCount: row.retry_count,
+  };
+}
+
+export interface TaskInput {
+  module: ModuleId;
+  title: string;
+  platform?: string | null;
+  url?: string | null;
+  status?: TaskStatus;
+  priority?: number;
+  expectBytes?: number;
+  outputPath?: string | null;
+  meta?: Task['meta'];
+  payload?: Record<string, unknown>;
+}
+
+export const tasksRepo = {
+  create(input: TaskInput): Task {
+    const ts = nowIso();
+    const info = db
+      .prepare(
+        `INSERT INTO tasks (module,title,platform,url,status,priority,expect_bytes,output_path,meta_json,payload_json,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        input.module,
+        input.title ?? '',
+        input.platform ?? null,
+        input.url ?? null,
+        input.status ?? 'waiting',
+        input.priority ?? 0,
+        input.expectBytes ?? 0,
+        input.outputPath ?? null,
+        input.meta ? JSON.stringify(input.meta) : null,
+        input.payload ? JSON.stringify(input.payload) : null,
+        ts,
+        ts,
+      );
+    return this.get(Number(info.lastInsertRowid))!;
+  },
+
+  get(id: number): Task | null {
+    const row = db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as TaskRow | undefined;
+    return row ? rowToTask(row) : null;
+  },
+
+  update(id: number, patch: Partial<Record<string, unknown>> & { meta?: Task['meta']; payload?: Record<string, unknown> }): Task | null {
+    const map: Record<string, string> = {
+      title: 'title',
+      platform: 'platform',
+      url: 'url',
+      status: 'status',
+      priority: 'priority',
+      progress: 'progress',
+      speedBps: 'speed_bps',
+      etaSec: 'eta_sec',
+      totalBytes: 'total_bytes',
+      downloadedBytes: 'downloaded_bytes',
+      expectBytes: 'expect_bytes',
+      outputPath: 'output_path',
+      publishedName: 'published_name',
+      error: 'error',
+      startedAt: 'started_at',
+      finishedAt: 'finished_at',
+      retryCount: 'retry_count',
+    };
+    const sets: string[] = [];
+    const args: unknown[] = [];
+    for (const [k, col] of Object.entries(map)) {
+      if (k in patch) {
+        sets.push(`${col}=?`);
+        args.push((patch as Record<string, unknown>)[k] ?? null);
+      }
+    }
+    if ('meta' in patch) {
+      sets.push('meta_json=?');
+      args.push(patch.meta ? JSON.stringify(patch.meta) : null);
+    }
+    if ('payload' in patch) {
+      sets.push('payload_json=?');
+      args.push(patch.payload ? JSON.stringify(patch.payload) : null);
+    }
+    sets.push('updated_at=?');
+    args.push(nowIso());
+    args.push(id);
+    db.prepare(`UPDATE tasks SET ${sets.join(',')} WHERE id=?`).run(...(args as never[]));
+    return this.get(id);
+  },
+
+  list(opts: {
+    modules?: ModuleId[];
+    statuses?: TaskStatus[];
+    q?: string;
+    sort?: string;
+    page?: number;
+    pageSize?: number;
+    ids?: number[];
+  }): { items: Task[]; total: number } {
+    const where: string[] = [];
+    const args: unknown[] = [];
+    if (opts.modules?.length) {
+      where.push(`module IN (${opts.modules.map(() => '?').join(',')})`);
+      args.push(...opts.modules);
+    }
+    if (opts.statuses?.length) {
+      where.push(`status IN (${opts.statuses.map(() => '?').join(',')})`);
+      args.push(...opts.statuses);
+    }
+    if (opts.ids?.length) {
+      where.push(`id IN (${opts.ids.map(() => '?').join(',')})`);
+      args.push(...opts.ids);
+    }
+    if (opts.q) {
+      where.push('(title LIKE ? OR url LIKE ?)');
+      args.push(`%${opts.q}%`, `%${opts.q}%`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const total = (db.prepare(`SELECT COUNT(*) c FROM tasks ${whereSql}`).get(...(args as never[])) as { c: number }).c;
+
+    const sortMap: Record<string, string> = {
+      created_desc: 'created_at DESC',
+      created_asc: 'created_at ASC',
+      updated_desc: 'updated_at DESC',
+      size_desc: 'total_bytes DESC',
+      progress_desc: 'progress DESC',
+    };
+    const order = sortMap[opts.sort ?? 'created_desc'] ?? 'created_at DESC';
+    const page = Math.max(1, opts.page ?? 1);
+    const pageSize = Math.min(200, Math.max(1, opts.pageSize ?? 20));
+    const rows = db
+      .prepare(`SELECT * FROM tasks ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`)
+      .all(...(args as never[]), pageSize, (page - 1) * pageSize) as TaskRow[];
+    return { items: rows.map(rowToTask), total };
+  },
+
+  byStatus(statuses: TaskStatus[]): (Task & { payload?: Record<string, unknown> })[] {
+    const rows = db
+      .prepare(`SELECT * FROM tasks WHERE status IN (${statuses.map(() => '?').join(',')}) ORDER BY priority DESC, id ASC`)
+      .all(...(statuses as never[])) as TaskRow[];
+    return rows.map(rowToTask);
+  },
+
+  delete(id: number): void {
+    db.prepare('DELETE FROM tasks WHERE id=?').run(id);
+  },
+};
+
+interface PublishedRow {
+  id: number;
+  task_id: number | null;
+  name: string;
+  title: string;
+  module: ModuleId;
+  size_bytes: number;
+  path: string;
+  created_at: string;
+  downloaded: number;
+  downloaded_at: string | null;
+}
+
+export const filesRepo = {
+  add(input: { taskId?: number | null; name: string; title: string; module: ModuleId; sizeBytes: number; path: string }): number {
+    const info = db
+      .prepare(
+        `INSERT INTO published_files (task_id,name,title,module,size_bytes,path,created_at,downloaded)
+         VALUES (?,?,?,?,?,?,?,0)`,
+      )
+      .run(input.taskId ?? null, input.name, input.title, input.module, input.sizeBytes, input.path, nowIso());
+    return Number(info.lastInsertRowid);
+  },
+  get(id: number): PublishedRow | null {
+    return (db.prepare('SELECT * FROM published_files WHERE id=?').get(id) as PublishedRow | undefined) ?? null;
+  },
+  getByPath(p: string): PublishedRow | null {
+    return (db.prepare('SELECT * FROM published_files WHERE path=?').get(p) as PublishedRow | undefined) ?? null;
+  },
+  list(opts: { q?: string; page?: number; pageSize?: number; pendingOnly?: boolean }) {
+    const where: string[] = [];
+    const args: unknown[] = [];
+    if (opts.pendingOnly) where.push('downloaded=0');
+    if (opts.q) {
+      where.push('(name LIKE ? OR title LIKE ?)');
+      args.push(`%${opts.q}%`, `%${opts.q}%`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const total = (db.prepare(`SELECT COUNT(*) c FROM published_files ${whereSql}`).get(...(args as never[])) as { c: number }).c;
+    const sum = (db.prepare(`SELECT COALESCE(SUM(size_bytes),0) s FROM published_files ${whereSql}`).get(...(args as never[])) as { s: number }).s;
+    const page = Math.max(1, opts.page ?? 1);
+    const pageSize = Math.min(500, Math.max(1, opts.pageSize ?? 20));
+    const rows = db
+      .prepare(`SELECT * FROM published_files ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+      .all(...(args as never[]), pageSize, (page - 1) * pageSize) as PublishedRow[];
+    return { rows, total, sum };
+  },
+  markDownloaded(id: number): void {
+    db.prepare('UPDATE published_files SET downloaded=1, downloaded_at=? WHERE id=?').run(nowIso(), id);
+  },
+  remove(id: number): void {
+    db.prepare('DELETE FROM published_files WHERE id=?').run(id);
+  },
+};
+
+interface SeedRow {
+  id: number;
+  name: string;
+  path: string;
+  status: SeedItem['status'];
+  size_bytes: number;
+  file_count: number;
+  task_id: number | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const rowToSeed = (r: SeedRow): SeedItem => ({
+  id: r.id,
+  name: r.name,
+  path: r.path,
+  status: r.status,
+  sizeBytes: r.size_bytes,
+  fileCount: r.file_count,
+  taskId: r.task_id,
+  error: r.error,
+});
+
+export const seedsRepo = {
+  upsertByPath(input: { name: string; path: string }): SeedItem {
+    const exist = db.prepare('SELECT * FROM seeds WHERE path=?').get(input.path) as SeedRow | undefined;
+    if (exist) return rowToSeed(exist);
+    const ts = nowIso();
+    const info = db
+      .prepare('INSERT INTO seeds (name,path,status,created_at,updated_at) VALUES (?,?,?,?,?)')
+      .run(input.name, input.path, 'pending', ts, ts);
+    return rowToSeed(db.prepare('SELECT * FROM seeds WHERE id=?').get(Number(info.lastInsertRowid)) as SeedRow);
+  },
+  update(id: number, patch: Partial<{ status: SeedItem['status']; sizeBytes: number; fileCount: number; taskId: number | null; error: string | null }>): void {
+    const map: Record<string, string> = {
+      status: 'status',
+      sizeBytes: 'size_bytes',
+      fileCount: 'file_count',
+      taskId: 'task_id',
+      error: 'error',
+    };
+    const sets: string[] = [];
+    const args: unknown[] = [];
+    for (const [k, col] of Object.entries(map)) {
+      if (k in patch) {
+        sets.push(`${col}=?`);
+        args.push((patch as Record<string, unknown>)[k] ?? null);
+      }
+    }
+    sets.push('updated_at=?');
+    args.push(nowIso(), id);
+    db.prepare(`UPDATE seeds SET ${sets.join(',')} WHERE id=?`).run(...(args as never[]));
+  },
+  all(): SeedItem[] {
+    return (db.prepare('SELECT * FROM seeds ORDER BY id DESC').all() as SeedRow[]).map(rowToSeed);
+  },
+  get(id: number): SeedItem | null {
+    const r = db.prepare('SELECT * FROM seeds WHERE id=?').get(id) as SeedRow | undefined;
+    return r ? rowToSeed(r) : null;
+  },
+  delete(id: number): void {
+    db.prepare('DELETE FROM seeds WHERE id=?').run(id);
+  },
+};
+
+export const settingsRepo = {
+  getAll(): Record<string, string> {
+    const rows = db.prepare('SELECT key,value FROM settings').all() as { key: string; value: string }[];
+    const out: Record<string, string> = {};
+    for (const r of rows) out[r.key] = r.value;
+    return out;
+  },
+  setMany(values: Record<string, string>): void {
+    const stmt = db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+    const tx = db.transaction((entries: [string, string][]) => {
+      for (const [k, v] of entries) stmt.run(k, v);
+    });
+    tx(Object.entries(values));
+  },
+};
+
+export const logsRepo = {
+  add(level: string, message: string): void {
+    db.prepare('INSERT INTO event_logs (level,message,at) VALUES (?,?,?)').run(level, message, nowIso());
+    // 保留最近 5000 条
+    db.prepare('DELETE FROM event_logs WHERE id NOT IN (SELECT id FROM event_logs ORDER BY id DESC LIMIT 5000)').run();
+  },
+  recent(limit = 200): { id: number; level: string; message: string; at: string }[] {
+    return db
+      .prepare('SELECT * FROM event_logs ORDER BY id DESC LIMIT ?')
+      .all(limit) as { id: number; level: string; message: string; at: string }[];
+  },
+};
+
+/** 统计（Dashboard 用） */
+export function computeStats(): import('../types').Stats {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayIso = today.toISOString();
+  const one = (sql: string, ...args: unknown[]): number =>
+    ((db.prepare(sql).get(...(args as never[])) as { c: number } | undefined)?.c ?? 0) as number;
+
+  const todayTasks = one('SELECT COUNT(*) c FROM tasks WHERE created_at >= ?', todayIso);
+  const todayCompleted = one("SELECT COUNT(*) c FROM tasks WHERE status='completed' AND finished_at >= ?", todayIso);
+  const downloading = one("SELECT COUNT(*) c FROM tasks WHERE status IN ('downloading','parsing','archiving','encrypting')");
+  const waiting = one("SELECT COUNT(*) c FROM tasks WHERE status IN ('waiting','paused')");
+  const failed = one("SELECT COUNT(*) c FROM tasks WHERE status='failed'");
+  const totalTasks = one('SELECT COUNT(*) c FROM tasks');
+  const completedAll = one("SELECT COUNT(*) c FROM tasks WHERE status='completed'");
+  const totalDownloadedBytes = ((db.prepare('SELECT COALESCE(SUM(size_bytes),0) s FROM published_files').get() as { s: number }).s ?? 0) as number;
+
+  const perPlatform = db
+    .prepare(
+      `SELECT COALESCE(platform,'未知') platform, COUNT(*) count FROM tasks
+       WHERE status='completed' GROUP BY platform ORDER BY count DESC LIMIT 10`,
+    )
+    .all() as { platform: string; count: number }[];
+
+  const dailyRows = db
+    .prepare(
+      `SELECT substr(created_at,1,10) date, COUNT(*) count FROM tasks
+       WHERE created_at >= datetime('now','-7 day') GROUP BY date ORDER BY date`,
+    )
+    .all() as { date: string; count: number }[];
+  const bytesRows = db
+    .prepare(
+      `SELECT substr(created_at,1,10) date, COALESCE(SUM(size_bytes),0) bytes FROM published_files
+       WHERE created_at >= datetime('now','-7 day') GROUP BY date`,
+    )
+    .all() as { date: string; bytes: number }[];
+  const bytesMap = new Map(bytesRows.map((r) => [r.date, r.bytes]));
+
+  const recent = tasksRepo.list({ pageSize: 8, sort: 'updated_desc' }).items;
+
+  return {
+    todayTasks,
+    todayCompleted,
+    downloading,
+    waiting,
+    failed,
+    totalDownloadedBytes,
+    totalTasks,
+    successRate: totalTasks > 0 ? completedAll / totalTasks : 0,
+    perPlatform,
+    daily: dailyRows.map((r) => ({ date: r.date, count: r.count, bytes: bytesMap.get(r.date) ?? 0 })),
+    recentTasks: recent,
+  };
+}
+
+export { nowIso };
+export const dbFileSize = (): number => {
+  try {
+    return fs.statSync(config.dbPath).size;
+  } catch {
+    return 0;
+  }
+};

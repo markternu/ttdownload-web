@@ -1,0 +1,8 @@
+node_modules
+dist
+public
+.git
+.runtime
+.env
+*.log
+test/.tmp
