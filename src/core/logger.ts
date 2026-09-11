@@ -216,6 +216,18 @@ export function redact(text: string): string {
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/g, '$1***');
 }
 
+/**
+ * 净化日志文本：去掉 NUL 等控制字符、孤立代理项。
+ * 目的：日志文件永远是纯文本 —— 否则 `grep` 会报 "binary file matches"，
+ * 用户复制粘贴/发给开发者也会出问题（常见来源：其它编码的种子名、二进制输出片段）。
+ */
+export function sanitize(text: string): string {
+  return String(text)
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replace(/[\uD800-\uDFFF]/g, '?');
+}
+
 /** 安全序列化（截断超长内容） */
 export function dump(data: unknown, maxLen = 2000): string {
   if (data === undefined) return '';
@@ -225,7 +237,7 @@ export function dump(data: unknown, maxLen = 2000): string {
   } catch {
     text = String(data);
   }
-  text = redact(text ?? '');
+  text = sanitize(redact(text ?? ''));
   return text.length > maxLen ? `${text.slice(0, maxLen)}…(截断 ${text.length - maxLen} 字)` : text;
 }
 
@@ -235,7 +247,7 @@ function emit(level: LogLevel, marker: string | null, scope: string | null, mess
   const scopePart = scope ? ` [${scope}]` : '';
   const dataPart = data === undefined ? '' : ` :: ${dump(data)}`;
   // 消息体本身也可能内嵌密钥（例如把 JSON 拼进 message），统一先脱敏再落盘/入库/推送
-  const safeMessage = redact(message);
+  const safeMessage = sanitize(redact(message));
   const line = `${at} [${level.toUpperCase().padEnd(5)}]${markerPart}${scopePart} ${safeMessage}${dataPart}`;
 
   if (level === 'error') console.error(line);
@@ -294,6 +306,25 @@ function makeScoped(scope: string | null): ScopedLogger {
     mark: (marker, m, d) => build(marker, 'info', m, d),
     child: (s) => makeScoped(scope ? `${scope}>${s}` : s),
   };
+}
+
+/** 日志文件是否是纯文本（含 NUL 即视为非文本）；网页/接口可用于提示用户清理 */
+export function logFileIsText(): boolean {
+  try {
+    const st = fs.statSync(config.logPath);
+    const len = Math.min(st.size, 256 * 1024);
+    if (len === 0) return true;
+    const fd = fs.openSync(config.logPath, 'r');
+    try {
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, 0);
+      return !buf.includes(0);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return true;
+  }
 }
 
 export const logger = {

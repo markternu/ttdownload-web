@@ -571,3 +571,21 @@ test('YouTube 元数据自检：首个候选视频不可用时自动换下一个
     netCheck.resetNetworkCache();
   }
 });
+
+test('日志净化：含 NUL/控制字符/其它编码残留时，日志文件仍是纯文本（grep 不会报 binary）', async () => {
+  loggerMod.clearLogs();
+  // 模拟真实的脏数据：其它编码的种子名 + NUL + 控制字符 + 超长二进制片段
+  const dirty = `种子名:\u0000\u0001 中文名称\u0085 x${String.fromCharCode(0x1b)}[31m` + Buffer.from([0xff, 0xfe, 0x00, 0x41]).toString('latin1');
+  loggerMod.logger.child('dirty').mark('PROC_EXIT', `脏输出: ${dirty}`, { stdout: dirty, raw: dirty });
+
+  const content = fs.readFileSync(config.logPath);
+  assert.equal(content.includes(0), false, '日志文件里不应有 NUL 字节');
+  assert.ok(content.toString('utf8').includes('MARK:PROC_EXIT'));
+  assert.equal(loggerMod.logFileIsText(), true, 'logFileIsText 应判定为纯文本');
+
+  // 关键：grep 不再把它当二进制
+  const grep = execFileSync('grep', ['-c', 'MARK:PROC_EXIT', config.logPath], { encoding: 'utf8' });
+  assert.ok(Number(grep.trim()) >= 1);
+  const grepNoA = execFileSync('grep', ['MARK:PROC_EXIT', config.logPath], { encoding: 'utf8' });
+  assert.ok(grepNoA.includes('MARK:PROC_EXIT'), '不加 -a 也应能正常输出');
+});
