@@ -24,9 +24,13 @@ function emit(taskId: number): void {
   bus.emitTask(tasksRepo.get(taskId));
 }
 
-/** 永久性错误：重试也没用，直接失败 */
+/**
+ * 永久性错误：重试也没用，直接失败。
+ * 注意：「需要登录 / 私有 / 会员专享」**不算**永久错误 —— 用户补上 cookies 或换客户端后可能就能下，
+ * 属于「尽力重试」范围，交给各模块的策略阶梯与自动重试处理。
+ */
 function isPermanentError(msg: string): boolean {
-  return /URL 格式错误|不支持|没有视频或图片|DRM|私有|需要登录|种子文件不存在|未安装|不可用：请|找不到文件/.test(msg);
+  return /URL 格式错误|不支持该链|没有视频或图片|DRM|种子文件不存在|未安装|不可用：请|找不到文件/.test(msg);
 }
 
 function failTask(task: TaskWithPayload, message: string): void {

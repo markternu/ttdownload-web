@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   CheckCircle2,
+  Cookie,
   Database,
   Gauge,
   HardDrive,
@@ -14,6 +15,7 @@ import {
   Sun,
   Trash2,
   Undo2,
+  UploadCloud,
   Wifi,
   XCircle,
 } from 'lucide-react'
@@ -36,7 +38,7 @@ import { useToast } from '../context/ToastContext'
 import { api } from '../lib/api'
 import { CONCURRENCY_OPTIONS, FORMAT_OPTIONS, QUALITY_OPTIONS } from '../lib/constants'
 import { formatBytes, humanizeError } from '../lib/format'
-import type { Settings, TestTool, ThemeMode } from '../types'
+import type { CookiesStatus, Settings, TestTool, ThemeMode } from '../types'
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun; description: string }[] = [
   { value: 'light', label: 'Light', icon: Sun, description: '始终使用浅色界面' },
@@ -48,6 +50,19 @@ const TEST_TOOLS: { value: TestTool; label: string }[] = [
   { value: 'aria2', label: 'aria2 RPC' },
   { value: 'transmission', label: 'transmission RPC' },
   { value: 'ytdlp', label: 'yt-dlp' },
+]
+
+/** yt-dlp 支持的“从浏览器读取 cookies”来源 */
+const COOKIES_BROWSER_OPTIONS = [
+  { value: '', label: '不使用' },
+  { value: 'chrome', label: 'chrome' },
+  { value: 'chromium', label: 'chromium' },
+  { value: 'edge', label: 'edge' },
+  { value: 'firefox', label: 'firefox' },
+  { value: 'brave', label: 'brave' },
+  { value: 'opera', label: 'opera' },
+  { value: 'vivaldi', label: 'vivaldi' },
+  { value: 'safari', label: 'safari' },
 ]
 
 function toSpeedInput(bps: number): string {
@@ -67,6 +82,29 @@ export default function SettingsPage() {
   const [testResult, setTestResult] = useState<{ tool: TestTool; ok: boolean; message: string } | null>(
     null,
   )
+
+  // yt-dlp cookies 状态（独立于 /api/settings，单独拉取）
+  const cookiesFileRef = useRef<HTMLInputElement>(null)
+  const [cookiesStatus, setCookiesStatus] = useState<CookiesStatus | null>(null)
+  const [cookiesLoading, setCookiesLoading] = useState(true)
+  const [cookiesUploading, setCookiesUploading] = useState(false)
+  const [cookiesDeleting, setCookiesDeleting] = useState(false)
+
+  const refreshCookies = useCallback(async () => {
+    setCookiesLoading(true)
+    try {
+      const data = await api.getWebvideoCookies()
+      setCookiesStatus(data)
+    } catch {
+      setCookiesStatus(null)
+    } finally {
+      setCookiesLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshCookies()
+  }, [refreshCookies])
 
   useEffect(() => {
     if (settings) {
@@ -112,6 +150,44 @@ export default function SettingsPage() {
       toast.error('测试失败', message)
     } finally {
       setTesting(null)
+    }
+  }
+
+  const handleCookiesUpload = async (file: File) => {
+    setCookiesUploading(true)
+    try {
+      const res = await api.uploadWebvideoCookies(file)
+      setCookiesStatus(res)
+      // 上传成功后把生效路径写回草稿，保存设置后即可持久化
+      if (res.cookiesFile) patch('webvideoCookiesFile', res.cookiesFile)
+      toast.success('cookies 上传成功', file.name)
+    } catch (err) {
+      toast.error(
+        'cookies 上传失败',
+        humanizeError((err as { code?: string }).code ?? '', (err as Error).message),
+      )
+    } finally {
+      setCookiesUploading(false)
+      if (cookiesFileRef.current) cookiesFileRef.current.value = ''
+    }
+  }
+
+  const handleCookiesDelete = async () => {
+    if (!window.confirm('确定要删除服务器上的 cookies.txt 吗？删除后会员/登录视频将无法下载。')) {
+      return
+    }
+    setCookiesDeleting(true)
+    try {
+      const res = await api.deleteWebvideoCookies()
+      setCookiesStatus(res)
+      toast.success('cookies 已删除', res.cookiesFile)
+    } catch (err) {
+      toast.error(
+        'cookies 删除失败',
+        humanizeError((err as { code?: string }).code ?? '', (err as Error).message),
+      )
+    } finally {
+      setCookiesDeleting(false)
     }
   }
 
@@ -442,6 +518,108 @@ export default function SettingsPage() {
                 </span>
               </p>
             ) : null}
+          </div>
+        </Card>
+
+        {/* 公开视频（yt-dlp）cookies / 额外参数 */}
+        <Card>
+          <CardHeader
+            title={
+              <span className="inline-flex items-center gap-2">
+                <Cookie className="h-4 w-4" /> 公开视频（yt-dlp）
+              </span>
+            }
+            subtitle="会员专享 / 需登录 / 年龄限制的视频：用 cookies 让它能下载"
+          />
+          <div className="space-y-4">
+            <Field
+              label="cookies 文件路径"
+              hint="留空则使用服务器默认路径；上传 cookies.txt 后会自动填入这里"
+            >
+              <Input
+                value={draft.webvideoCookiesFile}
+                onChange={(event) => patch('webvideoCookiesFile', event.target.value)}
+                placeholder={cookiesStatus?.defaultPath ?? '/ttdownload/state/cookies.txt'}
+              />
+            </Field>
+
+            <Select
+              label="从浏览器读取 cookies"
+              hint="仅当服务器机器上存在该浏览器的用户配置文件时才可用"
+              value={draft.webvideoCookiesFromBrowser}
+              options={COOKIES_BROWSER_OPTIONS}
+              onChange={(event) => patch('webvideoCookiesFromBrowser', event.target.value)}
+            />
+
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={cookiesFileRef}
+                type="file"
+                accept=".txt,text/plain"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  if (file) void handleCookiesUpload(file)
+                }}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                loading={cookiesUploading}
+                onClick={() => cookiesFileRef.current?.click()}
+                icon={<UploadCloud className="h-3.5 w-3.5" />}
+              >
+                {cookiesUploading ? '上传中…' : '上传 cookies.txt'}
+              </Button>
+              {!cookiesLoading && cookiesStatus?.exists ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  loading={cookiesDeleting}
+                  onClick={() => void handleCookiesDelete()}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  删除
+                </Button>
+              ) : null}
+            </div>
+
+            {cookiesLoading ? (
+              <p className="text-xs text-slate-400 dark:text-slate-500">正在读取 cookies 状态…</p>
+            ) : cookiesStatus ? (
+              <p className="rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+                <Badge tone={cookiesStatus.exists ? 'success' : 'warning'} dot>
+                  {cookiesStatus.exists ? '已配置' : '未配置'}
+                </Badge>
+                <span className="ml-2">
+                  文件大小 {(cookiesStatus.sizeBytes / 1024).toFixed(1)} KB · 最后更新{' '}
+                  {cookiesStatus.updatedAt
+                    ? new Date(cookiesStatus.updatedAt).toLocaleString()
+                    : '—'}
+                  {cookiesStatus.fromBrowser ? ` · 来自浏览器 ${cookiesStatus.fromBrowser}` : ''}
+                </span>
+              </p>
+            ) : (
+              <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+                无法获取 cookies 状态，请确认后端服务已启动。
+              </p>
+            )}
+
+            <Field
+              label="额外参数"
+              hint="这些参数会追加到 yt-dlp 命令末尾，可用于代理 / 网络等场景"
+            >
+              <Input
+                value={draft.webvideoExtraArgs}
+                onChange={(event) => patch('webvideoExtraArgs', event.target.value)}
+                placeholder="--proxy socks5://127.0.0.1:1080"
+              />
+            </Field>
+
+            <p className="rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+              用浏览器登录该网站后，用 “Get cookies.txt LOCALLY” 之类扩展导出 cookies.txt，然后在这里上传。
+              以上设置在点击页面右上角「保存设置」后生效。
+            </p>
           </div>
         </Card>
 

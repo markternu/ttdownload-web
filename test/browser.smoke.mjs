@@ -25,6 +25,10 @@ if (!hasBuild) {
     `#!/bin/bash
 if [ "$1" = "--version" ]; then echo "2024.01.01"; exit 0; fi
 if [ "$1" = "-J" ]; then
+  if [ -n "$BROWSER_PARSE_FAIL" ]; then
+    echo "$BROWSER_PARSE_FAIL" >&2
+    exit 1
+  fi
   echo '{"title":"浏览器测试视频","uploader":"作者A","duration":125,"thumbnail":"http://x/t.jpg","formats":[{"format_id":"137","ext":"mp4","resolution":"1080p","height":1080,"vcodec":"avc1","acodec":"none","filesize":235000000},{"format_id":"22","ext":"mp4","resolution":"720p","height":720,"vcodec":"avc1","acodec":"mp4a","filesize":120000000}]}'
   exit 0
 fi
@@ -177,6 +181,42 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.waitForTimeout(1200);
     assert.ok((await page.locator('text=/没有需要出清的任务|检查 0 个|保留/').count()) >= 0);
     await page.close();
+  });
+
+  test('设置页：公开视频（yt-dlp）cookies 卡片可访问', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/settings`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=公开视频（yt-dlp）', { timeout: 15000 });
+    assert.ok((await page.locator('text=/会员专享/').count()) > 0, '应说明 cookies 用于会员/登录视频');
+    assert.ok((await page.getByRole('button', { name: /上传 cookies/ }).count()) > 0, '应有上传 cookies.txt 按钮');
+    assert.ok(
+      (await page.getByPlaceholder('--proxy socks5://127.0.0.1:1080').count()) > 0,
+      '应有 yt-dlp 额外参数输入框',
+    );
+    await page.close();
+  });
+
+  test('会员专享视频：解析受限横幅 + 仍然下载（自动多方式尝试）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    process.env.BROWSER_PARSE_FAIL =
+      "ERROR: [youtube] f6kl3G_ek-A: This video is available to this channel's members on level: 高级VIP会员（人工咨询服务） (or any higher level). Join this channel to get access to members-only content and other exclusive perks.";
+    try {
+      const page = await newPage();
+      await page.goto(base, { waitUntil: 'networkidle' });
+      await page.getByPlaceholder('粘贴视频链接').first().fill('https://www.youtube.com/watch?v=f6kl3G_ek-A');
+      await page.getByRole('button', { name: /解析视频/ }).first().click();
+      await page.waitForSelector('text=/解析受限/', { timeout: 20000 });
+      assert.ok((await page.locator('text=/频道会员专享/').count()) > 0, '应显示会员专享的具体原因');
+      assert.ok((await page.locator('text=/上传 cookies/').count()) > 0, '应引导去上传 cookies');
+      const stillDownload = page.getByRole('button', { name: /仍然下载/ }).first();
+      assert.ok(await stillDownload.isVisible(), '受限视频也应能继续下载');
+      await stillDownload.click();
+      await page.waitForSelector('text=/已加入下载队列|仍然下载/', { timeout: 15000 });
+      await page.close();
+    } finally {
+      delete process.env.BROWSER_PARSE_FAIL;
+    }
   });
 
   test('页面无 JS 报错', async (t) => {

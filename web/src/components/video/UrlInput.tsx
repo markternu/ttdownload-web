@@ -15,6 +15,9 @@ export interface UrlInputProps {
 
 const URL_PATTERN = /^https?:\/\/[^\s]+$/i
 
+/** 解析失败信息命中这些关键词时，提示去设置里配置 cookies */
+const COOKIES_HINT_PATTERN = /会员|登录|cookies|Sign in|年龄|bot/i
+
 export type UrlValidation = { ok: true; url: string } | { ok: false; message: string }
 
 /** 校验并归一化 URL，返回中文错误信息 */
@@ -185,12 +188,19 @@ export function UrlInput({ value, onChange, onParse, loading = false, error, dis
       </form>
 
       {shownError ? (
-        <p
-          role="alert"
-          className="mt-3 rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300"
-        >
-          {shownError}
-        </p>
+        <div className="mt-3 space-y-2">
+          <p
+            role="alert"
+            className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300"
+          >
+            {shownError}
+          </p>
+          {COOKIES_HINT_PATTERN.test(shownError) ? (
+            <p className="rounded-xl bg-amber-50 px-3.5 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+              该视频可能需要登录/会员权限：到「设置 → 公开视频（yt-dlp）」上传 cookies.txt 后重试
+            </p>
+          ) : null}
+        </div>
       ) : null}
     </Card>
   )

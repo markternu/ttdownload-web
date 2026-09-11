@@ -100,6 +100,16 @@ export const config = {
     unzip: str(process.env.UNZIP_BIN, 'unzip'),
   },
 
+  /** 公开视频（yt-dlp）：cookies 与额外参数，用于会员/登录/年龄限制视频 */
+  webvideo: {
+    /** cookies.txt 默认路径（会员/登录/年龄限制视频必需，可在 Web 设置页里上传或改路径） */
+    defaultCookiesFile: str(process.env.YTDLP_COOKIES_FILE, path.join(DIRS.state, 'cookies.txt')),
+    /** 从浏览器读取 cookies：chrome/chromium/edge/firefox/... （服务器上得真有该浏览器配置） */
+    cookiesFromBrowser: str(process.env.YTDLP_COOKIES_FROM_BROWSER, ''),
+    /** 追加到所有 yt-dlp 调用上的额外参数（空格分隔，如 --proxy socks5://127.0.0.1:1080） */
+    extraArgs: str(process.env.YTDLP_EXTRA_ARGS, ''),
+  },
+
   /** 调度器/流水线节拍（毫秒，测试可调小） */
   schedulerIntervalMs: num(process.env.SCHEDULER_INTERVAL_MS, 3000),
   pipelineIntervalMs: num(process.env.PIPELINE_INTERVAL_MS, 5000),

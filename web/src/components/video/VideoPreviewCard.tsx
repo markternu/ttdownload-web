@@ -132,9 +132,15 @@ export function VideoPreviewCard({ result, onAdd, adding = false }: VideoPreview
             >
               {result.platform || '未知平台'}
             </span>
-            <Badge tone="success" dot>
-              解析成功
-            </Badge>
+            {result.degraded ? (
+              <Badge tone="warning" dot>
+                解析受限（仍可下载）
+              </Badge>
+            ) : (
+              <Badge tone="success" dot>
+                解析成功
+              </Badge>
+            )}
           </div>
 
           <h2 className="mt-2 line-clamp-2 text-lg font-semibold text-slate-900 dark:text-slate-50">
@@ -179,6 +185,16 @@ export function VideoPreviewCard({ result, onAdd, adding = false }: VideoPreview
           </div>
 
           <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2.5 text-xs text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
+            {result.degraded ? (
+              <div className="mb-2 rounded-lg border border-amber-300/70 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+                <p className="font-medium">解析受限，但可以直接加入队列</p>
+                <p className="mt-1 leading-relaxed">{result.parseError || '未能获取视频详情（可能需要登录/会员权限）'}</p>
+                <p className="mt-1 leading-relaxed text-amber-700 dark:text-amber-300">
+                  下载时会自动依次尝试多种客户端、长重试、降级画质等方式；若是会员专享或需要登录的视频，请先到
+                  「设置 → 公开视频（yt-dlp）」上传 cookies.txt，再回来重试。
+                </p>
+              </div>
+            ) : null}
             <p className="font-medium">
               将下载：
               <span className="ml-1 font-mono">
@@ -202,7 +218,7 @@ export function VideoPreviewCard({ result, onAdd, adding = false }: VideoPreview
               icon={<Download className="h-4 w-4" />}
               onClick={() => onAdd({ formatId: selected?.id ?? null, quality, format })}
             >
-              加入下载队列
+              {result.degraded ? '仍然下载（自动多方式尝试）' : '加入下载队列'}
             </Button>
             <span className="inline-flex items-center gap-1 text-[11px] text-slate-400">
               <AlertCircle className="h-3 w-3" />

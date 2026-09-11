@@ -59,7 +59,11 @@ export default function HomePage() {
       try {
         const data = await api.webvideoParse(check.url)
         setResult(data)
-        toast.success('解析成功', data.title)
+        if (data.degraded) {
+          toast.warning('解析受限，仍可下载', data.parseError ?? '下载时会自动尝试多种方式')
+        } else {
+          toast.success('解析成功', data.title)
+        }
       } catch (err) {
         const code = (err as { code?: string }).code ?? ''
         const message = humanizeError(code, (err as Error).message)

@@ -164,6 +164,10 @@ curl -s -X POST localhost:8080/api/aria2/urls \
      -d '{"urls":"http://example.com/a.mp4\nhttp://example.com/b.mp4"}'
 curl -s -X POST localhost:8080/api/webvideo/parse \
      -H 'Content-Type: application/json' -d '{"url":"https://www.youtube.com/watch?v=xxx"}'
+# 会员/需登录视频：上传自己账号的 cookies.txt，让下载能通过登录校验
+curl -s -X POST localhost:8080/api/webvideo/cookies -F 'file=@cookies.txt'
+curl -s localhost:8080/api/webvideo/cookies            # 查看是否已配置
+curl -s localhost:8080/api/webvideo/attempts           # 预览会按哪些方式依次尝试
 # 安卓（Token 鉴权）
 curl -s -H "X-Auth-Token: $ANDROID_TOKEN" localhost:8080/api/android/files
 curl -s -X POST -H "X-Auth-Token: $ANDROID_TOKEN" -H 'Content-Type: application/json' \
@@ -188,9 +192,12 @@ aria2/transmission/webvideo 三模块（含 JSON-RPC 与进程交互）、统一
 | 前端页面 404 / 显示后端提示页 | 未构建前端：`npm run build:web`（或 `npm run build:all`） |
 | BT 模块报“transmission 不可用” | 运行 `sudo bash deploy/ubuntutr.sh` 完成交互式安装配置，再 `sudo ./deploy.sh --restart`；`sudo ./deploy.sh --check-deps` 可先检查依赖 |
 | BT 模块报 RPC 认证失败(401) | transmission 脚本默认开启密码认证：网页「设置 → transmission RPC」填 用户 `opengl` + 密码，或写 `.env` 的 `TRANSMISSION_RPC_USER/PASSWORD` |
+| 会员专享 / 需登录 / 年龄限制视频下载失败 | 程序已自动尝试多种客户端、长重试、降级等方式；仍失败时请到网页「设置 → 公开视频（yt-dlp）」**上传 cookies.txt**（用有权限的账号登录后导出，扩展名 `Get cookies.txt LOCALLY`），保存后点任务「重试」。详见 [`使用教程.md` §2.3](./使用教程.md) |
+| 解析时报“会员专享”但还想下 | 页面会显示「解析受限（仍可下载）」+「仍然下载（自动多方式尝试）」按钮，直接加入队列即可；配上 cookies 成功率更高 |
 | 公开视频解析报 yt-dlp 不存在 | `pip3 install -U yt-dlp` 或 `apt install -y yt-dlp`（设置页可测试连通性） |
 | aria2 任务一直等待 | 磁盘可用空间低于保留值（默认 10GiB）→ 清理消费者目录或调小 `RESERVE_FREE_BYTES` |
 | 想看看哪些 BT 任务会被出清 | `curl http://localhost:8080/api/bt/stale`（预览，不改数据）；Web「BT 种子」页也有「出清预览」 |
+| 想给 yt-dlp 加代理/自定义参数 | 网页「设置 → 公开视频（yt-dlp）」的「额外参数」填 `--proxy socks5://127.0.0.1:1080`；也可用 `.env` 的 `YTDLP_EXTRA_ARGS` |
 | 想立刻执行一次出清 | `curl -X POST http://localhost:8080/api/bt/evict`；Web「BT 种子」页「立即出清」 |
 | 安卓 App 401 | `.env` 的 `ANDROID_TOKEN` 与 App 里填的 Token 不一致，或未配置 Token |
 | 想在 PC 上解密发布文件 | 用 `openssl enc -d -aes-256-cbc -K $(printf %s "$密码" \| openssl dgst -sha256 -binary \| xxd -p -c256) -iv $(printf %s "$密码" \| openssl dgst -md5 -binary \| xxd -p -c256) -in <文件> -out out.bin`，再按 V-L-T 标记还原原始文件名（与老脚本 `all1.sh` 完全兼容） |

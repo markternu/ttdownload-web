@@ -22,6 +22,9 @@ export function defaultSettings(): Settings {
     ytdlpPath: config.bins.ytdlp,
     ffmpegPath: config.bins.ffmpeg,
     transcodeQuality: '',
+    webvideoCookiesFile: '',
+    webvideoCookiesFromBrowser: config.webvideo.cookiesFromBrowser,
+    webvideoExtraArgs: config.webvideo.extraArgs,
     autoDeleteAfterReport: true,
     btEvict: { ...config.btEvict },
   };

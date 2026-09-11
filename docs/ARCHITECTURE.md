@@ -85,7 +85,15 @@
   - 解析：`yt-dlp -J --no-warnings <url>` → 标题/作者/时长/缩略图/各格式与大小；
   - 下载：`yt-dlp -f <formatId> --newline --progress-template ...` 实时进度、速度、ETA；
   - 平台识别：YouTube / Bilibili / Vimeo / X / TikTok / Instagram / 抖音 等；
-  - 不实现 DRM 破解、不绕过付费墙/登录限制；平台限制时给出清晰中文错误。
+  - **尽力下载策略阶梯**：一次任务按顺序尝试多种方式（指定格式 → 登录态/cookies → 最佳画质 →
+    YouTube 多客户端回退 → 长重试+放宽校验 → `--impersonate` → 内嵌客户端 → 单文件不合并 →
+    仅视频流 → 仅音频保底），**任何一种成功即完成，全部失败才判失败**；错误里带「已自动尝试 N 种方式」。
+  - **解析失败不阻断**：`prepare()` 对解析异常容错（记 `payload.parseError` 后继续），`/parse` 返回
+    `degraded` 结果，前端显示「解析受限（仍可下载）」并允许入队。
+  - **cookies 支持**：`--cookies <file>`（默认 `DOWNLOAD_ROOT/state/cookies.txt`，可在设置页上传）
+    或 `--cookies-from-browser <browser>`，用于会员专享 / 需登录 / 年龄限制 / 人机校验；
+    `--`额外参数（如代理）由设置页 `webvideoExtraArgs` 追加到每次调用。
+  - 仅 DRM 保护等真正无解的情况才立刻失败；会员/登录/私有类错误按 `autoRetry` 自动重试。
 - 下载到 `downd_web_tools`，完成的成品放 `downd_web_tools/downdok`，再移交归档区。
 - 单文件，无需打包。
 

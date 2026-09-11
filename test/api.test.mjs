@@ -19,6 +19,10 @@ fs.writeFileSync(
   `#!/bin/bash
 if [ "$1" = "--version" ]; then echo "2024.01.01"; exit 0; fi
 if [ "$1" = "-J" ]; then
+  if [ -n "$API_PARSE_FAIL" ]; then
+    echo "$API_PARSE_FAIL" >&2
+    exit 1
+  fi
   echo '{"title":"API 测试视频","uploader":"作者","duration":10,"thumbnail":"http://x/t.jpg","formats":[{"format_id":"18","ext":"mp4","resolution":"360p","height":360,"vcodec":"avc1","acodec":"mp4a","filesize":1000}]}'
   exit 0
 fi
@@ -268,6 +272,82 @@ test('管理端文件列表 / 删除记录与删除文件区分', async () => {
 
   const orphans = await get('/api/files/orphans');
   assert.ok(orphans.json.orphans.includes(file.name));
+});
+
+const MEMBERS_ERROR =
+  "ERROR: [youtube] f6kl3G_ek-A: This video is available to this channel's members on level: 高级VIP会员（人工咨询服务） (or any higher level). Join this channel to get access to members-only content and other exclusive perks.";
+
+test('解析受限（会员专享/需登录）：不再返回 400，而是 degraded 结果且仍可入队', async () => {
+  process.env.API_PARSE_FAIL = MEMBERS_ERROR;
+  try {
+    const res = await get('/api/webvideo/parse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://www.youtube.com/watch?v=f6kl3G_ek-A' }),
+    });
+    assert.equal(res.status, 200, '不应再直接 400 拒绝');
+    assert.equal(res.json.degraded, true);
+    assert.match(res.json.parseError, /频道会员专享/);
+    assert.match(res.json.parseError, /cookies/);
+    assert.deepEqual(res.json.formats, []);
+    assert.equal(res.json.platform, 'YouTube');
+
+    // 解析受限也允许入队（下载时自动多方式尝试）
+    const created = await get('/api/webvideo/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://www.youtube.com/watch?v=f6kl3G_ek-A', title: res.json.title }),
+    });
+    assert.equal(created.status, 200);
+    assert.equal(created.json.task.module, 'webvideo');
+  } finally {
+    process.env.API_PARSE_FAIL = '';
+  }
+});
+
+test('cookies 查询 / 上传（JSON 与 multipart）/ 删除', async () => {
+  const before = await get('/api/webvideo/cookies');
+  assert.equal(before.status, 200);
+  assert.equal(before.json.exists, false);
+  assert.match(before.json.defaultPath, /cookies\.txt$/);
+
+  const body = '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n';
+  const uploaded = await get('/api/webvideo/cookies', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: body }),
+  });
+  assert.equal(uploaded.status, 200);
+  assert.equal(uploaded.json.exists, true);
+  assert.ok(uploaded.json.sizeBytes > 0);
+  assert.ok(uploaded.json.updatedAt);
+
+  // 前端走的是 multipart/form-data（字段名 file）
+  const form = new FormData();
+  form.append('file', new Blob([body + '# extra\n'], { type: 'text/plain' }), 'cookies.txt');
+  const viaForm = await fetch(`${base}/api/webvideo/cookies`, { method: 'POST', body: form });
+  assert.equal(viaForm.status, 200);
+  const viaFormJson = await viaForm.json();
+  assert.equal(viaFormJson.exists, true);
+  assert.ok(viaFormJson.sizeBytes > uploaded.json.sizeBytes);
+
+  const removed = await get('/api/webvideo/cookies', { method: 'DELETE' });
+  assert.equal(removed.json.exists, false);
+
+  const empty = await get('/api/webvideo/cookies', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: '   ' }),
+  });
+  assert.equal(empty.status, 400);
+});
+
+test('策略预览接口返回「尽力下载」的方式清单', async () => {
+  const res = await get('/api/webvideo/attempts?url=https://www.youtube.com/watch?v=abc');
+  assert.equal(res.status, 200);
+  assert.ok(res.json.attempts.length >= 8);
+  assert.ok(res.json.attempts.some((a) => a.includes('多客户端')));
+  assert.ok(res.json.attempts.includes('仅音频（保底）'));
 });
 
 test('SSE /api/events 返回事件流', async () => {

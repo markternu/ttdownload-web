@@ -100,6 +100,12 @@ export interface Settings {
   ytdlpPath: string;
   ffmpegPath: string;
   transcodeQuality: string;
+  /** 公开视频 cookies.txt 路径（''=用默认路径 DOWNLOAD_ROOT/state/cookies.txt） */
+  webvideoCookiesFile: string;
+  /** 从浏览器读取 cookies（''=不启用；chrome/chromium/edge/firefox/...） */
+  webvideoCookiesFromBrowser: string;
+  /** 追加到所有 yt-dlp 调用的额外参数（空格分隔，如 --proxy socks5://127.0.0.1:1080） */
+  webvideoExtraArgs: string;
   autoDeleteAfterReport: boolean;
   /** BT 出清机制（长时间无资源/停滞/极慢 -> 清理任务与 incomplete 目录） */
   btEvict: {

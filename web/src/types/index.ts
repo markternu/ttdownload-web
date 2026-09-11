@@ -87,6 +87,9 @@ export interface Settings {
   transmissionRpc: { host: string; port: number; user: string; password: string }
   ytdlpPath: string // 默认 yt-dlp
   ffmpegPath: string // 默认 ffmpeg
+  webvideoCookiesFile: string // 服务器上 cookies.txt 路径，''=未设置（会员/登录视频需要）
+  webvideoCookiesFromBrowser: string // '' | 'chrome' | 'chromium' | 'edge' | 'firefox' | 'brave' | 'opera' | 'vivaldi' | 'safari'
+  webvideoExtraArgs: string // 追加给 yt-dlp 的额外参数（空格分隔），''=无
   transcodeQuality: string // 预留
   autoDeleteAfterReport: boolean // 安卓上报后是否删除（默认 true）
   /** BT 出清机制（长时间无资源/停滞/极慢 -> 清理任务与 incomplete 目录） */
@@ -99,6 +102,16 @@ export interface Settings {
     slowEtaHours: number // 预计剩余时间阈值（小时，默认 72）
     checkIntervalMin: number // 检查周期（分钟，默认 5）
   }
+}
+
+/** yt-dlp cookies 状态（GET/POST/DELETE /api/webvideo/cookies） */
+export interface CookiesStatus {
+  cookiesFile: string // 当前生效的 cookies 文件绝对路径（可能来自设置或默认路径）
+  defaultPath: string // 服务器默认路径（DOWNLOAD_ROOT/state/cookies.txt）
+  exists: boolean
+  sizeBytes: number
+  updatedAt: string | null // ISO 时间
+  fromBrowser: string // 设置里的“从浏览器读取”，''=未启用
 }
 
 /** BT 出清检查结果（/api/bt/stale 预览、/api/bt/evict 执行） */
@@ -220,6 +233,10 @@ export interface ParseResult {
   formats: FormatOption[]
   defaultFormatId: string
   expectedBytes: number
+  /** 解析受限于登录/会员/年龄等原因时为 true（仍可强行加入队列，下载时会自动多方式尝试） */
+  degraded?: boolean
+  /** degraded 时的具体原因 */
+  parseError?: string
 }
 
 export interface Aria2SubmitResponse {

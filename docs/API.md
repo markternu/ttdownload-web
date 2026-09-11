@@ -185,9 +185,24 @@ interface SeedItem {
 | POST | `/api/webvideo/parse` | `{ url: string }` → `{ platform, title, thumbnail, durationSec, author, formats: FormatOption[], defaultFormatId, expectedBytes }` |
 | POST | `/api/webvideo/tasks` | `{ url, formatId?, quality?, title? }` → `{ task: Task }` |
 | GET | `/api/webvideo/platforms` | 支持的平台清单（首页提示用） |
+| GET | `/api/webvideo/cookies` | cookies 状态 `{ cookiesFile, defaultPath, exists, sizeBytes, updatedAt, fromBrowser }` |
+| POST | `/api/webvideo/cookies` | 上传 cookies.txt：`multipart/form-data` 字段 `file`，或 JSON `{ text }` → 同上状态；写入 600 权限 |
+| DELETE | `/api/webvideo/cookies` | 删除 cookies 文件 → 状态 |
+| GET | `/api/webvideo/attempts?url=&formatId=` | 「尽力下载」会依次尝试的方式名列表（排障用） |
 
-失败时 `error.message` 必须是可读中文，例如：
-`该平台不支持直接下载`、`视频不可访问或已被删除`、`URL 格式错误`、`解析超时`。
+**`/api/webvideo/parse` 的降级行为**：解析失败（会员专享 / 需登录 / 年龄限制 / 网络超时…）**不再返回 400**，
+而是 `200` + `{ degraded: true, parseError: "<中文原因>", title: url, formats: [], defaultFormatId: null, expectedBytes: 0 }`，
+前端据此展示「解析受限（仍可下载）」，用户仍可入队；真正能不能下交给下载时的策略阶梯。
+
+失败时 `error.message` 必须是可读中文，并给出**下一步动作**，例如：
+`该平台不支持解析该链接`、`视频不可访问（可能已删除、地区限制或需要登录）`、
+`该视频是「频道会员专享」…请上传 cookies.txt 后重试`、`该视频受 DRM 保护（任何下载工具都无法直接下载）`。
+
+**下载策略阶梯**（`src/modules/webvideo.ts` 的 `buildDownloadAttempts`）：一次任务会按顺序自动尝试
+指定格式 → 登录态(+cookies) → 最佳画质 → 多客户端回退 → 长重试/放宽校验 → 浏览器指纹 →
+内嵌播放器 → 单文件直下 → 仅视频流 → 仅音频保底；全部失败才报错，错误里会列出试过的方式数。
+会员/登录/私有类错误**不属于永久错误**，会走满 `autoRetry` 次自动重试；
+仅 `URL 格式错误 / 不支持该链 / DRM / 未安装 yt-dlp` 等才立即判失败。
 
 ---
 
