@@ -194,3 +194,24 @@ test('运维子命令齐备：--update / --stop / --start / --logs / --logs-foll
   assert.match(deploySrc, /SCRIPT_UPLOAD_ENABLED=0/, '应给现有 .env 补齐修复脚本开关');
   assert.match(deploySrc, /PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1/, '应跳过 playwright 浏览器下载');
 });
+
+test('内置环境脚本：diagnose-env.sh 与 fix-node20.sh 存在、可执行、内容正确', () => {
+  const scripts = [
+    { file: 'deploy/scripts/diagnose-env.sh', must: [/体检/, /aria2/, /yt-dlp/, /resolve_host/, /exit 0/], readonly: true },
+    { file: 'deploy/scripts/fix-node20.sh', must: [/setup_20\.x/, /npm ci/, /npm run build/, /systemctl restart/, /回滚/], readonly: false },
+  ];
+  for (const { file, must, readonly } of scripts) {
+    const full = path.join(projectRoot, file);
+    assert.ok(fs.existsSync(full), `${file} 应存在`);
+    const text = fs.readFileSync(full, 'utf8');
+    for (const re of must) assert.match(text, re, `${file} 应包含 ${re}`);
+    // 语法检查（bash -n）
+    execFileSync('bash', ['-n', full]);
+    // 可执行位
+    const mode = fs.statSync(full).mode & 0o777;
+    assert.ok((mode & 0o100) !== 0, `${file} 应有可执行位（实际 ${mode.toString(8)}）`);
+    if (readonly) {
+      assert.equal(/\brm -rf\b|apt-get install|npm install/.test(text), false, '只读体检脚本不应包含修改性命令');
+    }
+  }
+});

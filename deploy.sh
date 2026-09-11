@@ -23,6 +23,10 @@
 #      sudo ./deploy.sh --logs       # 查看最近日志（默认 200 行；--logs 500 可指定行数）
 #      sudo ./deploy.sh --logs-follow# 实时跟踪日志（Ctrl+C 退出）
 #      sudo ./deploy.sh --collect    # 【服务起不来也能用】离线打包日志到当前目录，发给开发者排查
+#
+#  环境问题自检/修复脚本（可在网页「修复脚本」页上传执行，也可 sudo bash 直接跑）：
+#      deploy/scripts/diagnose-env.sh   只读体检（Node/aria2/transmission/yt-dlp/DNS/磁盘/服务）
+#      deploy/scripts/fix-node20.sh     Node 升级到 20 并重建依赖、重启服务（幂等）
 #      sudo ./deploy.sh --uninstall  # 停止并移除 systemd 服务（保留数据目录）
 #
 #  脚本做的事：
