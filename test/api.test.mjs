@@ -192,6 +192,31 @@ test('设置读取/更新 + 工具连通性测试', async () => {
   assert.equal(upd.json.maxConcurrent, 5);
   assert.equal(upd.json.theme, 'dark');
 
+  // 回归：公开视频 cookies / 额外参数必须能保存（PUT 白名单曾漏掉这三个字段）
+  const cookiesPath = '/ttdownload/state/cookies.txt';
+  const wv = await get('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      webvideoCookiesFile: cookiesPath,
+      webvideoCookiesFromBrowser: 'chrome',
+      webvideoExtraArgs: '--proxy socks5://127.0.0.1:1080',
+    }),
+  });
+  assert.equal(wv.status, 200);
+  assert.equal(wv.json.webvideoCookiesFile, cookiesPath);
+  assert.equal(wv.json.webvideoCookiesFromBrowser, 'chrome');
+  assert.equal(wv.json.webvideoExtraArgs, '--proxy socks5://127.0.0.1:1080');
+  const reread = await get('/api/settings');
+  assert.equal(reread.json.webvideoCookiesFile, cookiesPath, '重新读取设置应保留 cookies 路径');
+  assert.equal(reread.json.webvideoExtraArgs, '--proxy socks5://127.0.0.1:1080');
+  // 还原，避免影响后续用例（cookies 接口测试用的是默认路径）
+  await get('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ webvideoCookiesFile: '', webvideoCookiesFromBrowser: '', webvideoExtraArgs: '' }),
+  });
+
   const test1 = await get('/api/settings/test-connection', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -306,6 +331,11 @@ test('解析受限（会员专享/需登录）：不再返回 400，而是 degra
 });
 
 test('cookies 查询 / 上传（JSON 与 multipart）/ 删除', async () => {
+  await get('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ webvideoCookiesFile: '' }),
+  });
   const before = await get('/api/webvideo/cookies');
   assert.equal(before.status, 200);
   assert.equal(before.json.exists, false);

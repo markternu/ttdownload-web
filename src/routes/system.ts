@@ -124,6 +124,9 @@ systemRouter.put(
       'ytdlpPath',
       'ffmpegPath',
       'transcodeQuality',
+      'webvideoCookiesFile',
+      'webvideoCookiesFromBrowser',
+      'webvideoExtraArgs',
       'autoDeleteAfterReport',
       'btEvict',
     ];
