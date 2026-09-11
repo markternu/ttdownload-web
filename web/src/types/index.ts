@@ -304,3 +304,57 @@ export interface TaskQuery {
   page?: number
   pageSize?: number
 }
+
+/* ------------------------------ 日志 / 调试 ------------------------------ */
+
+/** 日志级别（error 最严重，trace 最啰嗦） */
+export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace'
+
+/** 日志尾部内容（GET /api/system/logs） */
+export interface LogsTail {
+  file: string // 当前日志文件绝对路径
+  dir: string // 日志目录
+  files: { name: string; sizeBytes: number; mtime: string }[] // 目录内全部日志文件（最新在前）
+  debugMode: boolean // 是否开启 Debug 模式（记录外部命令 argv / 退出码 / stdout 摘要）
+  logLevel: LogLevel // 当前落盘日志级别
+  markers: { marker: string; description: string }[] // 全部标记及含义
+  usedMarkers: string[] // 日志里已出现过的标记
+  lines: string[] // 原始日志行，最新在最后
+}
+
+/** 调试开关状态（GET/POST /api/system/debug，即 LogsTail 去掉 lines） */
+export interface DebugStatus {
+  file: string
+  dir: string
+  files: { name: string; sizeBytes: number; mtime: string }[]
+  debugMode: boolean
+  logLevel: LogLevel
+  markers: { marker: string; description: string }[]
+  usedMarkers: string[]
+}
+
+/* ------------------------------ 网络自检 ------------------------------ */
+
+/** 自检单项状态：ok 通过 / fail 失败 / skip 跳过 / running 进行中 */
+export type CheckStatus = 'ok' | 'fail' | 'skip' | 'running'
+
+/** 单条出网自检结果（GET /api/webvideo/network） */
+export interface NetworkCheck {
+  id: string // 'proxy' | 'dns' | 'https-google' | 'https-youtube' | 'https-github' | 'ytdlp-version' | 'ytdlp-youtube-meta' | 'youtube-cdn' | 'aria2-rpc' | 'transmission-rpc'
+  label: string // 中文名，例如「YouTube 视频元数据（yt-dlp -J）」
+  status: CheckStatus
+  latencyMs: number | null // 耗时（毫秒），未执行/失败时可能为 null
+  detail: string // 成功信息或失败原因（可能较长，含原始报错）
+  hint?: string // 失败时的修复建议（中文）
+  group: 'net' | 'ytdlp' | 'local' // 分组：基础网络 / yt-dlp / 本机下载服务
+}
+
+/** 网络自检报告（GET /api/webvideo/network?refresh=1） */
+export interface NetworkReport {
+  checkedAt: string // 本次检测时间（ISO）
+  cached: boolean // 是否直接返回服务端 60s 缓存
+  overall: 'ok' | 'partial' | 'fail' // 总体结论
+  summary: string // 一句话中文结论
+  proxy: { env: Record<string, string>; extraArgs: string } // 服务端实际生效的代理配置
+  checks: NetworkCheck[]
+}

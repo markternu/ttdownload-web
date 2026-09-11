@@ -23,6 +23,9 @@ export class Aria2Client {
     };
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeoutMs);
+    const startedAt = Date.now();
+    const scoped = logger.child('aria2');
+    scoped.debug(`[MARK:ARIA2_RPC] -> ${method}`, { params: params.length ? params : undefined, timeoutMs });
     try {
       const res = await fetch(this.url, {
         method: 'POST',
@@ -38,9 +41,17 @@ export class Aria2Client {
         throw new Error(`aria2 RPC 响应无法解析: ${text.slice(0, 200)}`);
       }
       if (!res.ok || json.error) {
+        scoped.warn(`[MARK:ARIA2_RPC] <- ${method} 失败 http=${res.status}（${Date.now() - startedAt}ms）`, {
+          error: json.error,
+          body: text.slice(0, 400),
+        });
         throw new Error(`aria2 RPC 错误: ${json.error?.message ?? res.status}`);
       }
+      scoped.debug(`[MARK:ARIA2_RPC] <- ${method} ok（${Date.now() - startedAt}ms）`, { result: json.result });
       return json.result as T;
+    } catch (e) {
+      scoped.warn(`[MARK:ARIA2_RPC] <- ${method} 异常（${Date.now() - startedAt}ms）: ${(e as Error).message}`);
+      throw e;
     } finally {
       clearTimeout(timer);
     }
@@ -128,6 +139,7 @@ export async function ensureAria2Daemon(): Promise<{ ok: boolean; message: strin
       ...(config.aria2Rpc.secret ? [`--rpc-secret=${config.aria2Rpc.secret}`] : []),
     ];
     let spawnError: string | null = null;
+    logger.child('aria2').mark('ARIA2_DAEMON', '拉起 aria2c 守护进程', { bin: config.bins.aria2, args });
     const child = spawn(config.bins.aria2, args, { detached: true, stdio: 'ignore' });
     child.on('error', (e) => {
       // 必须消费 error 事件，否则会变成 uncaughtException 拖垮进程

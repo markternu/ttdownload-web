@@ -219,6 +219,41 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     }
   });
 
+  test('首页：网络自检面板显示各项检测结果', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(base, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=网络自检', { timeout: 15000 });
+    // 结论徽标：正常/部分可用/异常 三者之一
+    await page.waitForSelector('text=/网络正常|部分可用|网络异常/', { timeout: 30000 });
+    assert.ok((await page.locator('text=/基础网络|yt-dlp/').count()) > 0, '应展示分组与检查项');
+    assert.ok((await page.getByRole('button', { name: /重新检测/ }).count()) > 0, '应有重新检测按钮');
+    // 至少能看到 yt-dlp 与 DNS 两类检查
+    assert.ok((await page.locator('text=/DNS 解析|yt-dlp 可执行/').count()) > 0, '应展示具体检查项');
+    await page.getByRole('button', { name: /重新检测/ }).first().click();
+    await page.waitForTimeout(1500);
+    assert.deepEqual(pageErrors, [], `重新检测不应报错：${pageErrors.join('; ')}`);
+    await page.close();
+  });
+
+  test('日志页：可查看/过滤日志并导出诊断包', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/logs`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=/日志文件|日志目录|标记说明/', { timeout: 15000 });
+    assert.ok((await page.locator('text=/日志文件|日志目录/').count()) > 0, '应显示日志文件信息');
+    assert.ok((await page.getByRole('button', { name: /刷新/ }).count()) > 0, '应有刷新按钮');
+    assert.ok((await page.getByRole('button', { name: /下载当前日志|下载/ }).count()) > 0, '应有下载日志按钮');
+    assert.ok((await page.getByRole('button', { name: /导出诊断包/ }).count()) > 0, '应有一键导出诊断包');
+    assert.ok((await page.getByRole('button', { name: /清空/ }).count()) > 0, '应有清空日志按钮');
+    // 日志区应至少有内容（页面自身的 HTTP 请求就会产生日志行）
+    const text = await page.locator('body').innerText();
+    assert.ok(/MARK:|\[INFO|\[DEBUG|\[WARN|\[ERROR/.test(text), '应能看到日志行内容');
+    // 标记说明表
+    assert.ok(/TASK_CREATE|YTDLP_ATTEMPT|HTTP_REQ/.test(text), '应展示标记说明');
+    await page.close();
+  });
+
   test('页面无 JS 报错', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     assert.deepEqual(pageErrors, [], `浏览器控制台错误：\n${pageErrors.join('\n')}`);

@@ -60,7 +60,7 @@ export function cleanupPublished(ids: number[]): CleanupResult {
       filesRepo.markDownloaded(id);
       result.deleted += 1;
       result.freedBytes += size;
-      logger.info(`消费者已下载完成，删除服务器文件: ${file.path}（释放 ${size} 字节）`);
+      logger.child('cleanup').mark('CLEANUP', `消费者已下载完成，删除服务器文件: ${file.path}`, { sizeBytes: size });
       bus.emitFile({ action: 'deleted', id, path: file.path, freedBytes: size });
     } catch (e) {
       result.errors.push({ id, message: (e as Error).message });

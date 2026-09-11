@@ -3,7 +3,7 @@ import path from 'node:path';
 import { config } from '../core/config';
 import { bus } from '../core/events';
 import { filesRepo, tasksRepo } from '../core/db';
-import { logger } from '../core/logger';
+import { logger, taskLog } from '../core/logger';
 import { archiveTaskFiles, moveWithDedup } from './archive';
 import { encryptFile, stripExtension } from './crypto';
 import { encryptPassword, getSettings } from './settings';
@@ -89,13 +89,13 @@ async function processEncrypting(): Promise<void> {
       publishedName: path.basename(finalPath),
       payload: { ...payload, publishedPath: finalPath, fileId },
     });
-    logger.info(`发布完成: ${originalName} -> ${finalPath} (${sizeBytes} 字节)`);
+    taskLog(task.id, 'pipeline').mark('PUBLISH', `发布完成: ${originalName} -> ${finalPath}`, { sizeBytes, finalPath });
 
     // BT "按可播放处理"的任务：发布完成后清理下载目录 / transmission incomplete 目录（释放空间并广播）
     if (payload.pendingDirCleanup) {
       const torrentName = String(payload.pendingDirCleanupName ?? originalName);
       const freedBytes = cleanupBtTaskDirs(tasksRepo.get(task.id) as Task, torrentName, 'bt-salvage-cleanup');
-      logger.info(`BT 出清[挽救] 清理任务目录完成，释放 ${(freedBytes / 1024 / 1024).toFixed(1)}MB`);
+      taskLog(task.id, 'pipeline').mark('BT_CLEANUP', `出清挽救后清理任务目录完成，释放 ${(freedBytes / 1024 / 1024).toFixed(1)}MB`, { freedBytes });
     }
     const updated = tasksRepo.get(task.id);
     bus.emitTask(updated);
@@ -125,7 +125,7 @@ export async function pipelineTick(): Promise<void> {
     await processArchiving();
     await processEncrypting();
   } catch (e) {
-    logger.error(`流水线异常: ${(e as Error).message}`);
+    logger.child('pipeline').error(`[MARK:ERROR] 流水线异常: ${(e as Error).stack ?? (e as Error).message}`);
   } finally {
     running = false;
   }
@@ -136,7 +136,7 @@ export function startPipeline(): void {
   timer = setInterval(() => {
     void pipelineTick();
   }, config.pipelineIntervalMs);
-  logger.info(`归档/加密流水线已启动（每 ${Math.round(config.pipelineIntervalMs / 1000)} 秒一轮）`);
+  logger.mark('BOOT', `归档/加密流水线已启动（每 ${Math.round(config.pipelineIntervalMs / 1000)} 秒一轮）`);
 }
 
 export function stopPipeline(): void {
@@ -158,5 +158,9 @@ export function handoffToArchive(taskId: number, downloadedPaths: string[], orig
   });
   const task = tasksRepo.get(taskId);
   bus.emitTask(task);
-  logger.info(`任务 #${taskId} 下载完成，进入归档队列（${downloadedPaths.length} 个文件）`);
+  taskLog(taskId, 'pipeline').mark('PIPELINE', `下载完成，进入归档队列（${downloadedPaths.length} 个文件）`, {
+    originalName,
+    sizeBytes,
+    files: downloadedPaths,
+  });
 }

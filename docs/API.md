@@ -216,6 +216,43 @@ interface SeedItem {
 
 ---
 
+## 6.5 日志 / 调试 / 诊断（调试期）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/system/logs?lines=300&level=all&q=&marker=&limit=200` | 返回 `{ file, dir, files[], debugMode, logLevel, markers[], usedMarkers[], lines[], items[] }`；`lines` 为文件尾部原文（最新在最后），`items` 为数据库结构化事件（兼容旧前端） |
+| GET | `/api/system/logs/download?file=app.log` | 下载日志文件（`text/plain` 附件；`file` 取自 `files[].name`） |
+| DELETE | `/api/system/logs` | 清空所有日志文件 → `{ ok, cleared, bytes }` |
+| GET | `/api/system/debug` | 调试状态：`{ file, dir, files, debugMode, logLevel, markers, usedMarkers }` |
+| POST | `/api/system/debug` | `{ debugMode?: boolean, logLevel?: 'error'|'warn'|'info'|'debug'|'trace' }`，运行时生效，无需重启 |
+| GET | `/api/system/diagnostics` | **一键诊断包**（JSON 附件）：app/env/config/settings/disk/tools/tasks/events/network/markers/logs，密钥自动脱敏 |
+
+以上端点同时挂在 `/api/...` 与 `/api/system/...` 两个前缀下。
+
+日志行格式：`ISO时间 [LEVEL] [MARK:XXX] [scope] 消息 :: {结构化细节}`；标记清单见 `src/core/logger.ts` 的 `MARKERS`
+（[`排查手册.md`](./排查手册.md) 有完整对照表）。脱敏覆盖 `token/password/secret/authorization/api_key/Bearer`。
+
+## 6.6 网络自检
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/webvideo/network?refresh=1` | 逐项实测并返回报告；默认缓存 60 秒，`refresh=1` 强制重测 |
+
+```ts
+interface NetworkReport {
+  checkedAt: string; cached: boolean; overall: 'ok' | 'partial' | 'fail'; summary: string;
+  proxy: { env: Record<string, string>; extraArgs: string };
+  checks: {
+    id: string; label: string; status: 'ok' | 'fail' | 'skip' | 'running';
+    latencyMs: number | null; detail: string; hint?: string; group: 'net' | 'ytdlp' | 'local';
+  }[];
+}
+```
+
+检查项：`proxy`、`dns`（youtube/googlevideo/github）、`https-google`、`https-youtube`、`https-github`、
+`ytdlp-version`、`ytdlp-youtube-meta`（真去解析公开测试视频）、`youtube-cdn`（拿到直链后读 1 字节）、
+`aria2-rpc`、`transmission-rpc`。失败项都带中文 `hint` 修复建议。
+
 ## 7. 设置
 
 | 方法 | 路径 | 说明 |

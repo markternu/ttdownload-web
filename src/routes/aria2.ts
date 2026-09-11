@@ -22,6 +22,7 @@ aria2Router.post(
   '/urls',
   asyncHandler(async (req, res) => {
     const urls = splitUrls(req.body?.urls ?? req.body?.url ?? '');
+    logger.child('aria2').mark('TASK_CREATE', `收到 ${urls.length} 个 URL 提交`, { urls: urls.slice(0, 20), total: urls.length });
     if (urls.length === 0) throw badRequest('请至少输入一个 URL');
     if (urls.length > 200) throw badRequest('一次最多提交 200 个 URL');
 

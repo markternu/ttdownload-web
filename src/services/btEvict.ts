@@ -247,7 +247,7 @@ async function handleTask(task: Task, dryRun: boolean): Promise<{ candidate: Sta
     candidate.detail = `进度 ${percent}% ≥ ${settings.salvagePercent}%，按"未下完但可播放"处理，移交归档（${salvageableFiles.length} 个文件）`;
     if (dryRun) return { candidate, summary: { evicted: false, salvaged: false, freedBytes: 0 } };
 
-    logger.warn(`BT 出清[挽救] 任务 #${task.id} ${candidate.title}: ${candidate.detail}`);
+    logger.child('bt-evict').warn(`[MARK:BT_EVICT] 挽救（进度≥阈值，按可播放处理）任务 #${task.id} ${candidate.title}: ${candidate.detail}`, candidate);
     // 1) 先停任务，避免边移边写
     const client = transmissionClient();
     await client.call('torrent-stop', { ids: [snap.id] }).catch((e) => logger.warn(`BT 出清停止任务失败: ${(e as Error).message}`));
@@ -288,7 +288,7 @@ async function handleTask(task: Task, dryRun: boolean): Promise<{ candidate: Sta
 
   if (dryRun) return { candidate, summary: { evicted: false, salvaged: false, freedBytes: 0 } };
 
-  logger.warn(`BT 出清[删除] 任务 #${task.id} ${candidate.title}: ${candidate.detail}`);
+  logger.child('bt-evict').warn(`[MARK:BT_EVICT] 出清删除任务 #${task.id} ${candidate.title}: ${candidate.detail}`, candidate);
   const client = transmissionClient();
   await client.call('torrent-remove', { ids: [snap.id], 'delete-local-data': true }).catch((e) => logger.warn(`BT 出清删除 transmission 任务失败: ${(e as Error).message}`));
   const freedBytes = cleanupBtTaskDirs(task, snap.name || task.title, 'bt-evict');
@@ -329,7 +329,7 @@ export async function runBtEvict({ dryRun = false } = {}): Promise<EvictSummary>
       else summary.kept += 1;
       summary.freedBytes += r.freedBytes;
     } catch (e) {
-      logger.error(`BT 出清检查任务 #${task.id} 异常: ${(e as Error).message}`);
+      logger.child('bt-evict').error(`[MARK:BT_EVICT] 出清检查任务 #${task.id} 异常: ${(e as Error).stack ?? (e as Error).message}`);
       summary.kept += 1;
     }
   }
@@ -367,7 +367,7 @@ export function startBtEvictWorker(): void {
       try {
         await runBtEvict();
       } catch (e) {
-        logger.error(`BT 出清定时检查失败: ${(e as Error).message}`);
+        logger.child('bt-evict').error(`[MARK:BT_EVICT] 出清定时检查失败: ${(e as Error).stack ?? (e as Error).message}`);
       } finally {
         running = false;
       }

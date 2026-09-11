@@ -76,9 +76,9 @@ export function removeDirs(dirs: string[]): RemoveDirsResult {
       fs.rmSync(dir, { recursive: true, force: true });
       freedBytes += size;
       removed.push(dir);
-      logger.info(`目录清理已删除: ${dir}（释放 ${(size / 1024 / 1024).toFixed(1)}MB）`);
+      logger.child('bt-cleanup').mark('BT_CLEANUP', `目录清理已删除: ${dir}`, { freedBytes: size, removedCount: removed.length + 1 });
     } catch (e) {
-      logger.error(`目录清理删除失败 ${dir}: ${(e as Error).message}`);
+      logger.child('bt-cleanup').error(`[MARK:BT_CLEANUP] 目录清理删除失败 ${dir}: ${(e as Error).message}`);
       skipped.push(dir);
     }
   }

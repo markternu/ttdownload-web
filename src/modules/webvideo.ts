@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../core/config';
-import { logger } from '../core/logger';
+import { logger, taskLog } from '../core/logger';
+import { tailText } from '../core/procLog';
 import { toolStatus } from '../core/disk';
 import type { FormatOption } from '../types';
 import type { ModuleAdapter, PollResult, TaskWithPayload } from './types';
@@ -139,12 +140,20 @@ export async function parseVideo(
     ...(opts.extraArgs ?? []),
     url,
   ];
+  const scoped = logger.child('ytdlp');
+  const parseStartedAt = Date.now();
+  scoped.mark('YTDLP_PARSE', `解析视频元数据: ${url}`, {
+    bin: ytdlpBin,
+    args,
+    cookies: opts.cookiesFile ? opts.cookiesFile : opts.cookiesFromBrowser ? `browser:${opts.cookiesFromBrowser}` : '(无)',
+  });
   const info = await new Promise<YtDlpInfo>((resolve, reject) => {
     const child = spawn(ytdlpBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
+      scoped.warn(`[MARK:YTDLP_PARSE] 解析超时（${timeoutMs}ms）: ${url}`);
       reject(new Error('解析超时（网络较慢或视频较大），请稍后重试'));
     }, timeoutMs);
     child.stdout.on('data', (d: Buffer) => {
@@ -152,20 +161,32 @@ export async function parseVideo(
     });
     child.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
+      scoped.trace(`解析 stderr: ${tailText(d.toString(), 500)}`);
     });
     child.on('error', (e) => {
       clearTimeout(timer);
+      scoped.error(`[MARK:YTDLP_PARSE] 解析进程启动失败: ${e.message}`, { bin: ytdlpBin, args });
       reject(new Error(`解析失败：${e.message}`));
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      const ms = Date.now() - parseStartedAt;
       if (code !== 0) {
+        scoped.warn(`[MARK:YTDLP_PARSE] 解析失败 code=${code}（${ms}ms）: ${url}`, {
+          stderr: tailText(stderr, 1500),
+          stdout: tailText(stdout, 500),
+        });
         reject(new Error(humanizeYtDlpError(stderr || stdout)));
         return;
       }
+      scoped.mark('YTDLP_PARSE', `解析成功 code=0（${ms}ms）: ${url}`, {
+        stdoutBytes: stdout.length,
+        stderr: stderr ? tailText(stderr, 300) : undefined,
+      });
       try {
         resolve(JSON.parse(stdout) as YtDlpInfo);
       } catch {
+        scoped.error(`[MARK:YTDLP_PARSE] 解析结果无法识别（yt-dlp 输出异常）`, { stdout: tailText(stdout, 800) });
         reject(new Error('解析结果无法识别（yt-dlp 输出异常）'));
       }
     });
@@ -454,7 +475,13 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
     text: `方式 ${job.attemptIndex + 1}/${job.attempts.length}：${attempt.label}`,
   };
   const args = [...ctx.commonArgs, ...attempt.args, ctx.url];
-  logger.info(`webvideo #${taskId} 尝试方式 ${job.attemptIndex + 1}/${job.attempts.length}：${attempt.label}`);
+  const scoped = taskLog(taskId, 'ytdlp');
+  scoped.mark('YTDLP_ATTEMPT', `尝试方式 ${job.attemptIndex + 1}/${job.attempts.length}：${attempt.label}`, {
+    bin: config.bins.ytdlp,
+    args,
+    cookies: args.includes('--cookies') ? args[args.indexOf('--cookies') + 1] : args.includes('--cookies-from-browser') ? `browser:${args[args.indexOf('--cookies-from-browser') + 1]}` : '(无)',
+    url: ctx.url,
+  });
   const child = spawn(config.bins.ytdlp, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   job.child = child;
   child.stdout?.on('data', (d: Buffer) => {
@@ -469,26 +496,38 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
     job.stderr += `\n进程启动失败: ${e.message}`;
   });
   child.on('close', (code) => {
-    if (job.cancelled) return;
+    if (job.cancelled) {
+      scoped.mark('YTDLP_EXIT', `方式「${attempt.label}」被用户取消`, { code });
+      return;
+    }
     const exit = code ?? -1;
+    const ms = Date.now() - job.attemptStartedAt;
     if (exit === 0) {
+      scoped.mark('YTDLP_EXIT', `方式「${attempt.label}」成功 code=0（${ms}ms）`, {
+        stdout: tailText(job.stdout, 800),
+        stderr: job.stderr ? tailText(job.stderr, 800) : undefined,
+      });
       job.exitCode = 0;
       return;
     }
     const message = humanizeYtDlpError(job.stderr || job.stdout);
     const failedLabel = job.attempts[job.attemptIndex].label;
     job.attemptErrors.push({ label: failedLabel, message });
+    scoped.warn(
+      `[MARK:YTDLP_EXIT] 方式「${failedLabel}」失败 code=${exit}（${ms}ms）：${message}`,
+      { stderr: tailText(job.stderr, 2000), stdout: tailText(job.stdout, 1000), args },
+    );
     const next = job.attemptIndex + 1;
     if (next < job.attempts.length) {
       job.attemptIndex = next;
-      logger.warn(
-        `webvideo #${taskId} 方式「${failedLabel}」失败（${message}），继续尝试「${job.attempts[next].label}」`,
-      );
       launchAttempt(taskId, job, ctx);
       return;
     }
     job.exitCode = exit;
-    logger.error(`webvideo #${taskId} 全部 ${job.attempts.length} 种方式均失败：${message}`);
+    scoped.error(`[MARK:TASK_FAIL] 全部 ${job.attempts.length} 种方式均失败：${message}`, {
+      triedLabels: job.attempts.map((a) => a.label),
+      attemptErrors: job.attemptErrors,
+    });
   });
   // 若任务在启动瞬间处于暂停状态，直接冻结新进程
   if (job.paused) {
@@ -566,7 +605,7 @@ export const webvideoModule: ModuleAdapter = {
       // 解析失败（会员专享/需登录/年龄限制/超时…）不再直接判任务失败，
       // 而是记下原因继续走「多重策略尽力下载」，只有全部方式都失败才算失败。
       const message = (e as Error).message;
-      logger.warn(`webvideo #${task.id} 解析失败，仍将尝试下载：${message}`);
+      taskLog(task.id).warn(`[MARK:YTDLP_PARSE] 解析失败但仍继续尝试下载：${message}`);
       tasksRepo.update(task.id, {
         title: task.title || task.url,
         error: null,
@@ -578,6 +617,14 @@ export const webvideoModule: ModuleAdapter = {
     const formatId = String((task.payload ?? {}).formatId ?? meta.defaultFormatId ?? '');
     const chosen = meta.formats.find((f) => f.id === formatId) ?? meta.formats.find((f) => f.id === meta.defaultFormatId) ?? null;
     task.expectBytes = chosen?.filesize ?? meta.expectedBytes ?? 0;
+    taskLog(task.id).mark('YTDLP_PARSE', `解析结果：${meta.title}`, {
+      platform: meta.platform,
+      durationSec: meta.durationSec,
+      author: meta.author,
+      formatCount: meta.formats.length,
+      chosenFormat: chosen ? `${chosen.id} ${chosen.resolution} ${chosen.ext}` : '(默认最佳)',
+      expectBytes: task.expectBytes,
+    });
     tasksRepo.update(task.id, {
       title: meta.title,
       platform: meta.platform,
@@ -663,11 +710,16 @@ export const webvideoModule: ModuleAdapter = {
       startedAt: new Date().toISOString(),
       payload: { ...payload, formatId, attempts: attempts.map((a) => a.label) },
     });
-    logger.info(
-      `webvideo 任务已启动 #${task.id} url=${url} format=${formatId || 'default'} 策略数=${attempts.length}${
-        cookiesFile ? ` cookies=${cookiesFile}` : cookiesFromBrowser ? ` cookies来自浏览器=${cookiesFromBrowser}` : ''
-      }`,
-    );
+    logger.child('ytdlp').mark('YTDLP_ATTEMPT', `任务 #${task.id} 策略阶梯已生成（共 ${attempts.length} 种方式）`, {
+      url,
+      formatId: formatId || '(默认)',
+      platform,
+      cookiesFile: cookiesFile ?? '(无)',
+      cookiesFromBrowser: cookiesFromBrowser || '(无)',
+      extraArgs,
+      attempts: attempts.map((a, i) => `${i + 1}. ${a.label}`),
+      workDir: config.dirs.webTools,
+    });
   },
 
   async poll(task): Promise<PollResult> {
@@ -690,10 +742,28 @@ export const webvideoModule: ModuleAdapter = {
     }
     const files = collectOutputFiles(config.dirs.webTools, job.startedAt);
     if (files.length === 0) {
+      let listing: string[] = [];
+      try {
+        listing = fs.readdirSync(config.dirs.webTools);
+      } catch {
+        /* ignore */
+      }
+      taskLog(task.id, 'ytdlp').error('[MARK:YTDLP_DONE] 进程结束但没有找到输出文件', {
+        dir: config.dirs.webTools,
+        listing,
+        stdout: tailText(job.stdout, 1000),
+        stderr: tailText(job.stderr, 1000),
+      });
       return { error: '下载进程结束但没有找到输出文件' };
     }
     files.sort((a, b) => fs.statSync(b).size - fs.statSync(a).size);
     const main = files[0];
+    taskLog(task.id, 'ytdlp').mark('YTDLP_DONE', `下载完成，产物 ${files.length} 个文件`, {
+      files: files.map((f) => ({ path: f, sizeBytes: fs.statSync(f).size })),
+      usedAttempts: job.attemptErrors.length + 1,
+      failedAttempts: job.attemptErrors.map((e) => e.label),
+      totalMs: Date.now() - job.startedAt,
+    });
     const size = fs.statSync(main).size;
     const base = path.basename(main).replace(/\.(mp4|mkv|webm|m4a|mp3|flv|mov|avi)$/i, '');
     return {

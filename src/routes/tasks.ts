@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { tasksRepo } from '../core/db';
 import { cancelTask, deleteTask, pauseTask, resumeTask, retryTask, kickScheduler } from '../core/scheduler';
 import { asyncHandler, badRequest, notFound } from '../utils/http';
+import { logger } from '../core/logger';
 import type { ModuleId, TaskStatus } from '../types';
 
 export const tasksRouter = Router();
@@ -29,6 +30,13 @@ tasksRouter.get('/', (req, res) => {
     pageSize,
   });
   res.json({ items, total, page, pageSize });
+});
+
+tasksRouter.use((req, _res, next) => {
+  if (req.method !== 'GET') {
+    logger.child('tasks').mark('TASK_STATE', `${req.method} ${req.originalUrl}`, { body: req.body });
+  }
+  next();
 });
 
 tasksRouter.get('/:id', (req, res) => {

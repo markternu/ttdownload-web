@@ -13,6 +13,15 @@ import type { PublishedFile } from '../types';
 
 export const androidRouter = Router();
 
+/** 安卓端所有请求都留痕（含鉴权失败），便于排查 App 连不上的问题 */
+androidRouter.use((req, _res, next) => {
+  logger.child('android').mark('ANDROID', `${req.method} ${req.originalUrl}`, {
+    token: req.headers['x-auth-token'] ? '(有)' : req.query.token ? '(query)' : '(无)',
+    ua: req.headers['user-agent'],
+  });
+  next();
+});
+
 /** 安卓接口鉴权：X-Auth-Token 或 ?token= */
 function requireToken(req: Request, _res: Response, next: NextFunction): void {
   const token = config.androidToken;

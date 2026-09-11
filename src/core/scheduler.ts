@@ -1,6 +1,6 @@
 import { config } from './config';
 import { bus } from './events';
-import { logger } from './logger';
+import { logger, taskLog } from './logger';
 import { tasksRepo } from './db';
 import { freeBytes } from './disk';
 import { getSettings } from '../services/settings';
@@ -43,10 +43,24 @@ function failTask(task: TaskWithPayload, message: string): void {
       error: `${message}（第 ${retryCount + 1} 次重试）`,
       speedBps: 0,
     });
-    logger.warn(`任务 #${task.id} 失败将重试(${retryCount + 1}/${settings.autoRetry}): ${message}`);
+    taskLog(task.id).mark('TASK_RETRY', `失败，将自动重试(${retryCount + 1}/${settings.autoRetry})：${message}`);
+    logger.child('scheduler').mark('TASK_FAIL', `任务 #${task.id} 失败（可重试）`, {
+      module: task.module,
+      retryCount: retryCount + 1,
+      autoRetry: settings.autoRetry,
+      message,
+    });
   } else {
     tasksRepo.update(task.id, { status: 'failed', error: message, speedBps: 0, finishedAt: new Date().toISOString() });
-    logger.error(`任务 #${task.id} 失败: ${message}`);
+    logger.child('scheduler').error(`[MARK:TASK_FAIL] 任务 #${task.id} 最终失败（永久错误或重试已用尽）`, {
+      module: task.module,
+      retryCount,
+      autoRetry: settings.autoRetry,
+      permanent: isPermanentError(message),
+      message,
+      url: task.url,
+      title: task.title,
+    });
   }
   emit(task.id);
 }
@@ -83,7 +97,7 @@ async function pollRunning(): Promise<number> {
       }
       applyProgress(task.id, r);
     } catch (e) {
-      logger.error(`轮询任务 #${task.id} 异常: ${(e as Error).message}`);
+      taskLog(task.id).error(`[MARK:ERROR] 轮询任务异常: ${(e as Error).stack ?? (e as Error).message}`);
     }
   }
   return running.length;
@@ -153,7 +167,13 @@ async function startWaiting(): Promise<void> {
     const usable = freeBytes() - settings.reserveFreeBytes - reserved;
     const need = Math.max(0, task.expectBytes || 0);
     if (usable - need < 0) {
-      logger.debug(`任务 #${task.id} 空间不足（需要 ${need} 字节，可用 ${usable}），继续等待`);
+      logger.child('scheduler').mark('DISK_GATE', `任务 #${task.id} 空间不足，继续等待`, {
+        needBytes: need,
+        usableBytes: usable,
+        freeBytes: freeBytes(),
+        reserveBytes: settings.reserveFreeBytes,
+        reservedRunningBytes: reserved,
+      });
       continue;
     }
 
@@ -171,6 +191,12 @@ async function startWaiting(): Promise<void> {
         continue;
       }
       await adapter.start(fresh);
+      logger.child('scheduler').mark('TASK_STATE', `任务 #${task.id} 已启动`, {
+        module: task.module,
+        url: task.url,
+        expectBytes: fresh.expectBytes,
+        usableBytes: usable,
+      });
       emit(task.id);
       running = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
     } catch (e) {
@@ -188,6 +214,7 @@ export async function recoverTasks(): Promise<void> {
       logger.info(`恢复 aria2 任务 #${task.id}（继续跟踪 gid=${(task.payload ?? {}).gid}）`);
       continue;
     }
+    logger.child('scheduler').warn(`[MARK:TASK_STATE] 服务重启后任务 #${task.id} 重新排队（原状态 ${task.status}）`);
     tasksRepo.update(task.id, { status: 'waiting', speedBps: 0, error: '服务重启，任务已重新排队' });
     emit(task.id);
   }
@@ -195,6 +222,8 @@ export async function recoverTasks(): Promise<void> {
   const pipelineTasks = tasksRepo.byStatus(['archiving', 'encrypting']);
   if (pipelineTasks.length) logger.info(`${pipelineTasks.length} 个任务在流水线中间态，已交给流水线继续`);
 }
+
+let lastTickSummary = '';
 
 async function tick(): Promise<void> {
   if (ticking) return;
@@ -209,8 +238,25 @@ async function tick(): Promise<void> {
     await applySpacePressure(usable);
     await resumeSpacePaused(freeBytes() - settings.reserveFreeBytes);
     await startWaiting();
+    if (logger.isDebug()) {
+      const waiting = tasksRepo.byStatus(['waiting']).length;
+      const running = tasksRepo.byStatus(['downloading', 'parsing']).length;
+      const free = freeBytes();
+      if (waiting > 0 || running > 0 || lastTickSummary !== `${waiting}/${running}`) {
+        lastTickSummary = `${waiting}/${running}`;
+        logger.child('scheduler').mark('SCHED_TICK', `等待 ${waiting} / 运行 ${running}`, {
+          waiting,
+          running,
+          freeBytes: free,
+          reserveBytes: settings.reserveFreeBytes,
+          usableBytes: free - settings.reserveFreeBytes - reserved,
+          moduleConcurrency: settings.moduleConcurrency,
+          maxConcurrent: settings.maxConcurrent,
+        });
+      }
+    }
   } catch (e) {
-    logger.error(`调度器异常: ${(e as Error).message}`);
+    logger.child('scheduler').error(`[MARK:ERROR] 调度器异常: ${(e as Error).stack ?? (e as Error).message}`);
   } finally {
     ticking = false;
   }
@@ -220,13 +266,13 @@ export function startScheduler(): void {
   if (timer) return;
   // 空间腾挪广播：只要收到通知（无论释放多少），立刻重新评估等待队列
   bus.on('space-freed', (payload: { bytes?: number; reason?: string }) => {
-    logger.info(`收到空间腾挪通知（${payload?.reason ?? 'unknown'}，释放 ${(Number(payload?.bytes ?? 0) / 1024 / 1024).toFixed(1)}MB），立即重新评估等待队列`);
+    logger.child('scheduler').mark('SPACE_FREED', `收到空间腾挪通知（${payload?.reason ?? 'unknown'}，释放 ${(Number(payload?.bytes ?? 0) / 1024 / 1024).toFixed(1)}MB），立即重新评估等待队列`, payload);
     kickScheduler();
   });
   timer = setInterval(() => {
     void tick();
   }, config.schedulerIntervalMs);
-  logger.info(`统一下载调度器已启动（每 ${Math.round(config.schedulerIntervalMs / 1000)} 秒一轮，全局并发 ${getSettings().maxConcurrent}，保留空间 ${(getSettings().reserveFreeBytes / 1024 ** 3).toFixed(1)}G）`);
+  logger.mark('BOOT', `统一下载调度器已启动（每 ${Math.round(config.schedulerIntervalMs / 1000)} 秒一轮，全局并发 ${getSettings().maxConcurrent}，保留空间 ${(getSettings().reserveFreeBytes / 1024 ** 3).toFixed(1)}G）`);
 }
 
 export function stopScheduler(): void {
@@ -245,6 +291,7 @@ export async function schedulerTick(): Promise<void> {
 }
 
 export async function pauseTask(taskId: number): Promise<void> {
+  logger.child('scheduler').mark('TASK_STATE', `暂停任务 #${taskId}`);
   const task = tasksRepo.get(taskId) as TaskWithPayload | null;
   if (!task) throw new Error('任务不存在');
   if (task.status === 'waiting') {
@@ -259,6 +306,7 @@ export async function pauseTask(taskId: number): Promise<void> {
 }
 
 export async function resumeTask(taskId: number): Promise<void> {
+  logger.child('scheduler').mark('TASK_STATE', `继续任务 #${taskId}`);
   const task = tasksRepo.get(taskId) as TaskWithPayload | null;
   if (!task) throw new Error('任务不存在');
   if (!['paused', 'failed', 'cancelled'].includes(task.status)) throw new Error(`当前状态（${task.status}）不可继续`);

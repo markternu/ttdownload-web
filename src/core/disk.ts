@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { logger } from './logger';
 import { promisify } from 'node:util';
 import { config } from './config';
 
@@ -74,10 +75,13 @@ export function dirUsage(dir: string): { path: string; bytes: number; files: num
 export async function toolStatus(bin: string, args: string[] = ['--version']): Promise<{ ok: boolean; version: string | null; error?: string }> {
   if (!bin) return { ok: false, version: null, error: '未配置命令' };
   try {
+    const startedAt = Date.now();
     const { stdout, stderr } = await pexec(bin, args, { timeout: 5000 });
+    logger.child('tools').debug(`[MARK:TOOL_STATUS] ${bin} ${args.join(' ')} -> ${(stdout || stderr).trim().slice(0, 120)}（${Date.now() - startedAt}ms）`);
     const text = `${stdout || ''}${stderr || ''}`.trim().split('\n')[0] ?? '';
     return { ok: true, version: text.slice(0, 160) };
   } catch (e) {
+    logger.child('tools').warn(`[MARK:TOOL_STATUS] 探测失败 ${bin} ${args.join(' ')}：${(e as Error).message}`);
     return { ok: false, version: null, error: (e as Error).message };
   }
 }

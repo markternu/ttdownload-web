@@ -41,6 +41,8 @@
 | 实时 | SSE（`/api/events`）推送任务/文件/统计/日志 |
 | 外部工具 | aria2c（JSON-RPC）、transmission-daemon（RPC）、yt-dlp、ffmpeg、openssl、zip/unzip |
 | 部署 | 一键 `deploy.sh`（Ubuntu）+ systemd + Docker/docker-compose |
+| 运维 | `--update` 拉取最新代码并重新部署、`--stop/--start/--restart`、`--logs/--logs-follow` |
+| 调试 | 全链路 `[MARK:XXX]` 标记日志 + 网页「日志」页 + 一键导出诊断包 + 首页「网络自检」 |
 
 ## 三、快速开始（开发环境）
 
@@ -83,13 +85,26 @@ sudo ./deploy.sh
 注册 systemd 服务并启动 → 健康检查并打印访问地址与 Token。
 
 ```bash
-sudo ./deploy.sh --check-deps  # 先体检：列出各依赖是否已装、缺了会怎么处理
-sudo ./deploy.sh --status      # 查看状态
-sudo ./deploy.sh --restart     # 重启
-sudo ./deploy.sh --port 9000   # 指定端口
+sudo ./deploy.sh --check-deps   # 先体检：列出各依赖是否已装、缺了会怎么处理
+sudo ./deploy.sh --update       # 已部署过：git pull + 重建前后端 + 重启 + 健康检查（最常用）
+sudo ./deploy.sh --status       # 查看状态
+sudo ./deploy.sh --restart      # 重启
+sudo ./deploy.sh --stop         # 停止（数据不动）
+sudo ./deploy.sh --start        # 启动
+sudo ./deploy.sh --logs         # 看最近 200 行日志（--logs 2000 指定行数）
+sudo ./deploy.sh --logs-follow  # 实时跟踪日志
+sudo ./deploy.sh --port 9000    # 指定端口
 sudo ./deploy.sh --root /data/ttdownload
-sudo ./deploy.sh --uninstall   # 移除服务（保留数据）
+sudo ./deploy.sh --uninstall    # 移除服务（保留数据）
 ```
+
+### 日志与排查（调试期）
+
+- 日志文件：`/ttdownload/state/app.log`（20MB 轮转），部署日志：`/ttdownload/state/logs/deploy.log`
+- 默认 `LOG_LEVEL=debug`：记录外部命令完整 argv、退出码、stdout/stderr 摘要、HTTP 请求、RPC 调用
+- 网页「**日志**」页：调试开关、级别/标记/关键字过滤、下载日志、清空、**一键导出诊断包**
+- 首页「**网络自检**」：DNS / HTTPS(Google,YouTube,GitHub) / yt-dlp 解析 / googlevideo CDN / 本机 RPC 逐项实测
+- 标记速查与排查流程：见 [`docs/排查手册.md`](./docs/排查手册.md)
 
 ## 五、Docker 部署
 
@@ -168,6 +183,11 @@ curl -s -X POST localhost:8080/api/webvideo/parse \
 curl -s -X POST localhost:8080/api/webvideo/cookies -F 'file=@cookies.txt'
 curl -s localhost:8080/api/webvideo/cookies            # 查看是否已配置
 curl -s localhost:8080/api/webvideo/attempts           # 预览会按哪些方式依次尝试
+curl -s localhost:8080/api/webvideo/network?refresh=1   # 网络自检（DNS/YouTube/CDN/yt-dlp/RPC）
+# 调试与日志
+curl -s 'localhost:8080/api/system/logs?lines=200&marker=TASK_FAIL'
+curl -s -X POST localhost:8080/api/system/debug -H 'Content-Type: application/json' -d '{"debugMode":true}'
+curl -OJ localhost:8080/api/system/diagnostics         # 一键诊断包（发我排查用）
 # 安卓（Token 鉴权）
 curl -s -H "X-Auth-Token: $ANDROID_TOKEN" localhost:8080/api/android/files
 curl -s -X POST -H "X-Auth-Token: $ANDROID_TOKEN" -H 'Content-Type: application/json' \
@@ -181,7 +201,7 @@ npm test          # 构建 + 全部测试（单元/集成/压力，使用 mock �
 npm run typecheck # 只做类型检查
 ```
 
-测试覆盖：加密/V-L-T 兼容性、归档打包命名、归档→加密→发布流水线、
+测试覆盖：日志标记/脱敏/轮转、日志与诊断接口、网络自检、加密/V-L-T 兼容性、归档打包命名、归档→加密→发布流水线、
 aria2/transmission/webvideo 三模块（含 JSON-RPC 与进程交互）、统一队列与磁盘门控、
 任务恢复、REST/安卓 API（含 Range 断点续传、上报删除）、SSE、20 任务压力测试。
 

@@ -6,9 +6,13 @@ import type {
   BtStatus,
   BtUploadResponse,
   CookiesStatus,
+  DebugStatus,
   FileListResponse,
   HealthStatus,
+  LogLevel,
+  LogsTail,
   ModuleId,
+  NetworkReport,
   ParseResult,
   SeedAction,
   SeedItem,
@@ -129,6 +133,37 @@ export const api = {
 
   stats: () => request<Stats>('/api/stats'),
 
+  /* ---------------------------- 日志 / 调试 ---------------------------- */
+
+  /** 读取日志尾部（GET /api/system/logs），最新一行在数组末尾 */
+  getLogs: (params: { lines?: number; level?: string; q?: string; marker?: string } = {}) =>
+    request<LogsTail>('/api/system/logs', {}, {
+      lines: params.lines,
+      level: params.level,
+      q: params.q,
+      marker: params.marker,
+    }),
+
+  /** 清空全部日志文件（DELETE /api/system/logs） */
+  clearLogs: () =>
+    request<{ ok: boolean; cleared: number; bytes: number }>('/api/system/logs', {
+      method: 'DELETE',
+    }),
+
+  /** 读取调试开关 / 日志级别（GET /api/system/debug） */
+  getDebug: () => request<DebugStatus>('/api/system/debug'),
+
+  /** 修改调试开关 / 日志级别（POST /api/system/debug），返回最新状态 */
+  setDebug: (patch: { debugMode?: boolean; logLevel?: LogLevel }) =>
+    request<DebugStatus>('/api/system/debug', jsonBody(patch)),
+
+  /** 日志文件下载地址（可直接 window.open / <a download>；不传 file 时为当前日志文件） */
+  logsDownloadUrl: (file?: string): string =>
+    buildUrl('/api/system/logs/download', file ? { file } : undefined),
+
+  /** 诊断包下载地址（JSON 附件，Content-Disposition: attachment） */
+  diagnosticsDownloadUrl: (): string => buildUrl('/api/system/diagnostics'),
+
   /* ------------------------------ 任务 ------------------------------ */
 
   tasks: (query: TaskQuery = {}) =>
@@ -198,6 +233,10 @@ export const api = {
     )
     return res.platforms ?? res.items ?? []
   },
+
+  /** 网络自检（GET /api/webvideo/network；refresh=true 跳过服务端 60s 缓存） */
+  networkCheck: (refresh = false) =>
+    request<NetworkReport>('/api/webvideo/network', {}, refresh ? { refresh: 1 } : undefined),
 
   /** 读取当前 yt-dlp cookies 状态（GET /api/webvideo/cookies） */
   getWebvideoCookies: () => request<CookiesStatus>('/api/webvideo/cookies'),

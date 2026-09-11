@@ -10,6 +10,7 @@ import {
   Link2,
   ListChecks,
   Magnet,
+  ScrollText,
   Settings as SettingsIcon,
   Video,
   X,
@@ -34,6 +35,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/aria2', label: 'URL 直链', icon: Link2, description: '批量提交直链下载任务' },
   { to: '/bt', label: 'BT 种子', icon: Magnet, description: '上传种子 zip 并入队' },
   { to: '/files', label: '已发布文件', icon: FileVideo2, description: '消费者目录中的加密成品' },
+  { to: '/logs', label: '日志', icon: ScrollText, description: '查看 / 过滤 / 下载日志与诊断包' },
   { to: '/settings', label: '设置', icon: SettingsIcon, description: '下载 / 网络 / 外观 / 系统' },
 ]
 

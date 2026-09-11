@@ -2,12 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { config } from '../core/config';
-import { logger } from '../core/logger';
+import { logger, taskLog } from '../core/logger';
 import { markVlt, nextPublishName, safeFileName } from './crypto';
 
 /** 执行外部命令（数组参数，无 shell 注入风险） */
 export function runCommand(bin: string, args: string[], cwd?: string): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
+    const t0 = Date.now();
+    logger.child('proc').mark('PROC_SPAWN', `执行 ${bin}`, { bin, args, cwd });
     const child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -17,8 +19,17 @@ export function runCommand(bin: string, args: string[], cwd?: string): Promise<{
     child.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
     });
-    child.on('error', (e) => resolve({ code: -1, stdout, stderr: e.message }));
-    child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
+    const done = (code: number): void => {
+      const payload = { bin, code, ms: Date.now() - t0, stdout: stdout.slice(-1500), stderr: stderr.slice(-1500) };
+      if (code === 0) logger.child('proc').mark('PROC_EXIT', `${bin} 退出 code=0（${payload.ms}ms）`, payload);
+      else logger.child('proc').warn(`[MARK:PROC_EXIT] ${bin} 非零退出 code=${code}（${payload.ms}ms）：${(stderr || stdout).slice(-400)}`, payload);
+      resolve({ code, stdout, stderr });
+    };
+    child.on('error', (e) => {
+      logger.child('proc').error(`[MARK:PROC_EXIT] ${bin} 启动失败: ${e.message}`, { bin, args, cwd });
+      resolve({ code: -1, stdout, stderr: e.message });
+    });
+    child.on('close', (code) => done(code ?? -1));
   });
 }
 
@@ -82,7 +93,11 @@ export async function archiveTaskFiles(
       return { ok: false, error: '写入 V-L-T 标记失败' };
     }
     const sizeBytes = fs.statSync(target).size;
-    logger.info(`归档完成: ${originalName} -> ${publishedName} (${sizeBytes} 字节)`);
+    logger.child('archive').mark('ARCHIVE', `归档完成: ${originalName} -> ${publishedName}`, {
+      sizeBytes,
+      archivePath: target,
+      publishedName,
+    });
     return { ok: true, archivePath: target, publishedName, originalName, sizeBytes };
   } catch (e) {
     return { ok: false, error: (e as Error).message };

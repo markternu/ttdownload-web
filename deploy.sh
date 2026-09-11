@@ -13,8 +13,13 @@
 #      sudo ./deploy.sh --port 8080  # 指定端口
 #      sudo ./deploy.sh --root /ttdownload
 #      sudo ./deploy.sh --check-deps # 只检查依赖（aria2/transmission/node/yt-dlp 等）是否已安装，不做任何改动
+#      sudo ./deploy.sh --update     # 【已部署过】拉取最新代码 + 重新构建 + 重启（最常用）
 #      sudo ./deploy.sh --status     # 查看服务状态
 #      sudo ./deploy.sh --restart    # 重启服务
+#      sudo ./deploy.sh --stop       # 停止服务（不删除任何数据）
+#      sudo ./deploy.sh --start      # 启动服务
+#      sudo ./deploy.sh --logs       # 查看最近日志（默认 200 行；--logs 500 可指定行数）
+#      sudo ./deploy.sh --logs-follow# 实时跟踪日志（Ctrl+C 退出）
 #      sudo ./deploy.sh --uninstall  # 停止并移除 systemd 服务（保留数据目录）
 #
 #  脚本做的事：
@@ -35,6 +40,15 @@ DOWNLOAD_ROOT="${DOWNLOAD_ROOT:-/ttdownload}"
 SKIP_APT=0
 SKIP_WEB=0
 ACTION="deploy"
+LOG_LINES=200
+
+DEPLOY_LOG_DIR="${DOWNLOAD_ROOT}/state/logs"
+DEPLOY_LOG="${DEPLOY_LOG_DIR}/deploy.log"
+if mkdir -p "$DEPLOY_LOG_DIR" 2>/dev/null; then
+  # 让脚本的全部输出同时进日志文件（排查部署问题时可直接把这个文件发出来）
+  exec > >(tee -a "$DEPLOY_LOG") 2>&1
+  printf '\n===== %s 执行 deploy.sh %s =====\n' "$(date '+%F %T')" "$*" >>"$DEPLOY_LOG" 2>/dev/null || true
+fi
 
 log()  { printf '\033[1;32m[deploy]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[deploy]\033[0m %s\n' "$*"; }
@@ -47,15 +61,20 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     --root) DOWNLOAD_ROOT="$2"; shift 2 ;;
     --check-deps) ACTION="check-deps"; shift ;;
+    --update) ACTION="update"; shift ;;
     --status) ACTION="status"; shift ;;
     --restart) ACTION="restart"; shift ;;
+    --stop) ACTION="stop"; shift ;;
+    --start) ACTION="start"; shift ;;
+    --logs) ACTION="logs"; shift; if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then LOG_LINES="$1"; shift; fi ;;
+    --logs-follow) ACTION="logs-follow"; shift ;;
     --uninstall) ACTION="uninstall"; shift ;;
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) die "未知参数: $1（--help 查看用法）" ;;
   esac
 done
 
-if [[ $EUID -ne 0 && "$ACTION" != "check-deps" ]]; then
+if [[ $EUID -ne 0 && "$ACTION" != "check-deps" && "$ACTION" != "logs" && "$ACTION" != "logs-follow" ]]; then
   die "请用 root 运行：sudo ./deploy.sh（仅 --check-deps 可以在普通用户下运行）"
 fi
 
@@ -230,6 +249,69 @@ case "$ACTION" in
   check-deps)
     print_dep_status
     exit 0 ;;
+  stop)
+    log "停止服务 ${SERVICE_NAME} ..."
+    systemctl stop "$SERVICE_NAME" || true
+    systemctl status "$SERVICE_NAME" --no-pager | head -8 || true
+    log "已停止（数据目录 ${DOWNLOAD_ROOT} 未改动；重新启动：sudo ./deploy.sh --start）"
+    exit 0 ;;
+  start)
+    log "启动服务 ${SERVICE_NAME} ..."
+    systemctl start "$SERVICE_NAME"
+    sleep 2
+    systemctl status "$SERVICE_NAME" --no-pager | head -8 || true
+    curl -fsS "http://127.0.0.1:${PORT}/api/health" && echo || warn "健康检查失败，看日志：sudo ./deploy.sh --logs"
+    exit 0 ;;
+  logs)
+    APP_LOG="${DOWNLOAD_ROOT}/state/app.log"
+    log "最近 ${LOG_LINES} 行日志（文件：${APP_LOG}）"
+    if [[ -f "$APP_LOG" ]]; then
+      tail -n "$LOG_LINES" "$APP_LOG"
+    else
+      warn "还没有应用日志文件，改用 systemd 日志"
+      journalctl -u "$SERVICE_NAME" -n "$LOG_LINES" --no-pager
+    fi
+    echo
+    log "部署脚本日志：${DEPLOY_LOG}"
+    log "只看某个标记（例如任务创建）：grep 'MARK:TASK_CREATE' ${APP_LOG}"
+    exit 0 ;;
+  logs-follow)
+    APP_LOG="${DOWNLOAD_ROOT}/state/app.log"
+    log "实时跟踪日志（Ctrl+C 退出）：${APP_LOG}"
+    if [[ -f "$APP_LOG" ]]; then
+      tail -f "$APP_LOG"
+    else
+      journalctl -u "$SERVICE_NAME" -f
+    fi
+    exit 0 ;;
+  update)
+    log "更新代码并重新部署 ..."
+    cd "$PROJECT_DIR"
+    if [[ -d .git ]]; then
+      log "git pull（当前版本：$(git log --oneline -1 2>/dev/null || echo 未知)）"
+      git pull --ff-only || die "git pull 失败：请检查网络/凭据，或手动处理冲突后再执行"
+      log "已更新到：$(git log --oneline -1)"
+    else
+      warn "当前目录不是 git 仓库（可能是 scp 上传的），跳过 git pull，仅重新构建"
+    fi
+    log "重新安装依赖并构建后端 ..."
+    if [[ -f package-lock.json ]]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+    npm run build
+    if [[ $SKIP_WEB -eq 0 && -f web/package.json ]]; then
+      log "重新构建前端 ..."
+      (cd web && (npm ci --no-audit --no-fund || npm install --no-audit --no-fund) && npm run build)
+    fi
+    log "重启服务 ${SERVICE_NAME} ..."
+    systemctl restart "$SERVICE_NAME"
+    sleep 3
+    if curl -fsS "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
+      log "更新完成并已重启，健康检查通过 ✅"
+    else
+      warn "更新完成但健康检查失败，请查看日志：sudo ./deploy.sh --logs"
+      journalctl -u "$SERVICE_NAME" -n 40 --no-pager || true
+      exit 1
+    fi
+    exit 0 ;;
   status)
     systemctl status "$SERVICE_NAME" --no-pager || true
     curl -fsS "http://127.0.0.1:${PORT}/api/health" && echo || warn "健康检查失败"
@@ -347,6 +429,10 @@ CONCURRENCY_TRANSMISSION=1
 CONCURRENCY_ARIA2=2
 CONCURRENCY_WEBVIDEO=2
 ANDROID_TOKEN=${ANDROID_TOKEN_VALUE}
+# 调试期：debug 记录外部命令 argv/退出码/stdout 摘要，排查完可改成 info 以减小日志
+LOG_LEVEL=debug
+LOG_MAX_MB=20
+LOG_KEEP_FILES=5
 ARIA2_RPC_HOST=127.0.0.1
 ARIA2_RPC_PORT=6800
 ARIA2_RPC_SECRET=

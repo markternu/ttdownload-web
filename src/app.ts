@@ -20,9 +20,33 @@ export function createApp(): express.Express {
   app.use(express.json({ limit: '5mb' }));
   app.use(express.urlencoded({ extended: false }));
 
-  // 访问日志（精简）
-  app.use((req, _res, next) => {
-    logger.debug(`${req.method} ${req.originalUrl}`);
+  // 访问日志 + 耗时（调试期：请求/响应/异常都有标记，便于 grep）
+  app.use((req, res, next) => {
+    const startedAt = Date.now();
+    const ip = (req.headers['x-forwarded-for'] as string) ?? req.socket.remoteAddress ?? '-';
+    logger.child('http').mark('HTTP_REQ', `${req.method} ${req.originalUrl}`, {
+      ip,
+      ua: req.headers['user-agent'],
+      query: Object.keys(req.query ?? {}).length ? req.query : undefined,
+      contentLength: req.headers['content-length'],
+    });
+    res.on('finish', () => {
+      const ms = Date.now() - startedAt;
+      const payload = {
+        status: res.statusCode,
+        ms,
+        bytes: res.getHeader('content-length') ?? undefined,
+        ip,
+      };
+      if (res.statusCode >= 500) logger.child('http').error(`[MARK:HTTP_RES] ${req.method} ${req.originalUrl} -> ${res.statusCode}（${ms}ms）`, payload);
+      else if (res.statusCode >= 400) logger.child('http').warn(`[MARK:HTTP_RES] ${req.method} ${req.originalUrl} -> ${res.statusCode}（${ms}ms）`, payload);
+      else logger.child('http').mark('HTTP_RES', `${req.method} ${req.originalUrl} -> ${res.statusCode}（${ms}ms）`, payload);
+    });
+    res.on('close', () => {
+      if (!res.writableFinished) {
+        logger.child('http').warn(`连接提前中断 ${req.method} ${req.originalUrl}（${Date.now() - startedAt}ms）`);
+      }
+    });
     next();
   });
 
@@ -58,18 +82,22 @@ export function createApp(): express.Express {
     });
   }
 
-  // 统一错误处理
+  // 统一错误处理（所有异常都写进日志文件，含堆栈）
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const stack = err instanceof Error ? err.stack : String(err);
     if (err instanceof HttpError) {
+      if (err.status >= 500) logger.child('http').error(`[MARK:HTTP_ERR] ${err.code}: ${err.message}`, { stack });
+      else logger.child('http').debug(`[MARK:HTTP_ERR] ${err.code}: ${err.message}`);
       res.status(err.status).json({ error: { code: err.code, message: err.message } });
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
     if (/只支持上传|File too large|Unexpected field/i.test(message)) {
+      logger.child('http').warn(`[MARK:HTTP_ERR] 上传错误: ${message}`);
       res.status(400).json({ error: { code: 'UPLOAD_ERROR', message } });
       return;
     }
-    logger.error(`未处理异常: ${message}`);
+    logger.child('http').error(`[MARK:HTTP_ERR] 未处理异常: ${message}`, { stack });
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: '服务器内部错误' } });
   });
 

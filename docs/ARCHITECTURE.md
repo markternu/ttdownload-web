@@ -187,6 +187,48 @@ Web 端在「BT 种子」页有「出清预览 / 立即出清」按钮，在「�
 
 ---
 
+## 6.2 可观测性：标记日志 + 网络自检 + 诊断包（调试期）
+
+项目处于实操测试阶段，设计目标是「**用户把日志发过来就能定位问题**」。
+
+### 6.2.1 标记（MARK）日志
+
+`src/core/logger.ts`：
+
+- 五级：`error/warn/info/debug/trace`，运行时可切（`POST /api/system/debug` 或网页「日志」页），默认 `debug`
+- 行格式：`ISO时间 [LEVEL] [MARK:XXX] [scope] msg :: {结构化 JSON}`
+- `MARKERS` 常量表登记所有标记及含义（网页会展示对照表，`/api/system/logs` 也会返回）
+- 作用域日志：`logger.child('ytdlp')`、`taskLog(taskId, 'ytdlp')` → `[task#12>ytdlp]`
+- 自动脱敏：`token/password/secret/authorization/api_key/Bearer` → `***`
+- 文件轮转：`LOG_MAX_MB`（默认 20MB）× `LOG_KEEP_FILES`（默认 5），路径 `${state}/app.log`
+- 内存环形缓冲（4000 行）供网页实时查看；`debug` 及以上走 SSE 推给前端
+- 进程级兜底：`uncaughtException` / `unhandledRejection` 写入 `[MARK:ERROR]` 带堆栈
+
+埋点覆盖：HTTP 请求/响应/异常、调度每一拍与磁盘门控数值、任务创建/流转/失败/重试、
+外部命令（`PROC_SPAWN`/`PROC_EXIT`：完整 argv、退出码、耗时、stdout+stderr 摘要）、
+yt-dlp 解析与策略阶梯每一步、aria2/transmission RPC（含 409 协商与认证）、
+流水线归档/加密/发布、BT 出清判定、安卓接口、设置更新、SSE 连接、诊断导出。
+
+### 6.2.2 网络自检（`src/services/netCheck.ts`）
+
+`GET /api/webvideo/network` 逐项真实出网测试（结果缓存 60 秒，`refresh=1` 强刷）：
+
+1. `proxy`：展示 `HTTP(S)_PROXY`/`ALL_PROXY` 与 yt-dlp 额外参数（凭据打码）
+2. `dns`：解析 youtube / googlevideo / github
+3. `https-google` / `https-youtube` / `https-github`：三个独立 HTTPS 探测 + 耗时
+4. `ytdlp-version`：工具可用性
+5. `ytdlp-youtube-meta`：真跑 `yt-dlp -J`（带上用户配置的 cookies/代理）解析公开测试视频
+6. `youtube-cdn`：`--get-url` 拿直链后带 `Range: bytes=0-0` 真读 1 字节 —— **能过这关才代表真的下载得动**
+7. `aria2-rpc` / `transmission-rpc`：本机下载引擎
+
+每项含 `status/latencyMs/detail/hint`，`overall` 聚合为 `ok|partial|fail`，首页「网络自检」面板展示。
+
+### 6.2.3 诊断包
+
+`GET /api/system/diagnostics`：一个 JSON 附件，包含 app/env/config/settings/disk/tools/tasks/events/
+network/markers/logs（每个日志文件尾部 2MB）。环境变量与设置里的 token/密码按 key 名脱敏。
+用途：用户遇到问题时下载后直接发给开发者。
+
 ## 6. 清理（消费者下载完成后删除）
 
 安卓下载完成 → `POST /api/android/done {ids:[...]}` → 服务端：
@@ -205,6 +247,9 @@ Web 端在「BT 种子」页有「出清预览 / 立即出清」按钮，在「�
 | `src/core/logger.ts` | 控制台 + 文件日志（`state/app.log`，按大小滚动） |
 | `src/core/disk.ts` | 分区可用空间、目录大小、10G 门控计算 |
 | `src/core/scheduler.ts` | 唯一调度器：并发限制 + 空间预留 + 暂停/恢复 |
+| `src/core/logger.ts` | 标记日志（级别/轮转/脱敏/环形缓冲）、标记登记表 |
+| `src/core/procLog.ts` | 外部命令调用日志（argv/退出码/耗时/输出摘要） |
+| `src/services/netCheck.ts` | 网络自检（DNS/HTTPS/yt-dlp/CDN/RPC）|
 | `src/modules/*` | transmission / aria2 / webvideo 三个生产者 + 完成检测 |
 | `src/services/archive.ts` | 归档（打包/命名/VLT 标记） |
 | `src/services/crypto.ts` | AES-256-CBC 加密、去后缀、发布 |

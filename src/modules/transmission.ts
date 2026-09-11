@@ -37,6 +37,9 @@ export class TransmissionClient {
 
   async call<T = Record<string, unknown>>(method: string, args: Record<string, unknown> = {}, timeoutMs = 10000): Promise<T> {
     const body = JSON.stringify({ method, arguments: args });
+    const startedAt = Date.now();
+    const scoped = logger.child('transmission');
+    scoped.debug(`[MARK:TR_RPC] -> ${method}`, { args, hasAuth: !!(this.user || this.password) });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), timeoutMs);
@@ -44,6 +47,7 @@ export class TransmissionClient {
         const res = await fetch(this.url, { method: 'POST', headers: this.headers(), body, signal: ac.signal });
         if (res.status === 409) {
           this.sessionId = res.headers.get('x-transmission-session-id') ?? '';
+          scoped.debug(`[MARK:TR_RPC] 409 会话协商，拿到 session-id=${this.sessionId ? '是' : '否'}（第 ${attempt + 1} 次）`);
           continue;
         }
         const text = await res.text();
@@ -53,12 +57,23 @@ export class TransmissionClient {
         } catch {
           throw new Error(`transmission 响应无法解析: ${text.slice(0, 160)}`);
         }
-        if (json.result !== 'success') throw new Error(`transmission 错误: ${json.result}`);
+        if (json.result !== 'success') {
+          scoped.warn(`[MARK:TR_RPC] <- ${method} 失败 result=${json.result} http=${res.status}（${Date.now() - startedAt}ms）`, {
+            body: text.slice(0, 400),
+            authConfigured: !!(this.user || this.password),
+          });
+          throw new Error(`transmission 错误: ${json.result}`);
+        }
+        scoped.debug(`[MARK:TR_RPC] <- ${method} ok（${Date.now() - startedAt}ms）`);
         return (json.arguments ?? {}) as T;
+      } catch (e) {
+        scoped.warn(`[MARK:TR_RPC] <- ${method} 异常（${Date.now() - startedAt}ms）: ${(e as Error).message}`);
+        throw e;
       } finally {
         clearTimeout(timer);
       }
     }
+    scoped.error('[MARK:TR_RPC] transmission 会话协商失败（409 重试后仍失败）：检查 RPC 用户名/密码与 rpc-whitelist');
     throw new Error('transmission 会话协商失败（409）');
   }
 
@@ -103,7 +118,7 @@ export async function scanZipUploads(): Promise<number> {
     const tmpDir = fs.mkdtempSync(path.join(config.dirs.btPending, '.unzip_'));
     const res = await runCommand(config.bins.unzip, ['-o', '-q', '-j', zipPath, '-d', tmpDir]);
     if (res.code !== 0) {
-      logger.error(`解压失败 ${name}: ${res.stderr || res.stdout}`);
+      logger.child('transmission').error(`[MARK:ARCHIVE] 种子 zip 解压失败 ${name}: ${res.stderr || res.stdout}`, { zip: config.bins.unzip });
       fs.rmSync(tmpDir, { recursive: true, force: true });
       continue;
     }
@@ -123,7 +138,7 @@ export async function scanZipUploads(): Promise<number> {
     fs.rmSync(tmpDir, { recursive: true, force: true });
     fs.rmSync(zipPath, { force: true });
     extracted += moved;
-    logger.info(`种子 zip 解压完成: ${name} → ${moved} 个种子`);
+    logger.child('transmission').mark('ARCHIVE', `种子 zip 解压完成: ${name} → ${moved} 个种子`, { outputDir: config.dirs.btQueued });
   }
   return extracted;
 }
@@ -263,7 +278,13 @@ export const transmissionModule: ModuleAdapter = {
       },
       meta: { ...(task.meta ?? {}), files: wantedIdx.map((i) => files[i]?.name ?? '') },
     });
-    logger.info(`BT 任务已启动 #${task.id} torrent=${torrentId} 选中 ${wantedIdx.length} 个文件 共 ${(selectedBytes / 1024 / 1024).toFixed(1)}MB`);
+    logger.child('transmission').mark('TASK_STATE', `BT 任务已启动 #${task.id}`, {
+      torrentId,
+      selectedFiles: wantedIdx.length,
+      selectedBytes,
+      downloadDir: config.dirs.btDownload,
+      incompleteDir: config.transmissionIncompleteDir,
+    });
   },
 
   async poll(task): Promise<PollResult> {

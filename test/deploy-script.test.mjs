@@ -169,3 +169,15 @@ test('deploy/ubuntutr.sh 与原始脚本逐字节一致（交互提示原样保�
     assert.ok(text.includes(prompt), `应保留交互提示: ${prompt}`);
   }
 });
+
+test('运维子命令齐备：--update / --stop / --start / --logs / --logs-follow', () => {
+  for (const sub of ['--update', '--stop', '--start', '--logs', '--logs-follow', '--restart', '--status', '--uninstall']) {
+    assert.ok(deploySrc.includes(sub), `deploy.sh 应支持 ${sub}`);
+  }
+  assert.match(deploySrc, /git pull --ff-only/, '--update 应拉取最新代码');
+  assert.match(deploySrc, /npm run build/, '--update 应重新构建后端');
+  assert.match(deploySrc, /systemctl restart/, '--update 应重启服务');
+  assert.match(deploySrc, /tail -n "\$LOG_LINES"/, '--logs 应输出指定行数日志');
+  assert.match(deploySrc, /LOG_LEVEL=debug/, '生成的 .env 默认开启 debug 日志');
+  assert.match(deploySrc, /deploy\.log/, '部署脚本输出应落盘到 state/logs/deploy.log');
+});

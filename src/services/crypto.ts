@@ -55,7 +55,7 @@ export function markVlt(file: string, originalName: string): boolean {
     fs.appendFileSync(file, Buffer.concat([nameBuf, lenBuf, typeBuf]));
     return true;
   } catch (e) {
-    logger.error(`写入 V-L-T 标记失败 ${file}: ${(e as Error).message}`);
+    logger.child('crypto').error(`[MARK:ENCRYPT] 写入 V-L-T 标记失败 ${file}: ${(e as Error).message}`);
     return false;
   }
 }
@@ -136,7 +136,7 @@ export function nextPublishName(): string {
       try {
         fs.writeFileSync(indexFile, String(idx));
       } catch (e) {
-        logger.warn(`写序号文件失败: ${(e as Error).message}`);
+        logger.child('crypto').warn(`[MARK:ENCRYPT] 写序号文件失败: ${(e as Error).message}`);
       }
       return candidate;
     }
@@ -164,14 +164,25 @@ export async function encryptFile(
   const { key, iv } = deriveKeyIv(passwordOf(pwd));
   return new Promise<EncryptResult>((resolve) => {
     const args = ['enc', '-aes-256-cbc', '-K', key, '-iv', iv, '-in', input, '-out', output];
+    const t0 = Date.now();
+    const scoped = logger.child('crypto');
+    scoped.mark('PROC_SPAWN', 'AES 加密文件', { bin: opensslBin, in: input, out: output, keyLen: key.length });
     const child = spawn(opensslBin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
     });
-    child.on('error', (e) => resolve({ ok: false, error: e.message }));
+    child.on('error', (e) => {
+      scoped.error(`[MARK:ENCRYPT] openssl 启动失败: ${e.message}`, { bin: opensslBin });
+      resolve({ ok: false, error: e.message });
+    });
     child.on('close', (code) => {
       if (code === 0 && fs.existsSync(output) && fs.statSync(output).size > 0) {
+        scoped.mark('ENCRYPT', `加密完成（${Date.now() - t0}ms）`, {
+          in: path.basename(input),
+          out: path.basename(output),
+          sizeBytes: fs.statSync(output).size,
+        });
         resolve({ ok: true, output });
       } else {
         try {
@@ -179,6 +190,7 @@ export async function encryptFile(
         } catch {
           /* ignore */
         }
+        scoped.error(`[MARK:ENCRYPT] 加密失败 code=${code}: ${stderr.slice(-300)}`, { in: input, out: output });
         resolve({ ok: false, error: stderr || `openssl 退出码 ${code}` });
       }
     });

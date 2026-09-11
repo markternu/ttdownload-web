@@ -26,6 +26,16 @@ webvideoRouter.get('/platforms', (_req, res) => {
   res.json({ platforms: supportedPlatforms() });
 });
 
+/** 网络自检：网页首页「网络自检」面板用（DNS/HTTPS/yt-dlp/YouTube/CDN/RPC） */
+webvideoRouter.get(
+  '/network',
+  asyncHandler(async (req, res) => {
+    const { networkReport } = await import('../services/netCheck');
+    const force = String(req.query.refresh ?? '') === '1' || String(req.query.refresh ?? '') === 'true';
+    res.json(await networkReport(force));
+  }),
+);
+
 /* ---------------- cookies（会员 / 登录 / 年龄限制视频） ---------------- */
 
 webvideoRouter.get(
@@ -144,7 +154,12 @@ webvideoRouter.post(
       meta: { format: null, resolution: quality || null },
     });
     kickScheduler();
-    logger.info(`公开视频任务已入队 #${task.id}: ${url}`);
+    logger.child('webvideo').mark('TASK_CREATE', `公开视频任务已入队 #${task.id}`, {
+      url,
+      formatId: formatId || '(默认)',
+      quality: quality || undefined,
+      title,
+    });
     res.json({ task, duplicated: false });
   }),
 );
