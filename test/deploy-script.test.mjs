@@ -171,7 +171,7 @@ test('deploy/ubuntutr.sh 与原始脚本逐字节一致（交互提示原样保�
 });
 
 test('运维子命令齐备：--update / --stop / --start / --logs / --logs-follow', () => {
-  for (const sub of ['--update', '--stop', '--start', '--logs', '--logs-follow', '--restart', '--status', '--uninstall']) {
+  for (const sub of ['--update', '--stop', '--start', '--logs', '--logs-follow', '--collect', '--restart', '--status', '--uninstall']) {
     assert.ok(deploySrc.includes(sub), `deploy.sh 应支持 ${sub}`);
   }
   assert.match(deploySrc, /git pull --ff-only/, '--update 应拉取最新代码');
@@ -180,4 +180,5 @@ test('运维子命令齐备：--update / --stop / --start / --logs / --logs-foll
   assert.match(deploySrc, /tail -n "\$LOG_LINES"/, '--logs 应输出指定行数日志');
   assert.match(deploySrc, /LOG_LEVEL=debug/, '生成的 .env 默认开启 debug 日志');
   assert.match(deploySrc, /deploy\.log/, '部署脚本输出应落盘到 state/logs/deploy.log');
+  assert.match(deploySrc, /ttdownload-logs-\$\{STAMP\}/, '--collect 应离线打包日志文件');
 });

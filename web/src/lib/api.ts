@@ -14,6 +14,7 @@ import type {
   ModuleId,
   NetworkReport,
   ParseResult,
+  ReportListResponse,
   SeedAction,
   SeedItem,
   SeedListResponse,
@@ -163,6 +164,45 @@ export const api = {
 
   /** 诊断包下载地址（JSON 附件，Content-Disposition: attachment） */
   diagnosticsDownloadUrl: (): string => buildUrl('/api/system/diagnostics'),
+
+  /* --------------------------- 问题反馈 / 诊断报告 --------------------------- */
+
+  /** 诊断报告清单（GET /api/system/report/list），含单项下载地址与历史报告 */
+  reportList: () => request<ReportListResponse>('/api/system/report/list'),
+
+  /** 完整诊断报告下载地址（zip，服务器无 zip 时后端会退化为 json） */
+  reportUrl: (): string => buildUrl('/api/system/report'),
+
+  /** 历史报告 / 单个报告文件下载地址（GET /api/system/report/file?name=...） */
+  reportFileUrl: (name: string): string => buildUrl('/api/system/report/file', { name }),
+
+  /** 过滤后的日志导出地址（level 支持 all；marker / q 为空则不过滤） */
+  logExportUrl: (
+    opts: { level?: string; lines?: number; marker?: string; q?: string } = {},
+  ): string =>
+    buildUrl('/api/system/logs/export', {
+      level: opts.level,
+      lines: opts.lines,
+      marker: opts.marker,
+      q: opts.q,
+    }),
+
+  /** 部署日志下载地址（GET /api/system/deploy-log） */
+  deployLogUrl: (): string => buildUrl('/api/system/deploy-log'),
+
+  /** 任务清单导出地址（GET /api/system/report/tasks?format=json|csv） */
+  tasksReportUrl: (format: 'json' | 'csv' = 'json'): string =>
+    buildUrl('/api/system/report/tasks', { format }),
+
+  /** 网络自检报告下载地址（GET /api/system/report/network） */
+  networkReportUrl: (): string => buildUrl('/api/system/report/network'),
+
+  /** 最近失败的任务（GET /api/tasks?status=failed），用于页面内展示失败原因 */
+  failedTasks: (pageSize = 10) =>
+    request<{ items: Task[]; total: number }>('/api/tasks', {}, {
+      status: 'failed',
+      pageSize,
+    }),
 
   /* ------------------------------ 任务 ------------------------------ */
 

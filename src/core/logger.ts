@@ -232,7 +232,9 @@ function emit(level: LogLevel, marker: string | null, scope: string | null, mess
   const markerPart = marker ? ` [MARK:${marker}]` : '';
   const scopePart = scope ? ` [${scope}]` : '';
   const dataPart = data === undefined ? '' : ` :: ${dump(data)}`;
-  const line = `${at} [${level.toUpperCase().padEnd(5)}]${markerPart}${scopePart} ${redact(message)}${dataPart}`;
+  // 消息体本身也可能内嵌密钥（例如把 JSON 拼进 message），统一先脱敏再落盘/入库/推送
+  const safeMessage = redact(message);
+  const line = `${at} [${level.toUpperCase().padEnd(5)}]${markerPart}${scopePart} ${safeMessage}${dataPart}`;
 
   if (level === 'error') console.error(line);
   else if (level === 'warn') console.warn(line);
@@ -251,14 +253,14 @@ function emit(level: LogLevel, marker: string | null, scope: string | null, mess
 
   if (ORDER[level] <= ORDER.info) {
     try {
-      logsRepo.add(level, `${marker ? `[${marker}] ` : ''}${scope ? `[${scope}] ` : ''}${message}${dataPart}`);
+      logsRepo.add(level, `${marker ? `[${marker}] ` : ''}${scope ? `[${scope}] ` : ''}${safeMessage}${dataPart}`);
     } catch {
       /* DB 可能尚未就绪 */
     }
   }
   if (ORDER[level] <= ORDER.debug) {
     try {
-      bus.emit('log', { level, marker, scope, message: redact(message), at });
+      bus.emit('log', { level, marker, scope, message: safeMessage, at });
     } catch {
       /* ignore */
     }

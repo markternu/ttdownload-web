@@ -411,6 +411,41 @@ export async function networkReport(force = false): Promise<NetworkReport> {
   return inflight;
 }
 
+/**
+ * 带时间预算的自检：用于「一键诊断报告」这类不能久等的场景。
+ * 超过预算就返回一个带说明的占位结果（报告里会写明可单独下载完整网络报告）。
+ */
+export async function networkReportWithBudget(budgetMs = 8000): Promise<NetworkReport> {
+  const cached = cache && Date.now() - cache.at < TTL_MS ? { ...cache.report, cached: true } : null;
+  if (cached) return cached;
+  const timeout = new Promise<NetworkReport>((resolve) =>
+    setTimeout(
+      () =>
+        resolve({
+          checkedAt: new Date().toISOString(),
+          cached: false,
+          overall: 'partial',
+          summary: `网络自检未在 ${Math.round(budgetMs / 1000)} 秒内完成，已跳过（报告页可单独下载「网络自检报告」以等待完整结果）`,
+          proxy: { env: proxyEnv(), extraArgs: '' },
+          checks: [],
+        }),
+      budgetMs,
+    ).unref?.(),
+  );
+  try {
+    return await Promise.race([networkReport(false), timeout]);
+  } catch (e) {
+    return {
+      checkedAt: new Date().toISOString(),
+      cached: false,
+      overall: 'fail',
+      summary: `网络自检执行失败：${(e as Error).message}`,
+      proxy: { env: proxyEnv(), extraArgs: '' },
+      checks: [],
+    };
+  }
+}
+
 /** 供测试用：清掉缓存 */
 export function resetNetworkCache(): void {
   cache = null;

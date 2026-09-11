@@ -254,6 +254,28 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
+  test('问题反馈页：一键下载诊断报告 + 单项下载 + 失败任务', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/report`, { waitUntil: 'networkidle' });
+    // 主卡片（最醒目的一键下载）
+    await page.waitForSelector('text=一键下载诊断报告', { timeout: 20000 });
+    assert.ok((await page.locator('text=/运行环境|诊断报告/').count()) > 0, '应说明报告里有什么');
+    // 单项下载列表：应有应用日志/部署日志/网络自检等条目
+    assert.ok((await page.locator('text=/下载单项信息|当前应用日志|网络自检报告/').count()) > 0, '应列出可单项下载的信息');
+    // 只导出报错
+    assert.ok((await page.getByRole('button', { name: /导出日志/ }).count()) > 0, '应有「导出日志」按钮');
+    // 最近失败的任务
+    assert.ok((await page.locator('text=最近失败的任务').count()) > 0);
+    // 反馈步骤
+    assert.ok((await page.locator('text=/怎么反馈问题/').count()) > 0, '应有反馈步骤说明');
+    // 点一下「下载」类按钮不应报错（触发浏览器下载，忽略）
+    const downloadButtons = page.getByRole('button', { name: /下载/ });
+    assert.ok((await downloadButtons.count()) > 0, '页面上应有下载按钮');
+    assert.deepEqual(pageErrors, [], `问题反馈页不应有 JS 报错：${pageErrors.join('; ')}`);
+    await page.close();
+  });
+
   test('页面无 JS 报错', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     assert.deepEqual(pageErrors, [], `浏览器控制台错误：\n${pageErrors.join('\n')}`);

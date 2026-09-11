@@ -229,6 +229,28 @@ yt-dlp 解析与策略阶梯每一步、aria2/transmission RPC（含 409 协商�
 network/markers/logs（每个日志文件尾部 2MB）。环境变量与设置里的 token/密码按 key 名脱敏。
 用途：用户遇到问题时下载后直接发给开发者。
 
+### 6.2.4 问题反馈页与报告打包（`src/services/report.ts`）
+
+`GET /api/system/report` 生成一份**单文件报告**（优先 zip，系统无 `zip` 时退化为 JSON），
+网页「问题反馈」页（`/report`）提供一键下载按钮与单项下载清单：
+
+| 端点 | 作用 |
+| --- | --- |
+| `GET /api/system/report` | 完整报告：README + diagnostics/system-info/tasks/network/markers JSON + errors.log + app.log(含轮转) + deploy.log |
+| `GET /api/system/report/list` | 页面用的可下载项清单（标题/说明/文件名/大小/时间/下载地址/是否推荐） |
+| `GET /api/system/report/file?name=` | 重新下载历史报告（白名单正则 + `basename`，防目录穿越） |
+| `GET /api/system/logs/export?level=&marker=&q=&lines=` | 过滤导出日志（默认 warn 及以上，只带 WARN/ERROR 与失败标记相关行） |
+| `GET /api/system/deploy-log` | 下载 `deploy.sh` 输出日志 |
+| `GET /api/system/report/tasks?format=json\|csv` | 任务清单 + 失败原因（CSV 带 BOM） |
+| `GET /api/system/report/network` | 强制重测并下载网络自检报告 |
+
+要点：
+- 报告里**必带 git 版本**（`app.git`）与 README 里的版本行，方便把日志与代码版本对应
+- 环境变量与设置按 key 名脱敏；`logger.redact` 同时作用于消息体与结构化数据（含入库副本）
+- 报告生成时**网络自检有 8 秒预算**（`networkReportWithBudget`），超时带说明跳过，避免按钮久等
+- 报告落在 `${state}/reports/`，只保留最近 5 份
+- 服务根本起不来时：`sudo ./deploy.sh --collect` 离线打包日志（不依赖服务运行）
+
 ## 6. 清理（消费者下载完成后删除）
 
 安卓下载完成 → `POST /api/android/done {ids:[...]}` → 服务端：
@@ -250,6 +272,7 @@ network/markers/logs（每个日志文件尾部 2MB）。环境变量与设置�
 | `src/core/logger.ts` | 标记日志（级别/轮转/脱敏/环形缓冲）、标记登记表 |
 | `src/core/procLog.ts` | 外部命令调用日志（argv/退出码/耗时/输出摘要） |
 | `src/services/netCheck.ts` | 网络自检（DNS/HTTPS/yt-dlp/CDN/RPC）|
+| `src/services/report.ts` | 问题反馈报告打包（zip/JSON）、错误摘要、任务清单导出、git 版本 |
 | `src/modules/*` | transmission / aria2 / webvideo 三个生产者 + 完成检测 |
 | `src/services/archive.ts` | 归档（打包/命名/VLT 标记） |
 | `src/services/crypto.ts` | AES-256-CBC 加密、去后缀、发布 |

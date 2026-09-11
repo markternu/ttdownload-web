@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { setupRuntime } from './helpers.mjs';
 
 const root = setupRuntime();
@@ -71,6 +72,12 @@ async function req(p, init = {}) {
 
 const post = (p, body) =>
   req(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+
+async function reqBinary(p) {
+  const res = await fetch(base + p);
+  const buf = Buffer.from(await res.arrayBuffer());
+  return { status: res.status, buf, headers: res.headers };
+}
 
 test.after(async () => {
   const { stopScheduler } = await import('../dist/core/scheduler.js');
@@ -244,7 +251,18 @@ test('网络自检：yt-dlp / YouTube / CDN 全部通过，并带中文说明与
   for (const c of report.checks) {
     if (c.status === 'fail') assert.ok(c.hint && c.hint.length > 0, `失败项 ${c.id} 应带 hint`);
   }
-  assert.equal(report.overall, 'ok', `yt-dlp 链路都通过了，overall 应为 ok（当前 ${report.overall}）`);
+  // overall 取决于真实外网（https-google/youtube/github 三项），这里只做一致性校验：
+  // 基础网络全通过 → 因为 yt-dlp 链路已通过，overall 必须是 ok；否则必须是 fail。
+  const netFailures = report.checks.filter((c) => c.group === 'net' && c.id !== 'proxy' && c.status === 'fail');
+  if (netFailures.length === 0) {
+    assert.equal(report.overall, 'ok', '基础网络与 yt-dlp 链路都通过时 overall 应为 ok');
+  } else {
+    assert.equal(report.overall, 'fail', `基础网络有失败项时 overall 应为 fail（失败项：${netFailures.map((c) => c.id).join(',')}）`);
+  }
+  // 无论外网如何，yt-dlp 三项检查必须是确定的（用假 yt-dlp + 本地 CDN 服务）
+  assert.equal(byId['ytdlp-version'].status, 'ok');
+  assert.equal(byId['ytdlp-youtube-meta'].status, 'ok');
+  assert.equal(byId['youtube-cdn'].status, 'ok');
 });
 
 test('网络自检：60 秒缓存 + refresh 强刷', async () => {
@@ -282,4 +300,185 @@ test('GET /api/system/diagnostics 打包日志/配置/任务/网络自检，并�
   assert.equal(envText.includes('test-token'), false, 'ANDROID_TOKEN 不得出现在诊断包里');
   assert.equal(envText.includes('super-secret-value'), false);
   assert.equal(String(b.settings.encryptPassword).includes('ec3e458fcde2582e079f19368abc780f'), false, '加密密码应为掩码');
+});
+
+/* ------------------------------------------------------------------ */
+/* 问题反馈：报告下载页相关接口                                          */
+/* ------------------------------------------------------------------ */
+
+test('GET /api/system/report/list：列出所有可下载的信息文件', async () => {
+  const res = await req('/api/system/report/list');
+  assert.equal(res.status, 200);
+  const d = res.json;
+  assert.equal(typeof d.zipAvailable, 'boolean');
+  assert.equal(typeof d.generatedAt, 'string');
+  assert.ok(['error', 'warn', 'info', 'debug', 'trace'].includes(d.logLevel));
+  assert.ok(Array.isArray(d.reports));
+
+  const ids = d.items.map((i) => i.id);
+  for (const need of ['report', 'diagnostics', 'errors', 'app-log', 'deploy-log', 'tasks', 'tasks-csv', 'network']) {
+    assert.ok(ids.includes(need), `缺少下载项 ${need}`);
+  }
+  for (const item of d.items) {
+    assert.equal(typeof item.title, 'string');
+    assert.ok(item.title.length > 0, '每项都要有中文标题');
+    assert.ok(item.description.length > 5, '每项都要有说明');
+    assert.match(item.url, /^\/api\//, 'url 应是可直接下载的 /api 路径');
+    assert.ok(['zip', 'json', 'log', 'csv'].includes(item.kind));
+  }
+  // 推荐项排第一，且指向一键报告
+  assert.equal(d.items[0].id, 'report');
+  assert.equal(d.items[0].recommended, true);
+  assert.equal(d.items[0].url, '/api/system/report');
+  // 应用日志项应带上真实大小（此时已有日志写入）
+  const appLog = d.items.find((i) => i.id === 'app-log');
+  assert.ok(appLog.sizeBytes === null || appLog.sizeBytes > 0);
+});
+
+test('GET /api/system/report：一键下载完整报告（zip 或 json），内容含关键文件且密钥脱敏', async () => {
+  loggerMod.logger.child('report-test').mark('TASK_FAIL', '报告测试用的失败行 :: {"token":"super-secret-value"}');
+  const res = await reqBinary('/api/system/report');
+  assert.equal(res.status, 200);
+  assert.match(String(res.headers.get('content-disposition')), /attachment; filename="ttdownload-report-.*\.(zip|json)"/);
+  assert.ok(res.buf.length > 500, '报告不应为空');
+
+  const isZip = res.buf.slice(0, 2).toString() === 'PK';
+  if (isZip) {
+    assert.match(String(res.headers.get('content-type')), /zip/);
+    const tmp = path.join(root, 'report-under-test.zip');
+    fs.writeFileSync(tmp, res.buf);
+    const listing = execFileSync('unzip', ['-l', tmp], { encoding: 'utf8' });
+    for (const need of ['README.txt', 'diagnostics.json', 'errors.log', 'app.log', 'tasks.json', 'network.json', 'markers.json']) {
+      assert.ok(listing.includes(need), `报告里应包含 ${need}`);
+    }
+    const diagnostics = execFileSync('unzip', ['-p', tmp, 'diagnostics.json'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    assert.equal(diagnostics.includes('super-secret-value'), false, '报告里不得出现明文 token');
+    assert.equal(diagnostics.includes('***'), true, '敏感字段应被打码');
+    const errors = execFileSync('unzip', ['-p', tmp, 'errors.log'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    assert.ok(errors.includes('报告测试用的失败行'), 'errors.log 应包含 WARN/失败相关日志');
+    const readme = execFileSync('unzip', ['-p', tmp, 'README.txt'], { encoding: 'utf8' });
+    assert.ok(readme.includes('诊断报告'), 'README 应说明怎么用这份报告');
+  } else {
+    // 退化路径：单个 JSON，内容等价
+    const bundle = JSON.parse(res.buf.toString('utf8'));
+    assert.ok(Array.isArray(bundle.files));
+    const names = bundle.files.map((f) => f.name);
+    for (const need of ['README.txt', 'diagnostics.json', 'errors.log', 'app.log']) {
+      assert.ok(names.includes(need), `JSON 报告里应包含 ${need}`);
+    }
+    assert.equal(res.buf.toString('utf8').includes('super-secret-value'), false, '报告里不得出现明文 token');
+  }
+
+  // 生成的报告可以在「历史报告」里再次下载
+  const list = await req('/api/system/report/list');
+  assert.ok(list.json.reports.length >= 1, '应记录已生成的报告');
+  const again = await reqBinary(`/api/system/report/file?name=${encodeURIComponent(list.json.reports[0].name)}`);
+  assert.equal(again.status, 200);
+  assert.ok(again.buf.length > 500);
+  // 目录穿越必须被拒绝
+  const evil = await req('/api/system/report/file?name=../../etc/passwd');
+  assert.equal(evil.status, 404);
+});
+
+test('GET /api/system/logs/export：只导出报错日志（warn 及以上）', async () => {
+  loggerMod.logger.info('这条 INFO 不应出现在 warn 导出里');
+  loggerMod.logger.warn('这条 WARN 应出现在 warn 导出里');
+  const res = await req('/api/system/logs/export?level=warn&lines=1000');
+  assert.equal(res.status, 200);
+  assert.match(String(res.headers.get('content-type')), /text\/plain/);
+  assert.match(String(res.headers.get('content-disposition')), /ttdownload-warn-log-.*\.log/);
+  assert.ok(res.text.includes('这条 WARN 应出现在 warn 导出里'));
+  assert.equal(res.text.includes('这条 INFO 不应出现在 warn 导出里'), false, 'warn 级别导出不应含 INFO 行');
+  assert.ok(res.text.startsWith('# ttdownload-web 日志导出'), '应带说明头');
+
+  // 按标记导出
+  const byMarker = await req('/api/system/logs/export?level=all&marker=TASK_FAIL');
+  assert.ok(byMarker.text.includes('TASK_FAIL'));
+});
+
+test('GET /api/system/report/tasks：JSON 与 CSV 两种格式', async () => {
+  const failed = tasksRepo.create({ module: 'aria2', title: '报告页失败任务', url: 'http://x/1.bin', payload: {} });
+  tasksRepo.update(failed.id, { status: 'failed', error: '报告页测试用失败原因' });
+
+  const json = await req('/api/system/report/tasks');
+  assert.equal(json.status, 200);
+  assert.match(String(json.headers.get('content-disposition')), /ttdownload-tasks-.*\.json/);
+  const body = JSON.parse(json.text);
+  assert.ok(body.total >= 1);
+  assert.ok(body.byStatus.failed >= 1);
+  assert.ok(body.failed.some((f) => f.error === '报告页测试用失败原因'), '应包含失败原因');
+  assert.ok(body.failed[0].retryCount !== undefined);
+
+  const csv = await req('/api/system/report/tasks?format=csv');
+  assert.match(String(csv.headers.get('content-type')), /text\/csv/);
+  assert.match(String(csv.headers.get('content-disposition')), /ttdownload-tasks-.*\.csv/);
+  const firstLine = csv.text.replace(/^\uFEFF/, '').split('\n')[0];
+  assert.equal(firstLine, 'id,module,status,title,url,progress,error,retryCount,createdAt,finishedAt');
+  assert.ok(csv.text.includes('报告页测试用失败原因'));
+});
+
+test('GET /api/system/report/network 与 /api/system/deploy-log', async () => {
+  const net = await req('/api/system/report/network');
+  assert.equal(net.status, 200);
+  assert.match(String(net.headers.get('content-disposition')), /ttdownload-network-.*\.json/);
+  const report = JSON.parse(net.text);
+  assert.ok(Array.isArray(report.checks) && report.checks.length >= 8);
+  assert.equal(report.cached, false, '下载的网络报告应强制重测');
+
+  // 部署日志不存在时给出明确 404
+  const missing = await req('/api/system/deploy-log');
+  assert.equal(missing.status, 404);
+  assert.match(missing.json.error.message, /部署日志/);
+
+  // 造一份部署日志后可下载
+  const deployLog = path.join(config.dirs.state, 'logs', 'deploy.log');
+  fs.mkdirSync(path.dirname(deployLog), { recursive: true });
+  fs.writeFileSync(deployLog, '[deploy] 测试部署日志第一行\n[deploy] 第二行\n');
+  const got = await req('/api/system/deploy-log');
+  assert.equal(got.status, 200);
+  assert.match(String(got.headers.get('content-disposition')), /deploy\.log/);
+  assert.ok(got.text.includes('测试部署日志第一行'));
+});
+
+test('一键报告带网络自检预算：即使网络自检很慢也会在预算内返回', async () => {
+  netCheck.resetNetworkCache(); // 清缓存，让报告必须（在预算内）自己处理
+  const started = Date.now();
+  const res = await reqBinary('/api/system/report');
+  const ms = Date.now() - started;
+  assert.equal(res.status, 200);
+  assert.ok(ms < 20000, `报告生成不应被网络自检拖太久，实际 ${ms}ms`);
+  assert.ok(res.buf.length > 500);
+});
+
+test('networkReportWithBudget：缓存命中时直接返回缓存，不重新测试', async () => {
+  await netCheck.networkReport(true); // 先跑一次，写入缓存
+  const cached = await netCheck.networkReportWithBudget(5000);
+  assert.equal(cached.cached, true);
+  assert.ok(cached.checks.length >= 8, '缓存里应有完整检查项');
+});
+
+test('报告里带代码版本（git commit），便于把日志和代码版本对应起来', async () => {
+  const sysRes = await req('/api/system/report/list');
+  assert.equal(sysRes.status, 200);
+
+  const bundle = JSON.parse((await req('/api/system/diagnostics')).text);
+  const git = bundle.app.git;
+  if (git) {
+    assert.match(git.commit, /^[0-9a-f]{40}$/);
+    assert.equal(git.shortCommit.length, 7);
+    assert.ok(typeof git.branch === 'string' && git.branch.length > 0);
+    assert.ok(typeof git.dirty === 'boolean');
+  } else {
+    // 非 git 目录（例如 scp 上传）时允许为 null，但字段必须存在
+    assert.equal(git, null);
+  }
+
+  // README 里也要写版本
+  const res = await reqBinary('/api/system/report');
+  if (res.buf.slice(0, 2).toString() === 'PK') {
+    const tmp = path.join(root, 'report-git.zip');
+    fs.writeFileSync(tmp, res.buf);
+    const readme = execFileSync('unzip', ['-p', tmp, 'README.txt'], { encoding: 'utf8' });
+    assert.match(readme, /代码版本：/);
+  }
 });

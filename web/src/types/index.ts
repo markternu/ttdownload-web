@@ -333,6 +333,33 @@ export interface DebugStatus {
   usedMarkers: string[]
 }
 
+/* --------------------------- 问题反馈 / 诊断报告 --------------------------- */
+
+/** 单项可下载报告（GET /api/system/report/list → items[]） */
+export interface ReportListItem {
+  id: string // 稳定标识，用于列表 key
+  title: string // 中文标题，例如「完整诊断报告（推荐）」
+  name: string // 建议保存的文件名，例如 ttdownload-report-2026-...zip
+  description: string // 里面有什么（中文，可直接展示）
+  sizeBytes: number | null // 预估 / 实际大小，未知为 null
+  updatedAt: string | null // 最后生成时间（ISO），未知为 null
+  url: string // 直接下载用的地址（以 /api 开头的完整路径，直接 window.open / <a href> 即可）
+  recommended: boolean // 是否推荐（优先下载）
+  kind: 'zip' | 'json' | 'log' | 'csv' // 文件类型（用于展示 Badge）
+}
+
+/** 诊断报告清单（GET /api/system/report/list） */
+export interface ReportListResponse {
+  generatedAt: string // 本清单生成时间（ISO）
+  zipAvailable: boolean // 服务器是否可打包 zip
+  zipHint: string | null // zipAvailable=false 时的提示（例如「sudo apt install -y zip」）
+  logLevel: LogLevel // 当前落盘日志级别
+  debugMode: boolean // 是否开启 Debug 模式
+  reports: { name: string; sizeBytes: number; mtime: string }[] // 历史上已生成的报告（最近 5 份）
+  items: ReportListItem[]
+  tasksSummary: unknown // 统计对象（仅用于展示「N 个失败任务」之类，字段不必强类型）
+}
+
 /* ------------------------------ 网络自检 ------------------------------ */
 
 /** 自检单项状态：ok 通过 / fail 失败 / skip 跳过 / running 进行中 */

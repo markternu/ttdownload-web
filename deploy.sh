@@ -20,6 +20,7 @@
 #      sudo ./deploy.sh --start      # 启动服务
 #      sudo ./deploy.sh --logs       # 查看最近日志（默认 200 行；--logs 500 可指定行数）
 #      sudo ./deploy.sh --logs-follow# 实时跟踪日志（Ctrl+C 退出）
+#      sudo ./deploy.sh --collect    # 【服务起不来也能用】离线打包日志到当前目录，发给开发者排查
 #      sudo ./deploy.sh --uninstall  # 停止并移除 systemd 服务（保留数据目录）
 #
 #  脚本做的事：
@@ -68,13 +69,14 @@ while [[ $# -gt 0 ]]; do
     --start) ACTION="start"; shift ;;
     --logs) ACTION="logs"; shift; if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then LOG_LINES="$1"; shift; fi ;;
     --logs-follow) ACTION="logs-follow"; shift ;;
+    --collect) ACTION="collect"; shift ;;
     --uninstall) ACTION="uninstall"; shift ;;
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) die "未知参数: $1（--help 查看用法）" ;;
   esac
 done
 
-if [[ $EUID -ne 0 && "$ACTION" != "check-deps" && "$ACTION" != "logs" && "$ACTION" != "logs-follow" ]]; then
+if [[ $EUID -ne 0 && "$ACTION" != "check-deps" && "$ACTION" != "logs" && "$ACTION" != "logs-follow" && "$ACTION" != "collect" ]]; then
   die "请用 root 运行：sudo ./deploy.sh（仅 --check-deps 可以在普通用户下运行）"
 fi
 
@@ -283,6 +285,29 @@ case "$ACTION" in
     else
       journalctl -u "$SERVICE_NAME" -f
     fi
+    exit 0 ;;
+  collect)
+    # 离线收集：不依赖服务是否在运行，直接把日志文件打包出来
+    STAMP="$(date +%Y%m%d-%H%M%S)"
+    STATE_DIR="${DOWNLOAD_ROOT}/state"
+    [[ -d "$STATE_DIR" ]] || die "找不到状态目录 ${STATE_DIR}（用 --root 指定下载根目录）"
+    log "离线收集日志（服务在不在跑都可以）：${STATE_DIR}"
+    files=()
+    for f in "$STATE_DIR"/app.log "$STATE_DIR"/app.log.*; do [[ -f "$f" ]] && files+=("$f"); done
+    [[ -f "$STATE_DIR/logs/deploy.log" ]] && files+=("$STATE_DIR/logs/deploy.log")
+    [[ -f "$STATE_DIR/app.db" ]] && files+=("$STATE_DIR/app.db")
+    if [[ ${#files[@]} -eq 0 ]]; then
+      die "没有找到任何日志文件（${STATE_DIR}/app.log 等）"
+    fi
+    if have_cmd zip; then
+      OUT="${PWD}/ttdownload-logs-${STAMP}.zip"
+      zip -j -q "$OUT" "${files[@]}" && log "已生成：${OUT}"
+    else
+      OUT="${PWD}/ttdownload-logs-${STAMP}.tar.gz"
+      tar czf "$OUT" -C "$STATE_DIR" . && log "已生成：${OUT}"
+    fi
+    log "包含 ${#files[@]} 个文件：$(printf '%s ' "${files[@]##*/}")"
+    log "把这个文件发给开发者即可（内含 app.log / 轮转日志 / deploy.log / app.db）"
     exit 0 ;;
   update)
     log "更新代码并重新部署 ..."

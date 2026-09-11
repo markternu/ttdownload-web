@@ -7,6 +7,7 @@ import {
   FileVideo2,
   HardDrive,
   History,
+  LifeBuoy,
   Link2,
   ListChecks,
   Magnet,
@@ -36,6 +37,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/bt', label: 'BT 种子', icon: Magnet, description: '上传种子 zip 并入队' },
   { to: '/files', label: '已发布文件', icon: FileVideo2, description: '消费者目录中的加密成品' },
   { to: '/logs', label: '日志', icon: ScrollText, description: '查看 / 过滤 / 下载日志与诊断包' },
+  { to: '/report', label: '问题反馈', icon: LifeBuoy, description: '一键下载诊断报告并发给开发者' },
   { to: '/settings', label: '设置', icon: SettingsIcon, description: '下载 / 网络 / 外观 / 系统' },
 ]
 

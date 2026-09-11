@@ -12,6 +12,7 @@ const Aria2Page = lazy(() => import('./pages/Aria2Page'))
 const BtPage = lazy(() => import('./pages/BtPage'))
 const FilesPage = lazy(() => import('./pages/FilesPage'))
 const LogsPage = lazy(() => import('./pages/LogsPage'))
+const ReportPage = lazy(() => import('./pages/ReportPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
 
@@ -73,6 +74,14 @@ export default function App() {
           element={
             <Suspense fallback={<LoadingBlock text="正在加载日志页…" />}>
               <LogsPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/report"
+          element={
+            <Suspense fallback={<LoadingBlock text="正在加载问题反馈页…" />}>
+              <ReportPage />
             </Suspense>
           }
         />

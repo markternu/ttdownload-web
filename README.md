@@ -102,7 +102,8 @@ sudo ./deploy.sh --uninstall    # 移除服务（保留数据）
 
 - 日志文件：`/ttdownload/state/app.log`（20MB 轮转），部署日志：`/ttdownload/state/logs/deploy.log`
 - 默认 `LOG_LEVEL=debug`：记录外部命令完整 argv、退出码、stdout/stderr 摘要、HTTP 请求、RPC 调用
-- 网页「**日志**」页：调试开关、级别/标记/关键字过滤、下载日志、清空、**一键导出诊断包**
+- 网页「**问题反馈**」页：**一键下载诊断报告**（zip：日志+部署日志+错误摘要+任务失败原因+网络自检+README），也可单项下载日志/任务清单/网络报告；页面直接列出最近失败任务与原因
+- 网页「**日志**」页：调试开关、级别/标记/关键字过滤、下载日志、清空
 - 首页「**网络自检**」：DNS / HTTPS(Google,YouTube,GitHub) / yt-dlp 解析 / googlevideo CDN / 本机 RPC 逐项实测
 - 标记速查与排查流程：见 [`docs/排查手册.md`](./docs/排查手册.md)
 
@@ -187,7 +188,10 @@ curl -s localhost:8080/api/webvideo/network?refresh=1   # 网络自检（DNS/You
 # 调试与日志
 curl -s 'localhost:8080/api/system/logs?lines=200&marker=TASK_FAIL'
 curl -s -X POST localhost:8080/api/system/debug -H 'Content-Type: application/json' -d '{"debugMode":true}'
-curl -OJ localhost:8080/api/system/diagnostics         # 一键诊断包（发我排查用）
+curl -OJ localhost:8080/api/system/report              # 一键诊断报告 zip（发我排查用，推荐）
+curl -s localhost:8080/api/system/report/list          # 页面上可下载的清单
+curl -OJ 'localhost:8080/api/system/logs/export?level=warn'   # 只导出报错日志
+curl -OJ localhost:8080/api/system/report/tasks?format=csv    # 任务清单 CSV
 # 安卓（Token 鉴权）
 curl -s -H "X-Auth-Token: $ANDROID_TOKEN" localhost:8080/api/android/files
 curl -s -X POST -H "X-Auth-Token: $ANDROID_TOKEN" -H 'Content-Type: application/json' \

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type RequestHandler } from 'express';
 import { config, DIRS } from '../core/config';
@@ -14,10 +15,19 @@ import {
   type LogLevel,
 } from '../core/logger';
 import { tasksRepo } from '../core/db';
-import { networkReport } from '../services/netCheck';
+import {
+  buildDiagnosticsBundle,
+  createReport,
+  deployLogPath,
+  errorsLog,
+  recentReports,
+  reportFilePath,
+  systemInfo,
+  tasksReport,
+} from '../services/report';
 import { kickScheduler } from '../core/scheduler';
-import { asyncHandler, badRequest } from '../utils/http';
-import type { Settings } from '../types';
+import { asyncHandler, badRequest, notFound } from '../utils/http';
+import type { Settings, Task } from '../types';
 
 export const systemRouter = Router();
 
@@ -150,85 +160,233 @@ const debugPostHandler = asyncHandler(async (req, res) => {
  * 用户遇到问题直接下载发过来即可定位。
  */
 const diagnosticsHandler = asyncHandler(async (_req, res) => {
-  const settings = getSettingsPublic();
-  const sf = statfsBytes(DIRS.root);
-  const [aria2, transmission, ytdlp, ffmpeg, openssl] = await Promise.all([
-    toolStatus(config.bins.aria2, ['--version']),
-    toolStatus(config.bins.transmission, ['--version']),
-    toolStatus(config.bins.ytdlp, ['--version']),
-    toolStatus(config.bins.ffmpeg, ['-version']),
-    toolStatus(config.bins.openssl, ['version']),
-  ]);
-  const files = listLogFiles();
-  const logs = files.map((f) => {
-    const { content, truncated } = readLogFile(f.name, 2 * 1024 * 1024);
-    return { name: f.name, sizeBytes: f.sizeBytes, truncated, content };
-  });
-  let network: unknown = null;
-  try {
-    network = await networkReport(false);
-  } catch (e) {
-    network = { error: (e as Error).message };
-  }
-  const envRedacted: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v === undefined) continue;
-    envRedacted[k] = /token|password|secret|passwd/i.test(k) ? '***' : String(v).slice(0, 500);
-  }
-  const tasks = tasksRepo.list({ pageSize: 100 });
-  const bundle = {
-    generatedAt: new Date().toISOString(),
-    app: {
-      version: config.version,
-      node: process.version,
-      platform: process.platform,
-      arch: process.arch,
-      pid: process.pid,
-      uptimeSec: Math.round((Date.now() - startedAt) / 1000),
-      cwd: process.cwd(),
-      logLevel: logger.getLevel(),
-      debugMode: logger.isDebug(),
-      logFile: logger.filePath(),
-    },
-    env: envRedacted,
-    config: {
-      host: config.host,
-      port: config.port,
-      dirs: DIRS,
-      dbPath: config.dbPath,
-      logPath: config.logPath,
-      reserveFreeBytes: config.reserveFreeBytes,
-      maxConcurrent: config.maxConcurrent,
-      moduleConcurrency: config.moduleConcurrency,
-      autoRetry: config.autoRetry,
-      bins: config.bins,
-      webvideo: config.webvideo,
-      transmissionIncompleteDir: config.transmissionIncompleteDir,
-      btEvict: config.btEvict,
-    },
-    settings,
-    disk: {
-      path: DIRS.root,
-      totalBytes: sf.total,
-      freeBytes: sf.free,
-      usableBytes: usableBytes(settings.reserveFreeBytes),
-    },
-    tools: { aria2, transmission, ytdlp, ffmpeg, openssl },
-    tasks: { items: tasks.items, total: tasks.total },
-    events: logsRepo.recent(300),
-    network,
-    markers: logger.markers(),
-    logs,
-  };
+  const bundle = await buildDiagnosticsBundle();
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  logger.child('diag').mark('DIAG', '导出诊断包', {
-    logFiles: files.map((f) => f.name),
-    taskCount: tasks.total,
+  logger.child('diag').mark('DIAG', '导出诊断包（JSON）', {
+    logFiles: (bundle.logs as { name: string }[]).map((l) => l.name),
     bytes: JSON.stringify(bundle).length,
   });
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="ttdownload-diagnostics-${stamp}.json"`);
   res.send(JSON.stringify(bundle, null, 2));
+});
+
+/** 一键诊断报告（推荐）：优先 zip（含 README/日志/部署日志/错误摘要/任务/网络），失败退化为 JSON */
+const reportHandler = asyncHandler(async (_req, res) => {
+  const report = await createReport();
+  res.download(report.path, report.name, (err) => {
+    if (err) logger.child('report').warn(`[MARK:DIAG] 报告下载中断：${err.message}`);
+  });
+});
+
+/** 页面用：可下载项清单（含建议文件名、说明、大小、时间、下载地址） */
+const reportListHandler = asyncHandler(async (_req, res) => {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const sys = await systemInfo();
+  const logs = listLogFiles();
+  const deploy = deployLogPath();
+  let deploySize: number | null = null;
+  let deployMtime: string | null = null;
+  try {
+    const st = fs.statSync(deploy);
+    deploySize = st.size;
+    deployMtime = st.mtime.toISOString();
+  } catch {
+    /* 还没有部署日志 */
+  }
+  const zipOk = await toolStatus(config.bins.zip, ['-v']);
+  const dlog = logs.find((l) => l.name === path.basename(config.logPath));
+  const items = [
+    {
+      id: 'report',
+      title: '完整诊断报告（推荐）',
+      name: `ttdownload-report-${stamp}.${zipOk.ok ? 'zip' : 'json'}`,
+      description: '一次性打包：README + 全部日志（含轮转）+ 部署日志 + 错误摘要 + 任务失败原因 + 网络自检 + 标记说明。排查问题发这一个文件就够。',
+      sizeBytes: null as number | null,
+      updatedAt: null as string | null,
+      url: '/api/system/report',
+      recommended: true,
+      kind: (zipOk.ok ? 'zip' : 'json') as 'zip' | 'json',
+    },
+    {
+      id: 'diagnostics',
+      title: '诊断信息（JSON）',
+      name: `ttdownload-diagnostics-${stamp}.json`,
+      description: '运行环境、生效配置（密钥已打码）、磁盘、外部工具版本、任务清单、事件、网络自检。',
+      sizeBytes: null,
+      updatedAt: null,
+      url: '/api/system/diagnostics',
+      recommended: false,
+      kind: 'json' as const,
+    },
+    {
+      id: 'errors',
+      title: '错误日志摘要（体积小，建议先看）',
+      name: `ttdownload-errors-${stamp}.log`,
+      description: '所有日志里的 WARN/ERROR 行 + 失败/重试/外部命令非零退出等关键标记，最多 5000 行。',
+      sizeBytes: null,
+      updatedAt: dlog?.mtime ?? null,
+      url: '/api/system/logs/export?level=warn&lines=5000',
+      recommended: false,
+      kind: 'log' as const,
+    },
+    {
+      id: 'app-log',
+      title: '当前应用日志 app.log',
+      name: 'app.log',
+      description: `完整应用日志（最新在最后）。当前 ${dlog ? `${(dlog.sizeBytes / 1024).toFixed(1)} KB` : '尚未生成'}，超过 20MB 会自动轮转。`,
+      sizeBytes: dlog?.sizeBytes ?? null,
+      updatedAt: dlog?.mtime ?? null,
+      url: '/api/system/logs/download',
+      recommended: false,
+      kind: 'log' as const,
+    },
+    ...logs
+      .filter((l) => l.name !== path.basename(config.logPath))
+      .map((l) => ({
+        id: `log-${l.name}`,
+        title: `轮转日志 ${l.name}`,
+        name: l.name,
+        description: '历史日志（文件写满后轮转出来的）。',
+        sizeBytes: l.sizeBytes as number | null,
+        updatedAt: l.mtime as string | null,
+        url: `/api/system/logs/download?file=${encodeURIComponent(l.name)}`,
+        recommended: false,
+        kind: 'log' as const,
+      })),
+    {
+      id: 'deploy-log',
+      title: '部署脚本日志 deploy.log',
+      name: 'deploy.log',
+      description: 'deploy.sh 的全部输出：装依赖、git pull、构建、重启、健康检查。部署/更新失败时看它。',
+      sizeBytes: deploySize,
+      updatedAt: deployMtime,
+      url: '/api/system/deploy-log',
+      recommended: false,
+      kind: 'log' as const,
+    },
+    {
+      id: 'tasks',
+      title: '任务清单与失败原因',
+      name: `ttdownload-tasks-${stamp}.json`,
+      description: '任务状态统计 + 每个失败任务的错误原因、重试次数（JSON）。',
+      sizeBytes: null,
+      updatedAt: null,
+      url: '/api/system/report/tasks',
+      recommended: false,
+      kind: 'json' as const,
+    },
+    {
+      id: 'tasks-csv',
+      title: '任务清单（CSV，方便表格查看）',
+      name: `ttdownload-tasks-${stamp}.csv`,
+      description: '同样的任务信息，逗号分隔，可用 Excel 打开。',
+      sizeBytes: null,
+      updatedAt: null,
+      url: '/api/system/report/tasks?format=csv',
+      recommended: false,
+      kind: 'csv' as const,
+    },
+    {
+      id: 'network',
+      title: '网络自检报告',
+      name: `ttdownload-network-${stamp}.json`,
+      description: 'DNS / HTTPS(Google,YouTube,GitHub) / yt-dlp 解析 / 视频 CDN / 本机 RPC 的逐项实测结果与建议。',
+      sizeBytes: null,
+      updatedAt: null,
+      url: '/api/system/report/network',
+      recommended: false,
+      kind: 'json' as const,
+    },
+  ];
+  res.json({
+    generatedAt: new Date().toISOString(),
+    zipAvailable: zipOk.ok,
+    zipHint: zipOk.ok ? null : '未检测到 zip 命令：完整报告会退化为单个 JSON。可执行 sudo apt install -y zip 后重试。',
+    logLevel: logger.getLevel(),
+    debugMode: logger.isDebug(),
+    reports: recentReports(),
+    items,
+    tasksSummary: (sys as { stats: unknown }).stats,
+  });
+});
+
+/** 下载历史上已经生成过的报告 */
+const reportFileHandler = asyncHandler(async (req, res) => {
+  const name = String(req.query.name ?? '');
+  const full = reportFilePath(name);
+  if (!full) throw notFound('报告不存在或已被清理（只保留最近 5 份）', 'REPORT_NOT_FOUND');
+  res.download(full, path.basename(full));
+});
+
+/** 按级别/标记/关键字导出日志（默认 warn 及以上） */
+const logExportHandler = asyncHandler(async (req, res) => {
+  const level = String(req.query.level ?? 'warn') as LogLevel | 'all';
+  const marker = String(req.query.marker ?? '');
+  const q = String(req.query.q ?? '');
+  const lines = Math.min(20000, Math.max(1, Number(req.query.lines ?? 5000)));
+  const body = marker || q ? tailLogs({ lines, level, marker, q }) : errorsLog(lines).split('\n');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const name = `ttdownload-${level === 'all' ? 'log' : `${level}-log`}-${stamp}.log`;
+  logger.child('report').mark('DIAG', `导出日志文件 ${name}`, { level, marker, q, lineCount: body.length });
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+  res.send(
+    `# ttdownload-web 日志导出\n# 生成时间: ${new Date().toISOString()}\n# 级别: ${level}${marker ? ` 标记: ${marker}` : ''}${q ? ` 关键字: ${q}` : ''}\n# 共 ${body.length} 行\n\n${body.join('\n')}\n`,
+  );
+});
+
+/** 部署脚本日志 */
+const deployLogHandler = asyncHandler(async (_req, res) => {
+  const full = deployLogPath();
+  if (!fs.existsSync(full)) throw notFound('还没有部署日志（未通过 deploy.sh 部署，或日志已被清理）', 'DEPLOY_LOG_NOT_FOUND');
+  logger.child('report').mark('DIAG', '下载部署日志 deploy.log');
+  res.download(full, 'deploy.log');
+});
+
+/** 任务清单导出（json / csv） */
+const tasksReportHandler = asyncHandler(async (req, res) => {
+  const format = String(req.query.format ?? 'json') === 'csv' ? 'csv' : 'json';
+  const report = tasksReport(500);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  logger.child('report').mark('DIAG', `导出任务清单（${format}）`, { total: report.total, failed: report.failed.length });
+  if (format === 'csv') {
+    const esc = (v: unknown): string => `"${String(v ?? '').replace(/"/g, '""').replace(/\n/g, ' ')}"`;
+    const head = ['id', 'module', 'status', 'title', 'url', 'progress', 'error', 'retryCount', 'createdAt', 'finishedAt'];
+    const rows = report.items.map((t) =>
+      [
+        t.id,
+        t.module,
+        t.status,
+        t.title,
+        t.url,
+        t.progress,
+        t.error,
+        (t as Task & { retryCount?: number }).retryCount ?? 0,
+        t.createdAt,
+        t.finishedAt,
+      ]
+        .map(esc)
+        .join(','),
+    );
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="ttdownload-tasks-${stamp}.csv"`);
+    res.send(`\uFEFF${head.join(',')}\n${rows.join('\n')}\n`);
+    return;
+  }
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="ttdownload-tasks-${stamp}.json"`);
+  res.send(JSON.stringify(report, null, 2));
+});
+
+/** 网络自检报告下载 */
+const networkReportHandler = asyncHandler(async (_req, res) => {
+  const { networkReport } = await import('../services/netCheck');
+  const report = await networkReport(true);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="ttdownload-network-${stamp}.json"`);
+  res.send(JSON.stringify(report, null, 2));
 });
 
 // 同时挂到 /api/xxx 与 /api/system/xxx（前端用 /api/system/*，旧习惯用 /api/*）
@@ -245,6 +403,20 @@ for (const register of [
   () => systemRouter.post('/system/debug', debugPostHandler),
   () => systemRouter.get('/diagnostics', diagnosticsHandler),
   () => systemRouter.get('/system/diagnostics', diagnosticsHandler),
+  () => systemRouter.get('/report', reportHandler),
+  () => systemRouter.get('/system/report', reportHandler),
+  () => systemRouter.get('/report/list', reportListHandler),
+  () => systemRouter.get('/system/report/list', reportListHandler),
+  () => systemRouter.get('/report/file', reportFileHandler),
+  () => systemRouter.get('/system/report/file', reportFileHandler),
+  () => systemRouter.get('/report/tasks', tasksReportHandler),
+  () => systemRouter.get('/system/report/tasks', tasksReportHandler),
+  () => systemRouter.get('/report/network', networkReportHandler),
+  () => systemRouter.get('/system/report/network', networkReportHandler),
+  () => systemRouter.get('/logs/export', logExportHandler),
+  () => systemRouter.get('/system/logs/export', logExportHandler),
+  () => systemRouter.get('/deploy-log', deployLogHandler),
+  () => systemRouter.get('/system/deploy-log', deployLogHandler),
 ]) {
   register();
 }

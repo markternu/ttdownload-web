@@ -232,7 +232,21 @@ interface SeedItem {
 日志行格式：`ISO时间 [LEVEL] [MARK:XXX] [scope] 消息 :: {结构化细节}`；标记清单见 `src/core/logger.ts` 的 `MARKERS`
 （[`排查手册.md`](./排查手册.md) 有完整对照表）。脱敏覆盖 `token/password/secret/authorization/api_key/Bearer`。
 
-## 6.6 网络自检
+## 6.6 问题反馈 / 报告下载（网页「问题反馈」页用）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/system/report` | **一键诊断报告**：优先 `application/zip`（README + diagnostics/system/tasks/network/markers JSON + errors.log + app.log(含轮转) + deploy.log），系统无 `zip` 时退化为单个 JSON；报告存在 `${state}/reports/`（保留最近 5 份） |
+| GET | `/api/system/report/list` | 页面清单：`{ generatedAt, zipAvailable, zipHint, logLevel, debugMode, reports[], items[], tasksSummary }`，`items[]` 每项含 `id/title/name/description/sizeBytes/updatedAt/url/recommended/kind` |
+| GET | `/api/system/report/file?name=` | 重新下载历史报告（仅允许 `ttdownload-report-*.zip|json`，防目录穿越） |
+| GET | `/api/system/logs/export?level=warn&lines=5000&marker=&q=` | 导出过滤后的日志（`level=warn` 即只含 WARN/ERROR 与失败相关标记），`text/plain` 附件 |
+| GET | `/api/system/deploy-log` | 下载 `deploy.sh` 的部署日志（不存在时 404 并说明原因） |
+| GET | `/api/system/report/tasks?format=json|csv` | 任务清单 + 失败明细（CSV 带 BOM，Excel 可直接打开） |
+| GET | `/api/system/report/network` | 网络自检报告（强制重测后下载 JSON） |
+
+以上端点同样同时挂在 `/api/...` 与 `/api/system/...` 下（如 `/api/report`、`/api/report/list`）。
+
+## 6.7 网络自检
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
