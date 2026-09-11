@@ -116,13 +116,40 @@ if command -v yt-dlp >/dev/null 2>&1; then
   else
     INFO "不支持 --impersonate（可选：pip3 install -U 'yt-dlp[default]'）"
   fi
-  INFO "正在试解析一个公开测试视频（最多 25 秒）…"
+  # 找 cookies：优先 .env 的 YTDLP_COOKIES_FILE，其次默认路径 state/cookies.txt
+  COOKIE_FILE=""
+  ENV_COOKIE="$(grep -h '^YTDLP_COOKIES_FILE=' "${PROJ:-.}/.env" 2>/dev/null | cut -d= -f2- || true)"
+  if [ -n "${ENV_COOKIE:-}" ] && [ -f "${ENV_COOKIE}" ]; then
+    COOKIE_FILE="${ENV_COOKIE}"
+  elif [ -f "${ROOT:-/ttdownload}/state/cookies.txt" ]; then
+    COOKIE_FILE="${ROOT:-/ttdownload}/state/cookies.txt"
+  fi
+  if [ -n "${COOKIE_FILE}" ]; then
+    OK "cookies：${COOKIE_FILE}（$(du -h "${COOKIE_FILE}" 2>/dev/null | cut -f1)，更新于 $(date -r "${COOKIE_FILE}" '+%F %T' 2>/dev/null || echo '?'))"
+    COOKIE_ARGS="--cookies ${COOKIE_FILE}"
+  else
+    INFO "cookies：未配置（会员/需登录/年龄限制视频会失败；在网页「设置 → 公开视频（yt-dlp）」上传）"
+    COOKIE_ARGS=""
+  fi
+
+  INFO "正在试解析一个公开测试视频（不带 cookies，最多 25 秒）…"
   if OUT="$(timeout 25 yt-dlp -J --no-warnings --no-playlist --socket-timeout 15 \
         'https://www.youtube.com/watch?v=jNQXAC9IVRw' 2>&1)"; then
-    OK "解析成功：$(printf '%s' "$OUT" | head -c 200)"
+    OK "不带 cookies 解析成功：$(printf '%s' "$OUT" | head -c 160)"
   else
-    BAD "解析失败：$(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"
+    BAD "不带 cookies 解析失败：$(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
     INFO "→ 常见原因：出口被 YouTube 风控（需要 cookies 或 --proxy）"
+  fi
+  if [ -n "${COOKIE_ARGS}" ]; then
+    INFO "再用 cookies 试一次…"
+    # shellcheck disable=SC2086
+    if OUT2="$(timeout 25 yt-dlp -J --no-warnings --no-playlist --socket-timeout 15 ${COOKIE_ARGS} \
+          'https://www.youtube.com/watch?v=jNQXAC9IVRw' 2>&1)"; then
+      OK "带 cookies 解析成功 → cookies 有效，会员/受限视频应可下载"
+    else
+      BAD "带 cookies 仍失败：$(printf '%s' "$OUT2" | tail -2 | tr '\n' ' ')"
+      INFO "→ cookies 可能过期（重新导出上传），或该出口需要 --proxy"
+    fi
   fi
 else
   BAD "未安装 yt-dlp（sudo apt install -y yt-dlp 或 pip3 install -U yt-dlp）"
