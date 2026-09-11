@@ -35,8 +35,16 @@ export interface NetworkReport {
   checks: NetworkCheck[];
 }
 
-/** YouTube 上 yt-dlp 官方长期存在的测试视频（公开、稳定） */
-const TEST_VIDEO = 'https://www.youtube.com/watch?v=BaW_jenozKc';
+/**
+ * YouTube 元数据自检用的候选视频（都很老、很公开）。
+ * 不同地区/出口对单个视频的可用性判断并不一致，所以逐个试，任一成功即通过。
+ */
+const TEST_VIDEOS = [
+  { id: 'jNQXAC9IVRw', name: 'Me at the zoo（YouTube 第一个视频）' },
+  { id: 'aqz-KE-bpKQ', name: 'Big Buck Bunny' },
+  { id: 'BaW_jenozKc', name: 'yt-dlp 官方测试视频' },
+];
+const TEST_VIDEO = `https://www.youtube.com/watch?v=${TEST_VIDEOS[0].id}`;
 
 function maskProxy(value: string): string {
   return value.replace(/\/\/([^/@\s]+)@/, '//***@');
@@ -52,21 +60,25 @@ function proxyEnv(): Record<string, string> {
   return out;
 }
 
-async function fetchProbe(
+export async function probeHttp(
   url: string,
   timeoutMs: number,
-): Promise<{ ok: boolean; status: number; latencyMs: number; detail: string }> {
+): Promise<{ ok: boolean; status: number; latencyMs: number; detail: string; reachable: boolean }> {
   const started = Date.now();
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
     const res = await fetch(url, { signal: ac.signal, redirect: 'follow' });
     const latencyMs = Date.now() - started;
-    return { ok: res.status < 400, status: res.status, latencyMs, detail: `HTTP ${res.status}` };
+    // 4xx 说明 TCP/TLS/HTTP 全通了（只是目标站拒绝/限流），不该报「网络不通」；
+    // 只有 5xx 或连不上才算链路有问题。
+    const reachable = res.status > 0 && res.status < 500;
+    const note = res.status >= 400 ? '（链路可达，但目标站拒绝/限流）' : '';
+    return { ok: reachable, status: res.status, latencyMs, detail: `HTTP ${res.status}${note}`, reachable };
   } catch (e) {
     const latencyMs = Date.now() - started;
     const msg = (e as Error).name === 'AbortError' ? `超时（>${timeoutMs}ms）` : (e as Error).message;
-    return { ok: false, status: 0, latencyMs, detail: msg };
+    return { ok: false, status: 0, latencyMs, detail: msg, reachable: false };
   } finally {
     clearTimeout(timer);
   }
@@ -188,14 +200,14 @@ async function runChecks(): Promise<NetworkReport> {
     {
       id: 'https-github',
       label: 'HTTPS 直连 GitHub',
-      url: 'https://api.github.com/zen',
-      hint: 'GitHub 不通：部署/更新会失败，检查 DNS 与防火墙',
+      url: 'https://github.com/robots.txt',
+      hint: 'GitHub 不通：部署/更新（git pull）会失败，检查 DNS 与防火墙/代理',
     },
   ];
 
   // ---- 2) HTTPS 直连（Google / YouTube / GitHub）：三个探测并发 ----
   const httpsTasks = httpTargets.map(async (t) => {
-    const r = await fetchProbe(t.url, 8000);
+    const r = await probeHttp(t.url, 8000);
     return {
       id: t.id,
       label: t.label,
@@ -240,44 +252,58 @@ async function runChecks(): Promise<NetworkReport> {
       return out;
     }
 
-    const args = ['-J', ...commonYtDlpArgs(extraArgs, cookiesFile, cookiesFromBrowser), TEST_VIDEO];
-    const r = await runYtDlp(args, 30000);
+    // 逐个候选视频尝试解析（有的地区对某个视频会返回 "This video is unavailable"）
+    let okVideo: { id: string; name: string } | null = null;
     let firstFormatUrl: string | null = null;
-    if (r.code === 0) {
-      let title = '(解析成功)';
-      try {
-        const info = JSON.parse(r.stdout) as { title?: string; formats?: { url?: string; format_id?: string }[] };
-        title = info.title ?? title;
-        firstFormatUrl = (info.formats ?? []).find((f) => typeof f.url === 'string')?.url ?? null;
-      } catch {
-        /* 解析 JSON 失败也算通过 */
+    let title = '';
+    const failures: string[] = [];
+    for (const candidate of TEST_VIDEOS) {
+      const url = `https://www.youtube.com/watch?v=${candidate.id}`;
+      const args = ['-J', ...commonYtDlpArgs(extraArgs, cookiesFile, cookiesFromBrowser), url];
+      const r = await runYtDlp(args, 20000);
+      if (r.code === 0) {
+        okVideo = candidate;
+        try {
+          const info = JSON.parse(r.stdout) as { title?: string; formats?: { url?: string; format_id?: string }[] };
+          title = info.title ?? '';
+          firstFormatUrl = (info.formats ?? []).find((f) => typeof f.url === 'string')?.url ?? null;
+        } catch {
+          /* JSON 解析失败也算通过 */
+        }
+        break;
       }
+      const err = (r.stderr || r.stdout).trim().split('\n').filter(Boolean).pop() ?? '未知错误';
+      failures.push(`${candidate.name}(${candidate.id}) → ${r.timedOut ? '超时' : `退出码 ${r.code}`}：${err.slice(0, 160)}`);
+      scoped.warn('[MARK:NET_CHECK] 候选视频解析失败', { id: candidate.id, code: r.code, timedOut: r.timedOut, err: err.slice(0, 300) });
+    }
+
+    if (okVideo) {
       out.push({
         id: 'ytdlp-youtube-meta',
         label: 'yt-dlp 解析 YouTube 元数据',
         status: 'ok',
         latencyMs: null,
-        detail: `成功：${title}（测试视频 ${TEST_VIDEO}）`,
+        detail: `成功：${title || '(已取得元数据)'}（${okVideo.name} ${okVideo.id}）${
+          failures.length ? `；另有 ${failures.length} 个候选失败（不影响结论）` : ''
+        }`,
         group: 'ytdlp',
       });
-      scoped.mark('NET_CHECK', 'yt-dlp 解析 YouTube 成功', { title });
+      scoped.mark('NET_CHECK', 'yt-dlp 解析 YouTube 成功', { video: okVideo.id, title });
     } else {
-      const err = (r.stderr || r.stdout).trim().split('\n').filter(Boolean).pop() ?? '未知错误';
       out.push({
         id: 'ytdlp-youtube-meta',
         label: 'yt-dlp 解析 YouTube 元数据',
         status: 'fail',
         latencyMs: null,
-        detail: `${r.timedOut ? '超时' : `退出码 ${r.code}`}：${err.slice(0, 300)}`,
-        hint: 'YouTube 元数据拿不到：多为出口无法访问 YouTube 或需要登录校验；在「设置 → 公开视频（yt-dlp）」填代理参数（--proxy ...）或上传 cookies.txt 后重试',
+        detail: `全部候选视频都失败：${failures.join(' ｜ ').slice(0, 500)}`,
+        hint: 'YouTube 元数据拿不到：多为出口被 YouTube 拦截/需要登录校验；在「设置 → 公开视频（yt-dlp）」填代理参数（--proxy ...）或上传 cookies.txt 后重试；首页此面板下方有网络自检详情',
         group: 'ytdlp',
       });
-      scoped.warn('[MARK:NET_CHECK] yt-dlp 解析 YouTube 失败', { code: r.code, timedOut: r.timedOut, err: err.slice(0, 400) });
       return out;
     }
 
-    const urlArgs = ['-f', 'worst', '--get-url', ...commonYtDlpArgs(extraArgs, cookiesFile, cookiesFromBrowser), TEST_VIDEO];
-    const u = await runYtDlp(urlArgs, 30000);
+    const urlArgs = ['-f', 'worst', '--get-url', ...commonYtDlpArgs(extraArgs, cookiesFile, cookiesFromBrowser), `https://www.youtube.com/watch?v=${okVideo.id}`];
+    const u = await runYtDlp(urlArgs, 20000);
     const cdnUrl = (u.stdout || firstFormatUrl || '').trim().split('\n')[0] || '';
     if (!cdnUrl.startsWith('http')) {
       out.push({
@@ -323,16 +349,38 @@ async function runChecks(): Promise<NetworkReport> {
   const localTask = (async (): Promise<NetworkCheck[]> => {
     const out: NetworkCheck[] = [];
     try {
-      const { aria2Client } = await import('../modules/aria2Client');
+      const { aria2Client, ensureAria2Daemon } = await import('../modules/aria2Client');
+      const installed = await toolStatus(config.bins.aria2, ['--version']);
       const started = Date.now();
-      const ok = await aria2Client().ping();
+      let ok = await aria2Client().ping();
+      let booted = '';
+      if (!ok && installed.ok) {
+        // 已安装但没在跑：按应用逻辑尝试自动拉起（url 直链模块本来就依赖它）
+        const r = await ensureAria2Daemon();
+        ok = await aria2Client().ping();
+        booted = r.message;
+      }
       out.push({
         id: 'aria2-rpc',
         label: 'aria2 RPC（URL 直链模块）',
         status: ok ? 'ok' : 'fail',
         latencyMs: Date.now() - started,
-        detail: ok ? `可用（${config.aria2Rpc.host}:${config.aria2Rpc.port}）` : `不可用（${config.aria2Rpc.host}:${config.aria2Rpc.port}）`,
-        hint: ok ? undefined : 'aria2c 未安装或未启动：sudo apt install -y aria2（服务会自动拉起守护进程），端口被占用时改 .env 的 ARIA2_RPC_PORT',
+        detail: ok
+          ? `可用（${config.aria2Rpc.host}:${config.aria2Rpc.port}）${booted ? `；本次自检已自动拉起：${booted}` : ''}${
+              installed.version ? `；${installed.version}` : ''
+            }`
+          : installed.ok
+            ? `aria2c 已安装（${installed.version}）但 RPC ${config.aria2Rpc.host}:${config.aria2Rpc.port} 连不上${
+                booted ? `，自动拉起也未成功：${booted}` : ''
+              }`
+            : `aria2c 未安装`,
+        hint: ok
+          ? undefined
+          : installed.ok
+            ? `aria2c 装了但守护进程起不来：看日志 grep 'MARK:ARIA2_DAEMON'；常见原因：端口 ${config.aria2Rpc.port} 被占用（改 .env 的 ARIA2_RPC_PORT）、aria2c 无执行权限、${
+                config.dirs.state
+              } 不可写`
+            : '安装：sudo apt install -y aria2（部署脚本会自动装），装好后重启服务',
         group: 'local',
       });
     } catch (e) {

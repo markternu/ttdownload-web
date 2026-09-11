@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  ttdownload-web 一键部署脚本（Ubuntu 20.04/22.04/24.04 推荐；18.04 可用但 yt-dlp 模块可能不可用）
+#  ttdownload-web 一键部署脚本
+#  支持：Ubuntu 20.04/22.04/24.04（推荐）、Debian 12/13、树莓派 OS（Raspberry Pi OS，已在 Pi 4B 实测）
+#        Ubuntu 18.04 可用但 yt-dlp 模块可能不可用（系统 Python 太旧）
 #
 #  前置条件：可 sudo 的账号、systemd、能访问外网（apt 源 / NodeSource / npm / GitHub）。
 #  其它系统依赖（Node、aria2、transmission、yt-dlp、ffmpeg、openssl、zip/unzip、jq、
@@ -24,7 +26,7 @@
 #      sudo ./deploy.sh --uninstall  # 停止并移除 systemd 服务（保留数据目录）
 #
 #  脚本做的事：
-#    1) 安装系统依赖：Node.js(18/20 自适应)、aria2、yt-dlp、ffmpeg、openssl、zip/unzip、jq、
+#    1) 安装系统依赖：Node.js（目标 20；仅老 Ubuntu 退回 18）、aria2、yt-dlp、ffmpeg、openssl、zip/unzip、jq、
 #       build-essential/python3；transmission 缺失时改用工程自带 deploy/ubuntutr.sh 交互安装
 #    2) 创建下载目录树（三大模块/归档/加密/消费者目录）
 #    3) 安装 npm 依赖并构建前端 + 后端
@@ -138,8 +140,10 @@ print_dep_status() {
   have_cmd ffmpeg   && echo "  ✓ ffmpeg      已安装"       || echo "  ✗ ffmpeg      未安装（视频合并需要）"
   if have_cmd node; then
     NODE_MAJ="$(detect_node_major || echo 0)"
-    if [[ "${NODE_MAJ:-0}" -ge 18 ]]; then
+    if [[ "${NODE_MAJ:-0}" -ge 20 ]]; then
       echo "  ✓ node        $(node -v)"
+    elif [[ "${NODE_MAJ:-0}" -ge 18 ]]; then
+      echo "  ! node        $(node -v)（低于 20，部署时会升级到 Node 20；旧版 Ubuntu 会保留 18）"
     else
       echo "  ✗ node        $(node -v)（低于 18，部署时会升级）"
     fi
@@ -363,21 +367,29 @@ if [[ $SKIP_APT -eq 0 ]]; then
   # build-essential/python3：better-sqlite3 若无预编译二进制时需要用 node-gyp 本机编译
   apt-get install -y curl ca-certificates gnupg openssl zip unzip ffmpeg jq build-essential python3 || true
 
-  # Node.js（>=18）：没有或版本过低则安装 NodeSource
-  #   Ubuntu 18.04 的 glibc(2.27) 跑不了 Node 20，该场景退回 Node 18（package.json 要求 >=18.17）
+  # Node.js：目标 Node 20（package.json 要求 >=18.17，但 18 已 EOL 且部分依赖要求 20）
+  #   只有确实跑不了 Node 20 的老系统才退回 18：Ubuntu 18.04（glibc 2.27）。
+  #   注意：树莓派 OS / Debian 的 VERSION_ID 是 12/13 这类数字，不能被当成“Ubuntu 13 < 20”。
+  NODE_WANT_MAJOR=20
   NEED_NODE=1
   if command -v node >/dev/null 2>&1; then
     MAJ="$(detect_node_major || echo 0)"
-    [[ "${MAJ:-0}" -ge 18 ]] && NEED_NODE=0
+    [[ "${MAJ:-0}" -ge "$NODE_WANT_MAJOR" ]] && NEED_NODE=0
   fi
   if [[ $NEED_NODE -eq 1 ]]; then
-    UBUNTU_VER="$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-0}")"
-    UBUNTU_MAJ="${UBUNTU_VER%%.*}"
-    NODE_SETUP="20"
-    if [[ "${UBUNTU_MAJ:-0}" =~ ^[0-9]+$ ]] && (( UBUNTU_MAJ < 20 )); then NODE_SETUP="18"; fi
-    log "安装 Node.js ${NODE_SETUP}.x（NodeSource）..."
+    OS_ID="$(. /etc/os-release 2>/dev/null && echo "${ID:-}")"
+    OS_VER="$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-0}")"
+    OS_MAJ="${OS_VER%%.*}"
+    NODE_SETUP="$NODE_WANT_MAJOR"
+    if [[ "$OS_ID" == "ubuntu" ]] && [[ "${OS_MAJ:-0}" =~ ^[0-9]+$ ]] && (( OS_MAJ < 20 )); then
+      NODE_SETUP="18"
+      warn "检测到 Ubuntu ${OS_VER}（glibc 较老），退回 Node 18.x"
+    fi
+    log "安装 Node.js ${NODE_SETUP}.x（NodeSource）；当前：$(node -v 2>/dev/null || echo '未安装')，系统：${OS_ID:-未知} ${OS_VER:-}"
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_SETUP}.x" | bash -
     apt-get install -y nodejs
+    log "Node 已就绪：$(node -v 2>/dev/null) / npm $(npm -v 2>/dev/null)"
+    warn "Node 大版本变化后需要重建原生模块（better-sqlite3）——下面的 npm ci 会重新编译，属正常现象"
   fi
 
   # yt-dlp：优先 pip（版本新；Ubuntu 24.04 需 --break-system-packages），否则 apt，最后下官方二进制

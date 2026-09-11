@@ -135,9 +135,13 @@ test('系统依赖里包含 better-sqlite3 本机编译所需的 build-essential
   assert.match(deploySrc, /apt-get install -y [^\n]*build-essential[^\n]*python3/, '应安装 build-essential 与 python3');
 });
 
-test('Node 版本自适应：Ubuntu <20.04 用 18.x，其余用 20.x', () => {
+test('Node 版本自适应：目标 20，只有 Ubuntu <20.04 才退回 18（Debian/树莓派 OS 用 20）', () => {
   assert.match(deploySrc, /setup_\$\{NODE_SETUP\}\.x/, '应使用变量化的 NodeSource 版本');
-  assert.match(deploySrc, /UBUNTU_MAJ < 20/, 'Ubuntu 18.04 应回退到 Node 18');
+  assert.match(deploySrc, /NODE_WANT_MAJOR=20/, '目标版本应为 20');
+  assert.match(deploySrc, /"\$OS_ID" == "ubuntu"/, '必须同时判断发行版 ID 是 ubuntu');
+  assert.match(deploySrc, /OS_MAJ < 20/, '只有 Ubuntu <20.04 才回退 Node 18');
+  // 回归：不能用「VERSION_ID 的整数」直接和 20 比较（Debian 12/13 会被误判）
+  assert.equal(/UBUNTU_MAJ < 20/.test(deploySrc), false, '旧的 Ubuntu-only 判断必须已移除');
 });
 
 test('--check-deps 能正确识别 node 版本（回归：辅助函数必须定义在提前退出之前）', () => {

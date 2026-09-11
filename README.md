@@ -68,7 +68,8 @@ npm start                     # http://localhost:8080
 
 ## 四、一键部署（Ubuntu，生产推荐）
 
-**要求**：Ubuntu 20.04/22.04/24.04（18.04 可用但 yt-dlp 模块可能不可用）、可 `sudo`、systemd、能上外网。
+**要求**：Ubuntu 20.04/22.04/24.04，或 Debian 12/13、树莓派 OS（Raspberry Pi OS）；
+可 `sudo`、systemd、能上外网。Node.js 由脚本安装（目标 Node 20）。
 除此之外**系统依赖全部由脚本自动安装**，你唯一需要交互的地方是 transmission 安装脚本的提问。
 
 ```bash

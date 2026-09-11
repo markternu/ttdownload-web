@@ -36,6 +36,11 @@ fs.writeFileSync(
   `#!/bin/bash
 if [ "$1" = "--version" ]; then echo "2025.01.01"; exit 0; fi
 if [ "$1" = "--get-url" ]; then echo "${cdnBase}/probe"; exit 0; fi
+if [ -n "$YTDLP_FAIL_IDS" ]; then
+  for id in $(echo "$YTDLP_FAIL_IDS" | tr ',' ' '); do
+    case "$*" in *"$id"*) echo "ERROR: [youtube] $id: This video is unavailable" >&2; exit 1 ;; esac
+  done
+fi
 case "$*" in
   *-J*)
     echo '{"title":"网络自检测试视频","uploader":"作者","duration":10,"formats":[{"format_id":"18","ext":"mp4","resolution":"360p","height":360,"vcodec":"avc1","acodec":"mp4a","filesize":1000,"url":"${cdnBase}/probe"}]}'
@@ -480,5 +485,76 @@ test('报告里带代码版本（git commit），便于把日志和代码版本�
     fs.writeFileSync(tmp, res.buf);
     const readme = execFileSync('unzip', ['-p', tmp, 'README.txt'], { encoding: 'utf8' });
     assert.match(readme, /代码版本：/);
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* 按真实报告发现的三个问题回归                                         */
+/* ------------------------------------------------------------------ */
+
+test('HTTPS 探测：4xx 是「链路可达但被目标站拒绝」，不得误报网络不通', async () => {
+  const srv = http.createServer((req, res) => {
+    if (req.url === '/forbidden') {
+      res.writeHead(403).end('nope');
+      return;
+    }
+    if (req.url === '/boom') {
+      res.writeHead(502).end('bad gateway');
+      return;
+    }
+    res.writeHead(204).end();
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const ok = await netCheck.probeHttp(`${b}/ok`, 3000);
+    assert.equal(ok.ok, true);
+    assert.equal(ok.status, 204);
+
+    const forbidden = await netCheck.probeHttp(`${b}/forbidden`, 3000);
+    assert.equal(forbidden.status, 403);
+    assert.equal(forbidden.ok, true, 'GitHub 对共享出口限流返回 403，不能当成网络不通');
+    assert.match(forbidden.detail, /链路可达/);
+
+    const boom = await netCheck.probeHttp(`${b}/boom`, 3000);
+    assert.equal(boom.status, 502);
+    assert.equal(boom.ok, false, '5xx 才算链路有问题');
+
+    const dead = await netCheck.probeHttp('http://127.0.0.1:1/nothing', 1500);
+    assert.equal(dead.ok, false);
+    assert.equal(dead.status, 0);
+  } finally {
+    await new Promise((r) => srv.close(r));
+  }
+});
+
+test('网络自检的 aria2 项能区分「未安装」与「已安装但没起来」', async () => {
+  netCheck.resetNetworkCache();
+  const report = await netCheck.networkReport(true);
+  const aria2 = report.checks.find((c) => c.id === 'aria2-rpc');
+  assert.ok(aria2, '应有 aria2 检查项');
+  // 测试机没有 aria2c：应明确说「未安装」，并给 apt 建议
+  assert.match(aria2.detail, /aria2c (未安装|已安装)/, `aria2 项应说明安装状态，实际：${aria2.detail}`);
+  if (!aria2.detail.includes('未安装')) {
+    assert.match(aria2.detail, /RPC .* 连不上|可用/);
+  }
+  if (aria2.status === 'fail') {
+    assert.ok(aria2.hint && aria2.hint.length > 0);
+  }
+});
+
+test('YouTube 元数据自检：首个候选视频不可用时自动换下一个', async () => {
+  const first = 'jNQXAC9IVRw';
+  process.env.YTDLP_FAIL_IDS = first;
+  netCheck.resetNetworkCache();
+  try {
+    const report = await netCheck.networkReport(true);
+    const meta = report.checks.find((c) => c.id === 'ytdlp-youtube-meta');
+    assert.equal(meta.status, 'ok', `首个候选失败时应回退到下一个候选，实际：${meta.detail}`);
+    assert.match(meta.detail, /候选失败/, '应说明有候选视频解析失败过');
+    assert.match(meta.detail, /Big Buck Bunny|yt-dlp 官方测试视频/, '应换用后面的候选并汇报成功');
+  } finally {
+    delete process.env.YTDLP_FAIL_IDS;
+    netCheck.resetNetworkCache();
   }
 });

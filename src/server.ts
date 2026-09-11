@@ -6,6 +6,7 @@ import { initNamePrefix } from './services/crypto';
 import { recoverTasks, startScheduler, stopScheduler, kickScheduler } from './core/scheduler';
 import { startPipeline, stopPipeline } from './services/pipeline';
 import { startBtEvictWorker, stopBtEvictWorker } from './services/btEvict';
+import { ensureAria2Daemon } from './modules/aria2Client';
 
 async function main(): Promise<void> {
   ensureDirs();
@@ -44,6 +45,10 @@ async function main(): Promise<void> {
   });
 
   await recoverTasks();
+  // aria2 守护进程（url 直链模块依赖）：启动时后台拉起，避免第一个任务才现拉、也便于自检如实显示
+  void ensureAria2Daemon()
+    .then((r) => logger.mark('BOOT', `aria2 RPC 自检：${r.message}`))
+    .catch((e) => logger.child('aria2').warn(`[MARK:ARIA2_DAEMON] 启动时拉起 aria2 失败：${(e as Error).message}`));
   startPipeline();
   startScheduler();
   startBtEvictWorker();
