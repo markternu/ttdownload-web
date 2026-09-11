@@ -107,6 +107,10 @@ export interface Settings {
   /** 追加到所有 yt-dlp 调用的额外参数（空格分隔，如 --proxy socks5://127.0.0.1:1080） */
   webvideoExtraArgs: string;
   autoDeleteAfterReport: boolean;
+  /** 修复脚本上传/执行（环境问题远程修复通道；默认关闭） */
+  scriptUploadEnabled: boolean;
+  /** 修复脚本执行超时（秒，默认 600） */
+  scriptRunTimeoutSec: number;
   /** BT 出清机制（长时间无资源/停滞/极慢 -> 清理任务与 incomplete 目录） */
   btEvict: {
     enabled: boolean;

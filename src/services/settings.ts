@@ -26,6 +26,8 @@ export function defaultSettings(): Settings {
     webvideoCookiesFromBrowser: config.webvideo.cookiesFromBrowser,
     webvideoExtraArgs: config.webvideo.extraArgs,
     autoDeleteAfterReport: true,
+    scriptUploadEnabled: config.scriptUploadEnabled,
+    scriptRunTimeoutSec: config.scriptRunTimeoutSec,
     btEvict: { ...config.btEvict },
   };
 }

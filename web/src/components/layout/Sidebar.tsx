@@ -14,6 +14,7 @@ import {
   ScrollText,
   Settings as SettingsIcon,
   Video,
+  Wrench,
   X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -38,6 +39,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/files', label: '已发布文件', icon: FileVideo2, description: '消费者目录中的加密成品' },
   { to: '/logs', label: '日志', icon: ScrollText, description: '查看 / 过滤 / 下载日志与诊断包' },
   { to: '/report', label: '问题反馈', icon: LifeBuoy, description: '一键下载诊断报告并发给开发者' },
+  { to: '/scripts', label: '修复脚本', icon: Wrench, description: '上传并执行开发者给的系统修复脚本（root）' },
   { to: '/settings', label: '设置', icon: SettingsIcon, description: '下载 / 网络 / 外观 / 系统' },
 ]
 

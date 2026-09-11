@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import multer from 'multer';
 import { Router, type RequestHandler } from 'express';
 import { config, DIRS } from '../core/config';
 import { dbFileSize, computeStats, logsRepo } from '../core/db';
@@ -15,6 +16,22 @@ import {
   type LogLevel,
 } from '../core/logger';
 import { tasksRepo } from '../core/db';
+import {
+  deleteScript,
+  getScript,
+  readScript,
+  readScriptLog,
+  refreshRun,
+  runScript,
+  saveScript,
+  scriptFilePath,
+  scriptLogPath,
+  scriptExecEnabled,
+  scriptsOverview,
+  setScriptExecEnabled,
+  tokenOk,
+  maintenanceToken,
+} from '../services/scriptRunner';
 import {
   buildDiagnosticsBundle,
   createReport,
@@ -389,6 +406,111 @@ const networkReportHandler = asyncHandler(async (_req, res) => {
   res.send(JSON.stringify(report, null, 2));
 });
 
+/* ------------------------------------------------------------------ */
+/* 修复脚本上传 / 执行（环境问题的远程修复通道）                          */
+/* ------------------------------------------------------------------ */
+
+const maintenanceTokenConfigured = (): boolean => maintenanceToken().length > 0;
+
+const scriptTokenFrom = (req: { headers: Record<string, unknown>; query: Record<string, unknown> }): string =>
+  String(req.headers['x-maint-token'] ?? req.query.token ?? '');
+
+function requireScriptToken(req: { headers: Record<string, unknown>; query: Record<string, unknown> }): void {
+  if (!scriptExecEnabled()) {
+    throw badRequest('修复脚本功能未开启：请先在上方打开开关，或设置 .env 的 SCRIPT_UPLOAD_ENABLED=1 后重启', 'SCRIPT_DISABLED');
+  }
+  if (!tokenOk(scriptTokenFrom(req))) {
+    throw badRequest('维护令牌不正确（取 .env 的 MAINTENANCE_TOKEN 或 ANDROID_TOKEN，在页面右上角填入）', 'SCRIPT_TOKEN');
+  }
+}
+
+/** 概览：开关状态、是否需要令牌、超时、历史脚本列表 */
+const scriptsOverviewHandler = asyncHandler(async (_req, res) => {
+  res.json(scriptsOverview());
+});
+
+/** 开启/关闭脚本执行 */
+const scriptsToggleHandler = asyncHandler(async (req, res) => {
+  const body = (req.body ?? {}) as { enabled?: boolean };
+  if (typeof body.enabled !== 'boolean') throw badRequest('enabled 必须是布尔值');
+  if (body.enabled && !tokenOk(scriptTokenFrom(req as never))) {
+    throw badRequest('开启该功能需要维护令牌（.env 的 MAINTENANCE_TOKEN 或 ANDROID_TOKEN）', 'SCRIPT_TOKEN');
+  }
+  setScriptExecEnabled(body.enabled);
+  res.json(scriptsOverview());
+});
+
+const scriptUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 } });
+
+/** 上传脚本：multipart(file) 或 JSON { name, content } */
+const scriptUploadHandler = [
+  scriptUpload.single('file'),
+  asyncHandler(async (req, res) => {
+    requireScriptToken(req as never);
+    const body = (req.body ?? {}) as { name?: string; content?: string };
+    const content = req.file?.buffer?.toString('utf8') ?? (typeof body.content === 'string' ? body.content : '');
+    const name = req.file?.originalname ?? body.name ?? 'fix.sh';
+    const saved = saveScript(name, content);
+    if (!saved.ok || !saved.item) throw badRequest(saved.error ?? '保存失败', 'SCRIPT_SAVE');
+    res.json({ item: saved.item, overview: scriptsOverview() });
+  }),
+];
+
+/** 单个脚本详情（含内容预览与日志尾部；运行中会刷新状态） */
+const scriptDetailHandler = asyncHandler(async (req, res) => {
+  const id = String(req.params.id);
+  const item = refreshRun(id);
+  if (!item) throw notFound('脚本不存在', 'SCRIPT_NOT_FOUND');
+  const script = readScript(id);
+  const { content, total } = readScriptLog(id, Math.min(2000, Math.max(50, Number(req.query.lines ?? 300))));
+  res.json({
+    item,
+    preview: script?.content ?? '',
+    log: content,
+    logLines: total,
+    enabled: scriptExecEnabled(),
+    tokenRequired: maintenanceTokenConfigured(),
+    timeoutSec: scriptsOverview().timeoutSec,
+  });
+});
+
+/** 执行脚本（分离运行：即使脚本里重启本服务也不会中断） */
+const scriptRunHandler = asyncHandler(async (req, res) => {
+  requireScriptToken(req as never);
+  const id = String(req.params.id);
+  const result = runScript(id);
+  if (!result.ok || !result.item) throw badRequest(result.error ?? '执行失败', 'SCRIPT_RUN');
+  res.json({ item: result.item, via: result.via });
+});
+
+/** 下载脚本文件 */
+const scriptFileHandler = asyncHandler(async (req, res) => {
+  const id = String(req.params.id);
+  const item = getScript(id);
+  const p = scriptFilePath(id);
+  if (!item || !p) throw notFound('脚本不存在', 'SCRIPT_NOT_FOUND');
+  res.download(p, item.name);
+});
+
+/** 下载执行日志 */
+const scriptLogHandler = asyncHandler(async (req, res) => {
+  const id = String(req.params.id);
+  const item = getScript(id);
+  const p = scriptLogPath(id);
+  if (!item || !p) throw notFound('还没有执行日志（可能尚未运行过）', 'SCRIPT_LOG_NOT_FOUND');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  res.download(p, `fix-script-${item.id}-${stamp}.log`);
+});
+
+/** 删除脚本（运行中不允许） */
+const scriptDeleteHandler = asyncHandler(async (req, res) => {
+  requireScriptToken(req as never);
+  const id = String(req.params.id);
+  const ok = deleteScript(id);
+  if (!ok) throw badRequest('删除失败：脚本不存在或正在运行', 'SCRIPT_DELETE');
+  res.json({ ok: true, overview: scriptsOverview() });
+});
+
 // 同时挂到 /api/xxx 与 /api/system/xxx（前端用 /api/system/*，旧习惯用 /api/*）
 for (const register of [
   () => systemRouter.get('/logs', logsHandler),
@@ -417,6 +539,22 @@ for (const register of [
   () => systemRouter.get('/system/logs/export', logExportHandler),
   () => systemRouter.get('/deploy-log', deployLogHandler),
   () => systemRouter.get('/system/deploy-log', deployLogHandler),
+  () => systemRouter.get('/scripts', scriptsOverviewHandler),
+  () => systemRouter.get('/system/scripts', scriptsOverviewHandler),
+  () => systemRouter.post('/scripts/toggle', scriptsToggleHandler),
+  () => systemRouter.post('/system/scripts/toggle', scriptsToggleHandler),
+  () => systemRouter.post('/scripts', ...(scriptUploadHandler as [RequestHandler, RequestHandler])),
+  () => systemRouter.post('/system/scripts', ...(scriptUploadHandler as [RequestHandler, RequestHandler])),
+  () => systemRouter.get('/scripts/:id', scriptDetailHandler),
+  () => systemRouter.get('/system/scripts/:id', scriptDetailHandler),
+  () => systemRouter.post('/scripts/:id/run', scriptRunHandler),
+  () => systemRouter.post('/system/scripts/:id/run', scriptRunHandler),
+  () => systemRouter.get('/scripts/:id/file', scriptFileHandler),
+  () => systemRouter.get('/system/scripts/:id/file', scriptFileHandler),
+  () => systemRouter.get('/scripts/:id/log', scriptLogHandler),
+  () => systemRouter.get('/system/scripts/:id/log', scriptLogHandler),
+  () => systemRouter.delete('/scripts/:id', scriptDeleteHandler),
+  () => systemRouter.delete('/system/scripts/:id', scriptDeleteHandler),
 ]) {
   register();
 }
@@ -490,6 +628,8 @@ systemRouter.put(
       'webvideoCookiesFromBrowser',
       'webvideoExtraArgs',
       'autoDeleteAfterReport',
+      'scriptUploadEnabled',
+      'scriptRunTimeoutSec',
       'btEvict',
     ];
     const clean: Record<string, unknown> = {};

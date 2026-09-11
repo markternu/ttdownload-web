@@ -251,6 +251,22 @@ network/markers/logs（每个日志文件尾部 2MB）。环境变量与设置�
 - 报告落在 `${state}/reports/`，只保留最近 5 份
 - 服务根本起不来时：`sudo ./deploy.sh --collect` 离线打包日志（不依赖服务运行）
 
+### 6.2.5 修复脚本通道（`src/services/scriptRunner.ts`）
+
+代码问题走 Git + `deploy.sh --update`；**环境问题**（缺包/权限/systemd/Node 版本）由开发者生成脚本、
+用户在本页上传执行。因为这是「上传即 root 执行」，实现上做了多层约束：
+
+| 约束 | 实现 |
+| --- | --- |
+| 默认关闭 | 设置项 `scriptUploadEnabled`（env `SCRIPT_UPLOAD_ENABLED`，默认 0） |
+| 令牌 | `tokenOk()` 常数时间比较；`MAINTENANCE_TOKEN` → 回退 `ANDROID_TOKEN`；无令牌时返回明确错误码 |
+| 执行前预览 | 上传只落盘；`GET /:id` 返回 `preview` 供页面展示，执行是独立动作 |
+| 输入校验 | 文本、≤1MB、拒绝二进制、仅 `.sh/.bash`（或 shebang） |
+| 独立执行 | `systemd-run --unit ttdl-fix-<id> --collect` 起瞬时单元（脱离本服务 cgroup，服务重启不中断）；无 systemd 时 `setsid` 分离 |
+| 超时 | 包装脚本内 `timeout <sec> bash -x <script>`（无 timeout 命令时降级并注明），超时码 124 |
+| 留痕 | 脚本/包装器/日志落 `state/scripts/`（0700/0600），`[MARK:SCRIPT_UPLOAD]`/`[MARK:SCRIPT_RUN]` 记录上传、开关、启动方式、退出码、超时 |
+| 保留 | 最近 20 份，运行中的不清理 |
+
 ## 6. 清理（消费者下载完成后删除）
 
 安卓下载完成 → `POST /api/android/done {ids:[...]}` → 服务端：
@@ -273,6 +289,7 @@ network/markers/logs（每个日志文件尾部 2MB）。环境变量与设置�
 | `src/core/procLog.ts` | 外部命令调用日志（argv/退出码/耗时/输出摘要） |
 | `src/services/netCheck.ts` | 网络自检（DNS/HTTPS/yt-dlp/CDN/RPC）|
 | `src/services/report.ts` | 问题反馈报告打包（zip/JSON）、错误摘要、任务清单导出、git 版本 |
+| `src/services/scriptRunner.ts` | 修复脚本上传/执行（令牌、预览、独立单元、超时、留痕） |
 | `src/modules/*` | transmission / aria2 / webvideo 三个生产者 + 完成检测 |
 | `src/services/archive.ts` | 归档（打包/命名/VLT 标记） |
 | `src/services/crypto.ts` | AES-256-CBC 加密、去后缀、发布 |

@@ -386,8 +386,18 @@ if [[ $SKIP_APT -eq 0 ]]; then
       warn "检测到 Ubuntu ${OS_VER}（glibc 较老），退回 Node 18.x"
     fi
     log "安装 Node.js ${NODE_SETUP}.x（NodeSource）；当前：$(node -v 2>/dev/null || echo '未安装')，系统：${OS_ID:-未知} ${OS_VER:-}"
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_SETUP}.x" | bash -
-    apt-get install -y nodejs
+    # NodeSource 不一定支持所有新发行版（如 Debian 13），失败就退化为发行版仓库的 nodejs
+    if ! curl -fsSL "https://deb.nodesource.com/setup_${NODE_SETUP}.x" | bash -; then
+      warn "NodeSource 源配置失败（该系统版本可能暂不支持），改用发行版仓库安装 nodejs"
+    fi
+    apt-get install -y nodejs || warn "NodeSource 的 nodejs 安装失败，尝试发行版仓库"
+    if ! command -v node >/dev/null 2>&1 || [[ "$(detect_node_major || echo 0)" -lt 18 ]]; then
+      warn "当前 Node 仍不可用或版本过低（$(node -v 2>/dev/null || echo 未安装)），改用发行版仓库重试"
+      apt-get update -y >/dev/null 2>&1 || true
+      apt-get install -y nodejs npm || true
+    fi
+    command -v node >/dev/null 2>&1 || die "Node 安装失败：请手动安装 Node 20 后重试（https://nodejs.org 或 nvm）"
+    [[ "$(detect_node_major || echo 0)" -ge 18 ]] || die "Node 版本仍然过低：$(node -v)（需要 >= 18.17）"
     log "Node 已就绪：$(node -v 2>/dev/null) / npm $(npm -v 2>/dev/null)"
     warn "Node 大版本变化后需要重建原生模块（better-sqlite3）——下面的 npm ci 会重新编译，属正常现象"
   fi
@@ -468,6 +478,8 @@ CONCURRENCY_WEBVIDEO=2
 ANDROID_TOKEN=${ANDROID_TOKEN_VALUE}
 # 调试期：debug 记录外部命令 argv/退出码/stdout 摘要，排查完可改成 info 以减小日志
 LOG_LEVEL=debug
+SCRIPT_UPLOAD_ENABLED=0
+SCRIPT_RUN_TIMEOUT_SEC=600
 LOG_MAX_MB=20
 LOG_KEEP_FILES=5
 ARIA2_RPC_HOST=127.0.0.1

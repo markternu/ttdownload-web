@@ -15,6 +15,9 @@ import type {
   NetworkReport,
   ParseResult,
   ReportListResponse,
+  ScriptDetail,
+  ScriptItem,
+  ScriptsOverview,
   SeedAction,
   SeedItem,
   SeedListResponse,
@@ -125,6 +128,12 @@ function jsonBody(body: unknown): RequestInit {
   return { method: 'POST', body: JSON.stringify(body) }
 }
 
+/** 维护令牌请求头（令牌为空时不带；后端未配置令牌时也不需要） */
+function maintTokenHeader(token?: string): Record<string, string> {
+  const value = token?.trim()
+  return value ? { 'X-Maint-Token': value } : {}
+}
+
 /* ------------------------------- 系统 ------------------------------- */
 
 export const api = {
@@ -203,6 +212,68 @@ export const api = {
       status: 'failed',
       pageSize,
     }),
+
+  /* ------------------- 修复脚本（上传即以服务身份 root 执行） ------------------- */
+
+  /** 脚本概览（GET /api/system/scripts）：开关、是否需要令牌、超时与脚本列表 */
+  scriptsOverview: () => request<ScriptsOverview>('/api/system/scripts'),
+
+  /** 开启 / 关闭脚本执行（POST /api/system/scripts/toggle）；开启时服务端要求维护令牌 */
+  scriptsToggle: (enabled: boolean, token?: string) =>
+    request<ScriptsOverview>('/api/system/scripts/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+      headers: maintTokenHeader(token),
+    }),
+
+  /** 上传脚本文件（POST /api/system/scripts，multipart 字段名 file，≤1MB） */
+  scriptsUpload: (file: File, token?: string) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<{ item: ScriptItem; overview: ScriptsOverview }>('/api/system/scripts', {
+      method: 'POST',
+      body: form,
+      headers: maintTokenHeader(token),
+    })
+  },
+
+  /** 以文本方式上传脚本（POST /api/system/scripts，JSON { name, content }），方便直接粘贴 */
+  scriptsUploadText: (name: string, content: string, token?: string) =>
+    request<{ item: ScriptItem; overview: ScriptsOverview }>('/api/system/scripts', {
+      method: 'POST',
+      body: JSON.stringify({ name, content }),
+      headers: maintTokenHeader(token),
+    }),
+
+  /** 脚本详情（GET /api/system/scripts/:id?lines=300）：全文预览 + 执行输出尾部 */
+  scriptDetail: (id: string, lines = 300) =>
+    request<ScriptDetail>(
+      `/api/system/scripts/${encodeURIComponent(id)}`,
+      {},
+      { lines },
+    ),
+
+  /** 执行脚本（POST /api/system/scripts/:id/run）：在独立单元里运行，不受本服务重启影响 */
+  scriptRun: (id: string, token?: string) =>
+    request<{ item: ScriptItem; via: string }>(
+      `/api/system/scripts/${encodeURIComponent(id)}/run`,
+      { method: 'POST', headers: maintTokenHeader(token) },
+    ),
+
+  /** 删除脚本及其执行日志（DELETE /api/system/scripts/:id），运行中不允许删除 */
+  scriptDelete: (id: string, token?: string) =>
+    request<{ ok: boolean; overview: ScriptsOverview }>(
+      `/api/system/scripts/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: maintTokenHeader(token) },
+    ),
+
+  /** 脚本文件下载地址（GET /api/system/scripts/:id/file） */
+  scriptFileUrl: (id: string): string =>
+    `${API_BASE}/api/system/scripts/${encodeURIComponent(id)}/file`,
+
+  /** 执行日志下载地址（GET /api/system/scripts/:id/log） */
+  scriptLogUrl: (id: string): string =>
+    `${API_BASE}/api/system/scripts/${encodeURIComponent(id)}/log`,
 
   /* ------------------------------ 任务 ------------------------------ */
 

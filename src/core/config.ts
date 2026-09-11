@@ -59,6 +59,9 @@ export const config = {
     webvideo: num(process.env.CONCURRENCY_WEBVIDEO, 2),
   },
   autoRetry: num(process.env.AUTO_RETRY, 2),
+  /** 修复脚本上传/执行：默认关闭（危险功能，需在网页显式开启） */
+  scriptUploadEnabled: str(process.env.SCRIPT_UPLOAD_ENABLED, '0') === '1',
+  scriptRunTimeoutSec: num(process.env.SCRIPT_RUN_TIMEOUT_SEC, 600),
   requestTimeoutSec: num(process.env.REQUEST_TIMEOUT_SEC, 30),
   maxSpeedBps: num(process.env.MAX_SPEED_BPS, 0),
 

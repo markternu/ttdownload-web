@@ -276,6 +276,26 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
+  test('修复脚本页：警告/令牌/上传区/使用说明齐备（默认关闭）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/scripts`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=维护令牌与开关', { timeout: 20000 });
+    // 危险提示必须醒目存在
+    assert.ok((await page.locator('text=/root|服务身份|只运行/').count()) > 0, '应有风险警告文案');
+    // 令牌输入与开关
+    assert.ok((await page.locator('input[type="password"]').count()) > 0, '应有维护令牌输入框');
+    // 上传区
+    assert.ok((await page.locator('text=/上传并执行/').count()) > 0, '应有上传并执行卡片');
+    assert.ok((await page.locator('input[type="file"]').count()) > 0, '应有文件选择框');
+    // 使用说明三步
+    assert.ok((await page.locator('text=/使用说明|三步|下载日志/').count()) > 0, '应有使用说明');
+    // 默认关闭：应提示先开启（后端 enabled=false 时）
+    assert.ok((await page.locator('text=/未开启|关闭|开启/').count()) > 0, '应显示开关状态');
+    assert.deepEqual(pageErrors, [], `修复脚本页不应有 JS 报错：${pageErrors.join('; ')}`);
+    await page.close();
+  });
+
   test('页面无 JS 报错', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     assert.deepEqual(pageErrors, [], `浏览器控制台错误：\n${pageErrors.join('\n')}`);

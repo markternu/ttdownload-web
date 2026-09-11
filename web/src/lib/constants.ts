@@ -163,4 +163,6 @@ export function platformTone(platform: string | null | undefined): string {
 export const STORAGE_KEYS = {
   theme: 'ttd-theme',
   pageSize: 'ttd-page-size',
+  /** 维护令牌（修复脚本写操作使用），仅在用户勾选「记住在本机」时写入 */
+  maintToken: 'ttd-maint-token',
 } as const

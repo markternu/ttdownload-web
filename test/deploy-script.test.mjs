@@ -142,6 +142,10 @@ test('Node 版本自适应：目标 20，只有 Ubuntu <20.04 才退回 18（Deb
   assert.match(deploySrc, /OS_MAJ < 20/, '只有 Ubuntu <20.04 才回退 Node 18');
   // 回归：不能用「VERSION_ID 的整数」直接和 20 比较（Debian 12/13 会被误判）
   assert.equal(/UBUNTU_MAJ < 20/.test(deploySrc), false, '旧的 Ubuntu-only 判断必须已移除');
+  // NodeSource 不支持某些新发行版时要能退化到发行版仓库
+  assert.match(deploySrc, /NodeSource 源配置失败/, '应有 NodeSource 失败后的降级处理');
+  assert.match(deploySrc, /apt-get install -y nodejs npm/, '应能退回发行版仓库安装 nodejs');
+  assert.match(deploySrc, /Node 版本仍然过低/, '装完仍过低要明确报错');
 });
 
 test('--check-deps 能正确识别 node 版本（回归：辅助函数必须定义在提前退出之前）', () => {
