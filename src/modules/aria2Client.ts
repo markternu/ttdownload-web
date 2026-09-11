@@ -160,8 +160,14 @@ export async function ensureAria2Daemon(): Promise<{ ok: boolean; message: strin
         return { ok: true, message: 'aria2 守护进程已自动启动' };
       }
     }
-    lastSpawnError = `aria2 启动失败：请检查是否安装 aria2c（${config.bins.aria2}）`;
-    logger.error(lastSpawnError);
+    lastSpawnError =
+      `aria2 已尝试启动（${config.bins.aria2}）但 RPC ${config.aria2Rpc.host}:${config.aria2Rpc.port} 仍未监听` +
+      `（常见原因：端口被占用、二进制不可执行、${config.dirs.state} 不可写、aria2c 立即退出）`;
+    logger.child('aria2').error(`[MARK:ARIA2_DAEMON] ${lastSpawnError}`, {
+      bin: config.bins.aria2,
+      port: config.aria2Rpc.port,
+      stateDir: config.dirs.state,
+    });
     return { ok: false, message: lastSpawnError };
   } catch (e) {
     lastSpawnError = `aria2 不可用: ${(e as Error).message}`;
