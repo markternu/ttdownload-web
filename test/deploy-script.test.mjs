@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const projectRoot = path.resolve('.');
 const deploySrc = fs.readFileSync(path.join(projectRoot, 'deploy.sh'), 'utf8');
@@ -22,7 +23,7 @@ const endIdx = deploySrc.indexOf(endMarker);
 assert.ok(startIdx > 0 && endIdx > startIdx, '应从 deploy.sh 中提取到依赖处理函数');
 const functionsBlock = deploySrc.slice(startIdx, endIdx);
 
-function makeSandbox({ withAria2, withTransmission, fakeInstallerBody }) {
+function makeSandbox({ withAria2, withTransmission, withTransmissionRemote = withTransmission, fakeInstallerBody }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ttdl-deploy-'));
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin, { recursive: true });
@@ -37,7 +38,7 @@ function makeSandbox({ withAria2, withTransmission, fakeInstallerBody }) {
   if (withAria2) writeStub('aria2c', 'echo "aria2 version 1.37.0"');
   if (withTransmission) {
     writeStub('transmission-daemon', 'echo transmission-daemon-mock');
-    writeStub('transmission-remote', 'echo transmission-remote-mock');
+    if (withTransmissionRemote) writeStub('transmission-remote', 'echo transmission-remote-mock');
   }
   // apt-get 桩：只记录被调用的参数
   writeStub('apt-get', `echo "apt-get $@" >> ${logFile}`);
@@ -121,17 +122,50 @@ test('两者都未安装：先装 aria2，再调用 transmission 交互安装脚
   assert.match(out, /交互式提问|请按提示输入/);
 });
 
+test('只有 transmission-daemon、没有 transmission-remote：视为已安装，绝不重跑安装脚本', () => {
+  // 后端只用 JSON-RPC，不需要 transmission-remote；而 ubuntutr.sh 会 purge 旧配置，
+  // 所以「已装 daemon 但没装 remote」的机器必须跳过安装（避免毁掉用户现有 transmission 配置）
+  const sb = makeSandbox({ withAria2: true, withTransmission: true, withTransmissionRemote: false });
+  const out = sb.run();
+  assert.match(out, /transmission 已安装/);
+  assert.equal(sb.calls().includes('INSTALLER_CALLED'), false, '已有 daemon 时不得调用 ubuntutr.sh');
+});
+
+test('系统依赖里包含 better-sqlite3 本机编译所需的 build-essential/python3', () => {
+  assert.match(deploySrc, /apt-get install -y [^\n]*build-essential[^\n]*python3/, '应安装 build-essential 与 python3');
+});
+
+test('Node 版本自适应：Ubuntu <20.04 用 18.x，其余用 20.x', () => {
+  assert.match(deploySrc, /setup_\$\{NODE_SETUP\}\.x/, '应使用变量化的 NodeSource 版本');
+  assert.match(deploySrc, /UBUNTU_MAJ < 20/, 'Ubuntu 18.04 应回退到 Node 18');
+});
+
+test('--check-deps 能正确识别 node 版本（回归：辅助函数必须定义在提前退出之前）', () => {
+  const out = execFileSync('bash', [path.join(projectRoot, 'deploy.sh'), '--check-deps'], { encoding: 'utf8' });
+  assert.match(out, /依赖检查结果/);
+  assert.equal(out.includes('command not found'), false, '不应出现未定义函数/命令');
+  const major = Number(process.versions.node.split('.')[0]);
+  if (major >= 18) {
+    assert.match(out, /✓ node\s+v\d+/, '应识别出已安装的 node 版本');
+    assert.equal(out.includes('低于 18'), false, '不得把 >=18 的 node 误报为版本过低');
+  }
+});
+
 test('deploy/ubuntutr.sh 与原始脚本逐字节一致（交互提示原样保留）', () => {
   const bundled = fs.readFileSync(path.join(projectRoot, 'deploy/ubuntutr.sh'));
-  const originalPath = '/Users/wt/Desktop/androidapp/github/ubuntutr.sh';
-  if (!fs.existsSync(originalPath)) {
-    // 原脚本不在此机器上时，至少校验关键交互提示存在
-    const text = bundled.toString('utf8');
-    for (const prompt of ['是否启用 IP 白名单?', '设置 RPC 登录密码: ', '再次确认密码: ', '[11/11] 最终启动服务']) {
-      assert.ok(text.includes(prompt), `应保留交互提示: ${prompt}`);
-    }
+  // 原始脚本的哈希（Transmission 终极安装配置脚本 v4.0）；本地有原文件时直接逐字节对比
+  const expectedSha256 = 'b4ea0c768945edd6f385e71a845d63dbebf2cc5068f8cafc29d6fce231fe6693';
+  const originalPath = process.env.UBUNTUTR_ORIGINAL ?? '/Users/wt/Desktop/androidapp/github/ubuntutr.sh';
+  if (fs.existsSync(originalPath)) {
+    const original = fs.readFileSync(originalPath);
+    assert.deepEqual(bundled, original, 'bundled 的 ubuntutr.sh 必须与原始脚本完全一致');
     return;
   }
-  const original = fs.readFileSync(originalPath);
-  assert.deepEqual(bundled, original, 'bundled 的 ubuntutr.sh 必须与原始脚本完全一致');
+  // 没有原文件（例如在 Ubuntu 服务器上 clone 后跑测试）时校验哈希 + 关键交互提示
+  const actual = createHash('sha256').update(bundled).digest('hex');
+  assert.equal(actual, expectedSha256, 'ubuntutr.sh 内容被改动（哈希不匹配）');
+  const text = bundled.toString('utf8');
+  for (const prompt of ['是否启用 IP 白名单?', '设置 RPC 登录密码: ', '再次确认密码: ', '[11/11] 最终启动服务']) {
+    assert.ok(text.includes(prompt), `应保留交互提示: ${prompt}`);
+  }
 });

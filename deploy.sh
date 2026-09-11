@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  ttdownload-web 一键部署脚本（Ubuntu 18.04/20.04/22.04/24.04）
+#  ttdownload-web 一键部署脚本（Ubuntu 20.04/22.04/24.04 推荐；18.04 可用但 yt-dlp 模块可能不可用）
+#
+#  前置条件：可 sudo 的账号、systemd、能访问外网（apt 源 / NodeSource / npm / GitHub）。
+#  其它系统依赖（Node、aria2、transmission、yt-dlp、ffmpeg、openssl、zip/unzip、jq、
+#  build-essential + python3）全部由本脚本负责安装，无需预先准备。
 #
 #  用法（在项目根目录执行）：
 #      sudo ./deploy.sh              # 完整部署：装依赖 -> 建目录 -> 构建 -> systemd 启动 -> 自检
@@ -8,17 +12,18 @@
 #      sudo ./deploy.sh --skip-web   # 跳过前端构建（用已构建好的 public/）
 #      sudo ./deploy.sh --port 8080  # 指定端口
 #      sudo ./deploy.sh --root /ttdownload
-#      sudo ./deploy.sh --check-deps # 只检查依赖（aria2/transmission/jq 等）是否已安装，不做任何改动
+#      sudo ./deploy.sh --check-deps # 只检查依赖（aria2/transmission/node/yt-dlp 等）是否已安装，不做任何改动
 #      sudo ./deploy.sh --status     # 查看服务状态
 #      sudo ./deploy.sh --restart    # 重启服务
 #      sudo ./deploy.sh --uninstall  # 停止并移除 systemd 服务（保留数据目录）
 #
 #  脚本做的事：
-#    1) 安装系统依赖：nodejs/npm、aria2、transmission-daemon、yt-dlp、ffmpeg、openssl、zip/unzip
+#    1) 安装系统依赖：Node.js(18/20 自适应)、aria2、yt-dlp、ffmpeg、openssl、zip/unzip、jq、
+#       build-essential/python3；transmission 缺失时改用工程自带 deploy/ubuntutr.sh 交互安装
 #    2) 创建下载目录树（三大模块/归档/加密/消费者目录）
 #    3) 安装 npm 依赖并构建前端 + 后端
 #    4) 生成 .env（保留已有配置，不覆盖密码/token）
-#    5) 注册 systemd 服务并启动，最后做健康检查
+#    5) ufw 放行端口 -> 注册 systemd 服务并启动 -> 健康检查
 # =============================================================================
 set -euo pipefail
 
@@ -63,6 +68,8 @@ BT_INSTALLER="${PROJECT_DIR}/deploy/ubuntutr.sh"
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+detect_node_major() { node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1; }
+
 # 是否具备交互条件（有 TTY；DEPLOY_ASSUME_TTY=1 用于自动测试模拟）
 prompt_ok() {
   [[ "${DEPLOY_ASSUME_TTY:-0}" == "1" ]] && return 0
@@ -91,13 +98,16 @@ run_bt_installer() {
 }
 
 aria2_installed() { have_cmd aria2c; }
-transmission_installed() { have_cmd transmission-daemon && have_cmd transmission-remote; }
+# 注意：后端只用 transmission 的 JSON-RPC，不需要 transmission-remote；
+# 因此这里只以 transmission-daemon 是否存在为准 —— 否则已有配置的 transmission 会被
+# deploy/ubuntutr.sh 重新安装（该脚本会 purge 旧配置与 /var/lib/transmission-daemon）。
+transmission_installed() { have_cmd transmission-daemon; }
 
 print_dep_status() {
   echo "依赖检查结果："
   if aria2_installed; then echo "  ✓ aria2       已安装（$(aria2c --version 2>/dev/null | head -1)）"; else echo "  ✗ aria2       未安装（部署时会 apt install）"; fi
   if transmission_installed; then
-    echo "  ✓ transmission 已安装（transmission-daemon + transmission-remote）"
+    echo "  ✓ transmission 已安装（transmission-daemon，后端走 JSON-RPC）"
   else
     echo "  ✗ transmission 未安装（部署时会调用 deploy/ubuntutr.sh 交互式安装配置）"
   fi
@@ -105,7 +115,25 @@ print_dep_status() {
   have_cmd openssl  && echo "  ✓ openssl     已安装"       || echo "  ✗ openssl     未安装（加密功能必需）"
   have_cmd yt-dlp   && echo "  ✓ yt-dlp      已安装"       || echo "  ✗ yt-dlp      未安装（公开视频模块需要）"
   have_cmd ffmpeg   && echo "  ✓ ffmpeg      已安装"       || echo "  ✗ ffmpeg      未安装（视频合并需要）"
-  have_cmd node     && echo "  ✓ node        $(node -v)"   || echo "  ✗ node        未安装"
+  if have_cmd node; then
+    NODE_MAJ="$(detect_node_major || echo 0)"
+    if [[ "${NODE_MAJ:-0}" -ge 18 ]]; then
+      echo "  ✓ node        $(node -v)"
+    else
+      echo "  ✗ node        $(node -v)（低于 18，部署时会升级）"
+    fi
+  else
+    echo "  ✗ node        未安装（部署时会装 NodeSource Node 20）"
+  fi
+  have_cmd npm      && echo "  ✓ npm         $(npm -v 2>/dev/null | head -1)"    || echo "  ✗ npm         未安装"
+  if have_cmd make && have_cmd g++ && have_cmd python3; then
+    echo "  ✓ 编译工具链   make/g++/python3 齐全（better-sqlite3 兜底编译需要）"
+  else
+    echo "  ✗ 编译工具链   缺 make/g++/python3（部署时会装 build-essential python3）"
+  fi
+  if [ -r /etc/os-release ]; then
+    echo "  · 系统        $(. /etc/os-release; echo "${PRETTY_NAME:-unknown}")"
+  fi
   echo
 }
 
@@ -129,7 +157,7 @@ ensure_aria2() {
 # transmission：没装则必须用工程自带脚本安装（交互提示原样保留，供用户输入白名单/密码等）
 ensure_transmission() {
   if transmission_installed; then
-    log "transmission 已安装（transmission-daemon + transmission-remote），跳过安装（不做任何改动）"
+    log "transmission 已安装（transmission-daemon），跳过安装（不做任何改动）"
     return 0
   fi
   if [[ ! -f "$BT_INSTALLER" ]]; then
@@ -161,6 +189,12 @@ configure_transmission_env() {
   user="$(grep -E '^TRANSMISSION_RPC_USER=' .env 2>/dev/null | cut -d= -f2-)"
   password="$(grep -E '^TRANSMISSION_RPC_PASSWORD=' .env 2>/dev/null | cut -d= -f2-)"
   [[ -n "$user" ]] || user="opengl"
+  # 用户名先落盘（安装脚本固定用 opengl），密码允许稍后在网页「设置」里补
+  if grep -q '^TRANSMISSION_RPC_USER=' .env; then
+    sed -i "s#^TRANSMISSION_RPC_USER=.*#TRANSMISSION_RPC_USER=${user}#" .env
+  else
+    echo "TRANSMISSION_RPC_USER=${user}" >> .env
+  fi
   if [[ -n "$password" ]]; then
     log "transmission RPC 凭据已在 .env 中配置（用户 $user）"
     return 0
@@ -214,37 +248,43 @@ case "$ACTION" in
 esac
 
 # ---------------------------------------------------------------- 1. 系统依赖
-detect_node_major() { node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1; }
-
 if [[ $SKIP_APT -eq 0 ]]; then
   log "安装系统依赖（apt）..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   # 注意：transmission 不在这里装 —— 未安装时会调用 deploy/ubuntutr.sh（交互式安装配置）
-  apt-get install -y curl ca-certificates gnupg openssl zip unzip ffmpeg jq || true
+  # build-essential/python3：better-sqlite3 若无预编译二进制时需要用 node-gyp 本机编译
+  apt-get install -y curl ca-certificates gnupg openssl zip unzip ffmpeg jq build-essential python3 || true
 
-  # Node.js（>=18）：没有或版本过低则安装 NodeSource 20.x
+  # Node.js（>=18）：没有或版本过低则安装 NodeSource
+  #   Ubuntu 18.04 的 glibc(2.27) 跑不了 Node 20，该场景退回 Node 18（package.json 要求 >=18.17）
   NEED_NODE=1
   if command -v node >/dev/null 2>&1; then
     MAJ="$(detect_node_major || echo 0)"
     [[ "${MAJ:-0}" -ge 18 ]] && NEED_NODE=0
   fi
   if [[ $NEED_NODE -eq 1 ]]; then
-    log "安装 Node.js 20.x（NodeSource）..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    UBUNTU_VER="$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-0}")"
+    UBUNTU_MAJ="${UBUNTU_VER%%.*}"
+    NODE_SETUP="20"
+    if [[ "${UBUNTU_MAJ:-0}" =~ ^[0-9]+$ ]] && (( UBUNTU_MAJ < 20 )); then NODE_SETUP="18"; fi
+    log "安装 Node.js ${NODE_SETUP}.x（NodeSource）..."
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_SETUP}.x" | bash -
     apt-get install -y nodejs
   fi
 
-  # yt-dlp：优先 pip（版本新），否则 apt，最后直接下二进制
+  # yt-dlp：优先 pip（版本新；Ubuntu 24.04 需 --break-system-packages），否则 apt，最后下官方二进制
   if ! command -v yt-dlp >/dev/null 2>&1; then
     log "安装 yt-dlp ..."
-    if apt-get install -y python3-pip >/dev/null 2>&1 && pip3 install -U yt-dlp >/dev/null 2>&1; then
+    apt-get install -y python3-pip >/dev/null 2>&1 || true
+    if pip3 install -U yt-dlp >/dev/null 2>&1 \
+      || pip3 install -U --break-system-packages yt-dlp >/dev/null 2>&1 \
+      || apt-get install -y yt-dlp >/dev/null 2>&1; then
       :
-    elif apt-get install -y yt-dlp >/dev/null 2>&1; then
-      :
-    else
-      curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+    elif curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp; then
       chmod +x /usr/local/bin/yt-dlp
+    else
+      warn "yt-dlp 安装失败（公开视频模块将不可用，可稍后手动安装）"
     fi
   fi
 else
@@ -255,7 +295,7 @@ for c in node npm openssl; do
   command -v "$c" >/dev/null 2>&1 || die "缺少必要命令: $c（请去掉 --no-apt 重新运行）"
 done
 warn "以下工具缺失只影响对应模块（脚本会继续）："
-for c in aria2c transmission-daemon transmission-remote yt-dlp ffmpeg zip unzip; do
+for c in aria2c transmission-daemon yt-dlp ffmpeg zip unzip; do
   command -v "$c" >/dev/null 2>&1 && log "  ✓ $c" || warn "  ✗ $c（对应模块不可用）"
 done
 
@@ -339,7 +379,17 @@ ensure_transmission || true
 # 把 transmission RPC 凭据写进 .env（BT 模块需要；用户名默认 opengl）
 configure_transmission_env
 
-# ---------------------------------------------------------------- 6. systemd
+# ---------------------------------------------------------------- 6. 防火墙（如果启用了 ufw）
+# 只放行 Web 端口；aria2/transmission 的 RPC 仅监听本机，无需对外开放
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  if ufw allow "${PORT}/tcp" >/dev/null 2>&1; then
+    log "已放行防火墙端口 ${PORT}/tcp（ufw）"
+  else
+    warn "ufw 放行 ${PORT}/tcp 失败，如外网访问不了请手动执行：ufw allow ${PORT}/tcp"
+  fi
+fi
+
+# ---------------------------------------------------------------- 7. systemd
 log "注册 systemd 服务: ${SERVICE_FILE}"
 NODE_BIN="$(command -v node)"
 cat > "$SERVICE_FILE" <<EOF
@@ -367,7 +417,7 @@ systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
 systemctl restart "$SERVICE_NAME"
 sleep 3
 
-# ---------------------------------------------------------------- 7. 自检
+# ---------------------------------------------------------------- 8. 自检
 log "健康检查 ..."
 HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
 for i in 1 2 3 4 5 6 7 8 9 10; do

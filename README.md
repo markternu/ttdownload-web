@@ -66,18 +66,24 @@ npm start                     # http://localhost:8080
 
 ## 四、一键部署（Ubuntu，生产推荐）
 
+**要求**：Ubuntu 20.04/22.04/24.04（18.04 可用但 yt-dlp 模块可能不可用）、可 `sudo`、systemd、能上外网。
+除此之外**系统依赖全部由脚本自动安装**，你唯一需要交互的地方是 transmission 安装脚本的提问。
+
 ```bash
-# 把整个工程拷到服务器后，在工程根目录：
+git clone git@github.com:markternu/ttdownload-web.git
+cd ttdownload-web
 sudo ./deploy.sh
 ```
 
-脚本自动完成：安装基础依赖（Node20/yt-dlp/ffmpeg/openssl/zip/jq）→ **单独判断并安装 aria2 / transmission**
-（aria2 缺失则 `apt install -y aria2`；transmission 缺失则调用工程自带的 `deploy/ubuntutr.sh`，
-**保留其全部交互提问**：IP 白名单、RPC 登录密码等；已安装则跳过、不做改动）→ 建目录树 →
-`npm ci` + 构建前后端 → 生成 `.env`（含随机安卓 Token，不覆盖已有配置）→ 注册 systemd 服务并启动 →
-健康检查并打印访问地址与 Token。
+脚本自动完成：安装基础依赖（Node 20/yt-dlp/ffmpeg/openssl/zip/unzip/jq/build-essential/python3；
+依赖不含 transmission，改用下面的交互脚本）→ **单独判断并安装 aria2 / transmission**
+（aria2 缺失则 `apt install -y aria2`；transmission 的 `transmission-daemon` 缺失则调用工程自带的
+`deploy/ubuntutr.sh`，**保留其全部交互提问**：IP 白名单、RPC 登录密码等；已安装则跳过、不做改动）→ 建目录树 →
+`npm ci` + 构建前后端 → 生成 `.env`（含随机安卓 Token，不覆盖已有配置）→ ufw 放行端口 →
+注册 systemd 服务并启动 → 健康检查并打印访问地址与 Token。
 
 ```bash
+sudo ./deploy.sh --check-deps  # 先体检：列出各依赖是否已装、缺了会怎么处理
 sudo ./deploy.sh --status      # 查看状态
 sudo ./deploy.sh --restart     # 重启
 sudo ./deploy.sh --port 9000   # 指定端口
