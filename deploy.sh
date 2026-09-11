@@ -35,6 +35,10 @@
 # =============================================================================
 set -euo pipefail
 
+# 部署机上不跑浏览器测试：跳过 playwright 的浏览器下载（省几百 MB 空间与构建时间）
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+export npm_config_playwright_skip_browser_download=1
+
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="ttdownload-web"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -501,9 +505,25 @@ EOF
   log "已生成 .env（安卓 Token 见文件内 ANDROID_TOKEN）"
 else
   log ".env 已存在，保留现有配置（端口/Token/密码不会被覆盖）"
-  # 仅补齐可能缺失的 DOWNLOAD_ROOT/PORT
-  grep -q '^DOWNLOAD_ROOT=' .env || echo "DOWNLOAD_ROOT=${DOWNLOAD_ROOT}" >> .env
-  grep -q '^PORT=' .env || echo "PORT=${PORT}" >> .env
+  # 补齐可能缺失的项（老部署升级后也能用上新功能）
+  backfill_env() {
+    local kv key
+    for kv in "$@"; do
+      key="${kv%%=*}"
+      if ! grep -q "^${key}=" .env; then
+        echo "$kv" >> .env
+        log "已为现有 .env 补齐 ${kv}"
+      fi
+    done
+  }
+  backfill_env \
+    "DOWNLOAD_ROOT=${DOWNLOAD_ROOT}" \
+    "PORT=${PORT}" \
+    "LOG_LEVEL=debug" \
+    "LOG_MAX_MB=20" \
+    "LOG_KEEP_FILES=5" \
+    "SCRIPT_UPLOAD_ENABLED=0" \
+    "SCRIPT_RUN_TIMEOUT_SEC=600"
 fi
 set -a; . ./.env; set +a
 PORT="${PORT:-8080}"
@@ -572,7 +592,9 @@ if [[ "${OK:-0}" -eq 1 ]]; then
   log "安卓 App 填写 : 服务器地址 http://${IP:-<服务器IP>}:${PORT}   Token ${TOKEN}"
   log "下载根目录   : ${DOWNLOAD_ROOT}"
   log "服务管理     : systemctl status|restart|stop ${SERVICE_NAME}"
-  log "日志         : journalctl -u ${SERVICE_NAME} -f   或   ${DOWNLOAD_ROOT}/state/app.log"
+  log "日志/排查    : http://${IP:-<服务器IP>}:${PORT}/logs 与 /report（一键下载诊断报告发给开发者）"
+  log "修复脚本页   : http://${IP:-<服务器IP>}:${PORT}/scripts（维护令牌 = 上面的安卓 Token；也可在 .env 里自设 MAINTENANCE_TOKEN）"
+  log "日志文件     : journalctl -u ${SERVICE_NAME} -f   或   ${DOWNLOAD_ROOT}/state/app.log"
   log "===================================================================="
 else
   warn "部署完成但健康检查失败，请查看：journalctl -u ${SERVICE_NAME} -n 80 --no-pager"
