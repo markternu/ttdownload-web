@@ -15,6 +15,7 @@ fs.mkdirSync(path.dirname(fakeBin), { recursive: true });
 fs.writeFileSync(
   fakeBin,
   `#!/bin/bash
+if [ "$1" = "--version" ]; then echo "2024.01.01"; exit 0; fi
 if [ "$1" = "-J" ]; then
   cat <<'JSON'
 {"title":"测试视频 Demo","uploader":"测试作者","duration":93,"thumbnail":"http://x/t.jpg","formats":[
@@ -31,6 +32,7 @@ for a in "$@"; do
   prev="$a"
 done
 DIR=$(dirname "$OUT")
+[ -z "$OUT" ] && exit 0
 mkdir -p "$DIR"
 echo "[download] Destination: $DIR/mockvideo.mp4"
 echo "PROG 500000 1000000 2048 5"

@@ -17,13 +17,14 @@ fs.mkdirSync(path.dirname(fakeYtdlp), { recursive: true });
 fs.writeFileSync(
   fakeYtdlp,
   `#!/bin/bash
+if [ "$1" = "--version" ]; then echo "2024.01.01"; exit 0; fi
 if [ "$1" = "-J" ]; then
   echo '{"title":"API 测试视频","uploader":"作者","duration":10,"thumbnail":"http://x/t.jpg","formats":[{"format_id":"18","ext":"mp4","resolution":"360p","height":360,"vcodec":"avc1","acodec":"mp4a","filesize":1000}]}'
   exit 0
 fi
 OUT=""; prev=""
 for a in "$@"; do if [ "$prev" = "-o" ]; then OUT="$a"; fi; prev="$a"; done
-DIR=$(dirname "$OUT"); mkdir -p "$DIR"; echo "fake" > "$DIR/api.mp4"; echo "PROG 100 100 0 NA"; exit 0
+DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "fake" > "$DIR/api.mp4"; echo "PROG 100 100 0 NA"; exit 0
 `,
   { mode: 0o755 },
 );
