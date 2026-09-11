@@ -52,7 +52,13 @@ for d in "$(pwd)" /home/*/ttdownload-web /root/ttdownload-web /opt/ttdownload-we
 done
 if [ -n "$PROJ" ]; then
   OK "项目目录：$PROJ"
-  INFO "git：$(git -C "$PROJ" log --oneline -1 2>/dev/null || echo '非 git 仓库')"
+  GIT_DESC="$(git -C "$PROJ" -c safe.directory='*' log --oneline -1 2>/dev/null || true)"
+  if [ -n "$GIT_DESC" ]; then
+    INFO "git：${GIT_DESC}"
+  else
+    BAD "读不到 git 版本（不是 git 仓库，或 git 的 dubious ownership 限制）"
+    INFO "  若确实需要：git config --global --add safe.directory \"$PROJ\""
+  fi
   if [ -d "$PROJ/node_modules/better-sqlite3" ]; then
     if (cd "$PROJ" && node -e "require('better-sqlite3')" >/dev/null 2>&1); then
       OK "better-sqlite3 可在当前 Node 下加载（ABI 匹配）"

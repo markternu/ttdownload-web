@@ -462,6 +462,19 @@ test('networkReportWithBudget：缓存命中时直接返回缓存，不重新测
   assert.ok(cached.checks.length >= 8, '缓存里应有完整检查项');
 });
 
+/** 直接验证 gitInfo 使用了 safe.directory（服务以 root 跑在普通用户仓库里时必需） */
+test('gitInfo 带 -c safe.directory，能在 root 访问他人仓库时读到版本', async () => {
+  const { gitInfo } = await import('../dist/services/report.js');
+  assert.equal(typeof gitInfo, 'function');
+  // 本项目目录是 git 仓库（测试环境即如此）；关键断言：调用不会抛错，且带了 safe.directory
+  const src = fs.readFileSync('src/services/report.ts', 'utf8');
+  assert.match(src, /safe\.directory=\*/, 'gitInfo 必须带 -c safe.directory=*，否则 root 读他人仓库会被 git 拒绝');
+  const info = gitInfo();
+  if (info) {
+    assert.match(info.commit, /^[0-9a-f]{40}$/);
+  }
+});
+
 test('报告里带代码版本（git commit），便于把日志和代码版本对应起来', async () => {
   const sysRes = await req('/api/system/report/list');
   assert.equal(sysRes.status, 200);

@@ -197,8 +197,8 @@ test('运维子命令齐备：--update / --stop / --start / --logs / --logs-foll
 
 test('内置环境脚本：diagnose-env.sh 与 fix-node20.sh 存在、可执行、内容正确', () => {
   const scripts = [
-    { file: 'deploy/scripts/diagnose-env.sh', must: [/体检/, /aria2/, /yt-dlp/, /resolve_host/, /exit 0/], readonly: true },
-    { file: 'deploy/scripts/fix-node20.sh', must: [/setup_20\.x/, /npm ci/, /npm run build/, /systemctl restart/, /回滚/], readonly: false },
+    { file: 'deploy/scripts/diagnose-env.sh', must: [/体检/, /aria2/, /yt-dlp/, /resolve_host/, /safe\.directory/, /exit 0/], readonly: true },
+    { file: 'deploy/scripts/fix-node20.sh', must: [/setup_20\.x/, /npm ci/, /npm run build/, /systemctl restart/, /回滚/, /safe\.directory/, /PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD/], readonly: false },
   ];
   for (const { file, must, readonly } of scripts) {
     const full = path.join(projectRoot, file);

@@ -27,6 +27,10 @@ BAD()  { printf '  [BAD]  %s\n' "$1"; }
 INFO() { printf '  [INFO] %s\n' "$1"; }
 die()  { printf '  [FAIL] %s\n' "$1" >&2; exit 1; }
 
+# 部署/修复机上不跑浏览器测试：跳过 playwright 下载浏览器（几百 MB）
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+export npm_config_playwright_skip_browser_download=1
+
 echo "ttdownload-web 修复脚本：Node 升级到 20"
 echo "时间：$(date '+%F %T %z')   主机：$(hostname)   用户：$(id -un)"
 
@@ -42,7 +46,11 @@ done
 [ -n "$PROJ" ] || die "没找到项目目录（应包含 package.json 与 web/package.json）"
 OK "项目目录：$PROJ"
 cd "$PROJ" || die "无法进入项目目录"
-INFO "当前代码版本：$(git log --oneline -1 2>/dev/null || echo '非 git 仓库')"
+GIT_DESC="$(git -C "$PROJ" -c safe.directory='*' log --oneline -1 2>/dev/null || true)"
+INFO "当前代码版本：${GIT_DESC:-读不到（非 git 仓库，或 root 访问他人仓库被 git 拦；见下方 safe.directory 提示）}"
+if [ -z "$GIT_DESC" ] && [ -d "$PROJ/.git" ]; then
+  INFO "  可执行：git config --global --add safe.directory \"$PROJ\""
+fi
 
 MARK "2. 当前 Node"
 CUR_MAJ=0

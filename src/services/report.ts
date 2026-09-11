@@ -50,7 +50,19 @@ function redactedEnv(): Record<string, string> {
  */
 export function gitInfo(): { commit: string; shortCommit: string; branch: string; subject: string; date: string; dirty: boolean } | null {
   try {
-    const run = (args: string[]): string => execFileSync('git', args, { cwd: __dirname, timeout: 3000, encoding: 'utf8' }).trim();
+    // 注意：服务以 root 运行、仓库属主可能是普通用户，git 会以 "dubious ownership" 拒绝，
+    // 因此统一带 -c safe.directory=*（root 在别人仓库里读版本是安全的）
+    const run = (args: string[]): string => {
+      try {
+        return execFileSync('git', ['-c', 'safe.directory=*', ...args], {
+          cwd: __dirname,
+          timeout: 3000,
+          encoding: 'utf8',
+        }).trim();
+      } catch {
+        return execFileSync('git', args, { cwd: __dirname, timeout: 3000, encoding: 'utf8' }).trim();
+      }
+    };
     const commit = run(['rev-parse', 'HEAD']);
     return {
       commit,
