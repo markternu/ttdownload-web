@@ -219,6 +219,7 @@ aria2/transmission/webvideo 三模块（含 JSON-RPC 与进程交互）、统一
 | 前端页面 404 / 显示后端提示页 | 未构建前端：`npm run build:web`（或 `npm run build:all`） |
 | BT 模块报“transmission 不可用” | 运行 `sudo bash deploy/ubuntutr.sh` 完成交互式安装配置，再 `sudo ./deploy.sh --restart`；`sudo ./deploy.sh --check-deps` 可先检查依赖 |
 | BT 模块报 RPC 认证失败(401) | transmission 脚本默认开启密码认证：网页「设置 → transmission RPC」填 用户 `opengl` + 密码，或写 `.env` 的 `TRANSMISSION_RPC_USER/PASSWORD` |
+| Chrome 登录了多个 Google 账号，该导哪个的 cookies | cookies.txt 按「浏览器 Profile + 域名」导出，代表该 Profile 的**主账号**；会员账号是次要账号时，请新建一个 Profile 只登录会员账号再导出（详见 `使用教程.md` §2.3.2.1） |
 | 会员专享 / 需登录 / 年龄限制视频下载失败 | 程序已自动尝试多种客户端、长重试、降级等方式；仍失败时请到网页「设置 → 公开视频（yt-dlp）」**上传 cookies.txt**（用有权限的账号登录后导出，扩展名 `Get cookies.txt LOCALLY`），保存后点任务「重试」。详见 [`使用教程.md` §2.3](./使用教程.md) |
 | 解析时报“会员专享”但还想下 | 页面会显示「解析受限（仍可下载）」+「仍然下载（自动多方式尝试）」按钮，直接加入队列即可；配上 cookies 成功率更高 |
 | 公开视频解析报 yt-dlp 不存在 | `pip3 install -U yt-dlp` 或 `apt install -y yt-dlp`（设置页可测试连通性） |
