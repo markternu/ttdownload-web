@@ -182,7 +182,7 @@ test('运维子命令齐备：--update / --stop / --start / --logs / --logs-foll
   for (const sub of ['--update', '--stop', '--start', '--logs', '--logs-follow', '--collect', '--restart', '--status', '--uninstall']) {
     assert.ok(deploySrc.includes(sub), `deploy.sh 应支持 ${sub}`);
   }
-  assert.match(deploySrc, /git pull --ff-only/, '--update 应拉取最新代码');
+  assert.match(deploySrc, /pull --ff-only/, '--update 应拉取最新代码');
   assert.match(deploySrc, /npm run build/, '--update 应重新构建后端');
   assert.match(deploySrc, /systemctl restart/, '--update 应重启服务');
   assert.match(deploySrc, /tail -n "\$LOG_LINES"/, '--logs 应输出指定行数日志');
@@ -193,12 +193,22 @@ test('运维子命令齐备：--update / --stop / --start / --logs / --logs-foll
   assert.match(deploySrc, /backfill_env\(\)/, '应有 .env 补齐函数');
   assert.match(deploySrc, /SCRIPT_UPLOAD_ENABLED=0/, '应给现有 .env 补齐修复脚本开关');
   assert.match(deploySrc, /PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1/, '应跳过 playwright 浏览器下载');
+  // sudo 部署时 git/npm/构建必须以仓库属主身份执行，否则产物变 root 所有、之后普通用户无法 git pull
+  assert.match(deploySrc, /REPO_OWNER=/, '应识别仓库属主');
+  assert.match(deploySrc, /as_owner\(\)/, '应有 as_owner 包装函数');
+  assert.match(deploySrc, /as_owner npm run build/, '构建应以属主身份执行');
+  assert.match(deploySrc, /as_owner git -c safe\.directory/, 'git pull 应以属主身份执行');
 });
 
 test('内置环境脚本：diagnose-env.sh / fix-node20.sh / fix-ytdlp.sh 存在、可执行、内容正确', () => {
   const scripts = [
     { file: 'deploy/scripts/diagnose-env.sh', must: [/体检/, /aria2/, /yt-dlp/, /resolve_host/, /safe\.directory/, /JS 运行时/, /yt-dlp-ejs/, /exit 0/], readonly: true },
     { file: 'deploy/scripts/fix-node20.sh', must: [/setup_20\.x/, /npm ci/, /npm run build/, /systemctl restart/, /回滚/, /safe\.directory/, /PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD/], readonly: false },
+    {
+      file: 'deploy/scripts/fix-ownership.sh',
+      must: [/chown -R/, /safe\.directory/, /归位/, /sudo -u/, /回滚/],
+      readonly: false,
+    },
     {
       file: 'deploy/scripts/fix-ytdlp.sh',
       must: [

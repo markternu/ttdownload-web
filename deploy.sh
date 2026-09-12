@@ -45,6 +45,18 @@ export npm_config_playwright_skip_browser_download=1
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="ttdownload-web"
+# 仓库属主：sudo 部署时以它身份执行 git/npm/构建，避免产物变成 root 所有
+REPO_OWNER="$(stat -c '%U' "$PROJECT_DIR" 2>/dev/null || echo root)"
+if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" && -d "/home/${SUDO_USER}" ]]; then
+  REPO_OWNER="${SUDO_USER}"
+fi
+as_owner() {
+  if [[ "${REPO_OWNER}" != "root" ]] && id "${REPO_OWNER}" >/dev/null 2>&1; then
+    sudo -u "${REPO_OWNER}" -H "$@"
+  else
+    "$@"
+  fi
+}
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 PORT="${PORT:-8080}"
 DOWNLOAD_ROOT="${DOWNLOAD_ROOT:-/ttdownload}"
@@ -325,18 +337,18 @@ case "$ACTION" in
     log "更新代码并重新部署 ..."
     cd "$PROJECT_DIR"
     if [[ -d .git ]]; then
-      log "git pull（当前版本：$(git log --oneline -1 2>/dev/null || echo 未知)）"
-      git pull --ff-only || die "git pull 失败：请检查网络/凭据，或手动处理冲突后再执行"
-      log "已更新到：$(git log --oneline -1)"
+      log "git pull（属主 ${REPO_OWNER}；当前版本：$(git -c safe.directory='*' log --oneline -1 2>/dev/null || echo 未知)）"
+      as_owner git -c safe.directory='*' pull --ff-only || die "git pull 失败：请检查网络/凭据，或手动处理冲突后再执行"
+      log "已更新到：$(git -c safe.directory='*' log --oneline -1)"
     else
       warn "当前目录不是 git 仓库（可能是 scp 上传的），跳过 git pull，仅重新构建"
     fi
-    log "重新安装依赖并构建后端 ..."
-    if [[ -f package-lock.json ]]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; else npm install --no-audit --no-fund; fi
-    npm run build
+    log "重新安装依赖并构建后端（以 ${REPO_OWNER} 身份，避免产物变 root 所有）..."
+    if [[ -f package-lock.json ]]; then as_owner npm ci --no-audit --no-fund || as_owner npm install --no-audit --no-fund; else as_owner npm install --no-audit --no-fund; fi
+    as_owner npm run build
     if [[ $SKIP_WEB -eq 0 && -f web/package.json ]]; then
       log "重新构建前端 ..."
-      (cd web && (npm ci --no-audit --no-fund || npm install --no-audit --no-fund) && npm run build)
+      (cd web && (as_owner npm ci --no-audit --no-fund || as_owner npm install --no-audit --no-fund) && as_owner npm run build)
     fi
     log "重启服务 ${SERVICE_NAME} ..."
     systemctl restart "$SERVICE_NAME"
@@ -471,16 +483,16 @@ chmod -R 755 "$DOWNLOAD_ROOT"
 
 # ---------------------------------------------------------------- 3. 依赖与构建
 cd "$PROJECT_DIR"
-log "安装后端依赖（npm ci/install）..."
-if [[ -f package-lock.json ]]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+log "安装后端依赖（npm ci/install；以 ${REPO_OWNER} 身份执行）..."
+if [[ -f package-lock.json ]]; then as_owner npm ci --no-audit --no-fund || as_owner npm install --no-audit --no-fund; else as_owner npm install --no-audit --no-fund; fi
 
 log "构建后端（TypeScript -> dist）..."
-npm run build
+as_owner npm run build
 
 if [[ $SKIP_WEB -eq 0 ]]; then
   if [[ -f web/package.json ]]; then
     log "安装并构建前端（React + Vite -> public/）..."
-    (cd web && (npm ci --no-audit --no-fund || npm install --no-audit --no-fund) && npm run build)
+    (cd web && (as_owner npm ci --no-audit --no-fund || as_owner npm install --no-audit --no-fund) && as_owner npm run build)
   else
     warn "未找到 web/package.json，跳过前端构建"
   fi
@@ -614,6 +626,7 @@ if [[ "${OK:-0}" -eq 1 ]]; then
   log "安卓 App 填写 : 服务器地址 http://${IP:-<服务器IP>}:${PORT}   Token ${TOKEN}"
   log "下载根目录   : ${DOWNLOAD_ROOT}"
   log "服务管理     : systemctl status|restart|stop ${SERVICE_NAME}"
+  log "项目属主     : ${REPO_OWNER}（如发现 git/npm 报权限错误，跑 deploy/scripts/fix-ownership.sh 归位）"
   log "日志/排查    : http://${IP:-<服务器IP>}:${PORT}/logs 与 /report（一键下载诊断报告发给开发者）"
   log "修复脚本页   : http://${IP:-<服务器IP>}:${PORT}/scripts（维护令牌 = 上面的安卓 Token；也可在 .env 里自设 MAINTENANCE_TOKEN）"
   log "日志文件     : journalctl -u ${SERVICE_NAME} -f   或   ${DOWNLOAD_ROOT}/state/app.log"
