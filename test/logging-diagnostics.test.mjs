@@ -623,6 +623,9 @@ test('cookies 结构校验：缺头/缺关键字段/过期都会给出中文告�
   assert.equal(g.stats.keys.SID, true);
   assert.equal(g.stats.keys['__Secure-1PSID'], true);
   assert.equal(g.stats.expiredCount, 0);
+  // 关键字段必须全部显式列出（false=缺失），前端无需自己维护清单
+  const allKeys = ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID', '__Secure-1PSID', '__Secure-3PSID', 'LOGIN_INFO'];
+  for (const k of allKeys) assert.equal(typeof g.stats.keys[k], 'boolean', `keys.${k} 应为布尔`);
 
   // 2) 只有 youtube.com、没有 google.com；且有已过期项
   const partial = path.join(dir, 'partial-cookies.txt');

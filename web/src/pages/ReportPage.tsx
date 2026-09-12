@@ -20,6 +20,7 @@ import {
   Input,
   Select,
   Skeleton,
+  Switch,
 } from '../components/ui'
 import type { BadgeTone } from '../components/ui'
 import { useToast } from '../context/ToastContext'
@@ -68,6 +69,9 @@ export default function ReportPage() {
   const [data, setData] = useState<ReportListResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // 「下载后清空已有日志」开关（服务端持久化设置，切换即保存）
+  const [clearSaving, setClearSaving] = useState(false)
 
   // 「只导出报错」表单
   const [level, setLevel] = useState('warn')
@@ -118,10 +122,36 @@ export default function ReportPage() {
     void loadFailed()
   }, [loadFailed])
 
-  /** 主报告下载：zip（或退化 json） */
+  /** 主报告下载：zip（或退化 json）。开启「下载后清空已有日志」时后端会先出报告再清空日志 */
   const handleReportDownload = () => {
     openAttachment(api.reportUrl())
-    toast.success('已开始下载诊断报告', '把文件发给我即可，我会帮你看问题出在哪')
+    if (clearLogsAfterReport) {
+      toast.success('已开始下载诊断报告', '历史日志已按设置清空（报告里仍包含清空前的日志）')
+    } else {
+      toast.success('已开始下载诊断报告', '把文件发给我即可，我会帮你看问题出在哪')
+    }
+  }
+
+  /** 切换「下载后清空已有日志」：先乐观更新，保存失败再回滚 */
+  const handleClearLogsToggle = async (next: boolean) => {
+    if (!data || clearSaving) return
+    const previous = data.clearLogsAfterReport
+    setClearSaving(true)
+    setData({ ...data, clearLogsAfterReport: next })
+    try {
+      await api.updateSettings({ clearLogsAfterReport: next })
+      await loadReport()
+      toast.success(
+        next ? '已开启：下载后清空已有日志' : '已关闭：下载后保留已有日志',
+        next ? '下一轮测试的日志不会和这一轮混在一起' : '下载报告不再清空历史日志',
+      )
+    } catch (err) {
+      const message = humanizeError((err as { code?: string }).code ?? '', (err as Error).message)
+      setData((current) => (current ? { ...current, clearLogsAfterReport: previous } : current))
+      toast.error('设置保存失败', message)
+    } finally {
+      setClearSaving(false)
+    }
   }
 
   /** 单项报告下载 */
@@ -171,6 +201,7 @@ export default function ReportPage() {
 
   const reports = data?.reports ?? []
   const items = data?.items ?? []
+  const clearLogsAfterReport = data?.clearLogsAfterReport ?? false
   const failedCount = useMemo(() => summaryFailedCount(data?.tasksSummary), [data])
   const zipReady = data?.zipAvailable ?? false
 
@@ -250,6 +281,17 @@ export default function ReportPage() {
               </a>
             </p>
 
+            {/* 下载报告后是否清空已收集的日志（服务端持久化设置，切换即保存） */}
+            <div className="mt-3 rounded-2xl border border-brand-100 bg-white/70 px-3.5 py-3 dark:border-brand-500/20 dark:bg-slate-900/40">
+              <Switch
+                checked={clearLogsAfterReport}
+                disabled={clearSaving}
+                onChange={(next) => void handleClearLogsToggle(next)}
+                label="下载后清空已有日志"
+                description="开启后：点「下载诊断报告」成功即清空 app.log 等历史日志（报告里仍包含清空前的日志），这样下一轮测试的日志不会和这一轮混在一起"
+              />
+            </div>
+
             {zipReady ? (
               <p className="mt-3 flex items-start gap-2 text-xs text-slate-600 dark:text-slate-300">
                 <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
@@ -280,6 +322,7 @@ export default function ReportPage() {
               {failedCount !== null ? (
                 <Badge tone={failedCount > 0 ? 'danger' : 'neutral'}>失败任务 {failedCount} 个</Badge>
               ) : null}
+              {clearLogsAfterReport ? <Badge tone="brand">下载后自动清空日志</Badge> : null}
               <span className="text-xs text-slate-500 dark:text-slate-400">
                 调试期建议保持开启，日志更详细（可在「日志」页切换）
               </span>

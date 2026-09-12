@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AlertTriangle,
   CheckCircle2,
   Cookie,
   Database,
   Gauge,
   HardDrive,
+  Info,
   Monitor,
   Moon,
   Palette,
@@ -68,6 +70,41 @@ const COOKIES_BROWSER_OPTIONS = [
 function toSpeedInput(bps: number): string {
   if (!bps) return '0'
   return String(Math.round((bps / 1024 / 1024) * 100) / 100)
+}
+
+/**
+ * YouTube 登录态依赖的关键 cookie 名（与后端 CRITICAL_COOKIE_KEYS 一致）。
+ * 后端 stats.keys 只包含“已存在”的键（值恒为 true），缺失的不会出现，
+ * 因此页面用这份清单补全「缺少哪些关键字段」。
+ */
+const CRITICAL_COOKIE_KEYS = [
+  'SID',
+  'HSID',
+  'SSID',
+  'APISID',
+  'SAPISID',
+  '__Secure-1PSID',
+  '__Secure-3PSID',
+  'LOGIN_INFO',
+]
+
+/** 关键 cookie 中缺失的名字（后端没返回的也算缺失） */
+function missingCookieKeys(keys: Record<string, boolean>): string[] {
+  const names = Array.from(new Set([...CRITICAL_COOKIE_KEYS, ...Object.keys(keys)]))
+  return names.filter((name) => keys[name] !== true)
+}
+
+/** 域名分布：按条数降序，最多展示 5 项，例如 youtube.com×12、google.com×8 */
+function formatDomainSpread(byDomain: Record<string, number>): string {
+  const entries = Object.entries(byDomain).sort(
+    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+  )
+  if (!entries.length) return '—'
+  const top = entries
+    .slice(0, 5)
+    .map(([domain, count]) => `${domain}×${count}`)
+    .join('、')
+  return entries.length > 5 ? `${top} 等 ${entries.length} 个域名` : top
 }
 
 export default function SettingsPage() {
@@ -160,7 +197,12 @@ export default function SettingsPage() {
       setCookiesStatus(res)
       // 上传成功后把生效路径写回草稿，保存设置后即可持久化
       if (res.cookiesFile) patch('webvideoCookiesFile', res.cookiesFile)
-      toast.success('cookies 上传成功', file.name)
+      // 结构有问题时用警告 toast 直接把第一条问题说清楚（页面下方也会逐条列出）
+      if (res.warnings?.length) {
+        toast.warning('cookies 已上传，但结构有问题', res.warnings[0])
+      } else {
+        toast.success('cookies 上传成功', file.name)
+      }
     } catch (err) {
       toast.error(
         'cookies 上传失败',
@@ -197,6 +239,9 @@ export default function SettingsPage() {
 
   const diskUsedRatio =
     system && system.disk.totalBytes > 0 ? system.disk.usedBytes / system.disk.totalBytes : 0
+
+  // 关键 cookie 缺失情况（只有文件存在时才判断）
+  const missingKeys = cookiesStatus?.exists ? missingCookieKeys(cookiesStatus.stats.keys) : []
 
   return (
     <div className="space-y-5">
@@ -587,18 +632,70 @@ export default function SettingsPage() {
             {cookiesLoading ? (
               <p className="text-xs text-slate-400 dark:text-slate-500">正在读取 cookies 状态…</p>
             ) : cookiesStatus ? (
-              <p className="rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
-                <Badge tone={cookiesStatus.exists ? 'success' : 'warning'} dot>
-                  {cookiesStatus.exists ? '已配置' : '未配置'}
-                </Badge>
-                <span className="ml-2">
-                  文件大小 {(cookiesStatus.sizeBytes / 1024).toFixed(1)} KB · 最后更新{' '}
-                  {cookiesStatus.updatedAt
-                    ? new Date(cookiesStatus.updatedAt).toLocaleString()
-                    : '—'}
-                  {cookiesStatus.fromBrowser ? ` · 来自浏览器 ${cookiesStatus.fromBrowser}` : ''}
-                </span>
-              </p>
+              <div className="space-y-2.5 rounded-xl bg-slate-50 px-3 py-2.5 dark:bg-slate-800/60">
+                <p className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                  <Badge tone={cookiesStatus.exists ? 'success' : 'warning'} dot>
+                    {cookiesStatus.exists ? '已配置' : '未配置'}
+                  </Badge>
+                  {cookiesStatus.valid ? (
+                    <Badge tone="success">结构正常</Badge>
+                  ) : cookiesStatus.exists ? (
+                    <Badge tone="danger">有问题</Badge>
+                  ) : null}
+                  <span>
+                    文件大小 {(cookiesStatus.sizeBytes / 1024).toFixed(1)} KB · 最后更新{' '}
+                    {cookiesStatus.updatedAt
+                      ? new Date(cookiesStatus.updatedAt).toLocaleString()
+                      : '—'}
+                    {cookiesStatus.fromBrowser ? ` · 来自浏览器 ${cookiesStatus.fromBrowser}` : ''}
+                  </span>
+                </p>
+
+                {cookiesStatus.exists ? (
+                  <ul className="space-y-1 text-xs text-slate-500 dark:text-slate-400">
+                    <li>cookie 条数：{cookiesStatus.stats.total}</li>
+                    <li>域名分布：{formatDomainSpread(cookiesStatus.stats.byDomain)}</li>
+                    <li
+                      className={
+                        cookiesStatus.stats.expiredCount > 0
+                          ? 'text-amber-600 dark:text-amber-400'
+                          : undefined
+                      }
+                    >
+                      已过期条数：{cookiesStatus.stats.expiredCount}
+                    </li>
+                    <li>{missingKeys.length ? `缺少：${missingKeys.join('、')}` : '关键字段齐全'}</li>
+                  </ul>
+                ) : null}
+
+                {cookiesStatus.warnings.length ? (
+                  <ul className="space-y-1.5 border-t border-slate-200 pt-2.5 dark:border-slate-700">
+                    {cookiesStatus.warnings.map((warning) => (
+                      <li
+                        key={warning}
+                        className="flex items-start gap-1.5 text-xs leading-relaxed text-red-600 dark:text-red-400"
+                      >
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>{warning}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+
+                {cookiesStatus.notes.length ? (
+                  <ul className="space-y-1 border-t border-slate-200 pt-2.5 dark:border-slate-700">
+                    {cookiesStatus.notes.map((note) => (
+                      <li
+                        key={note}
+                        className="flex items-start gap-1.5 text-[11px] leading-relaxed text-slate-400 dark:text-slate-500"
+                      >
+                        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>{note}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
             ) : (
               <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
                 无法获取 cookies 状态，请确认后端服务已启动。

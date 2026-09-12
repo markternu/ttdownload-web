@@ -179,8 +179,12 @@ export const api = {
   /** 诊断报告清单（GET /api/system/report/list），含单项下载地址与历史报告 */
   reportList: () => request<ReportListResponse>('/api/system/report/list'),
 
-  /** 完整诊断报告下载地址（zip，服务器无 zip 时后端会退化为 json） */
-  reportUrl: (): string => buildUrl('/api/system/report'),
+  /**
+   * 完整诊断报告下载地址（zip，服务器无 zip 时后端会退化为 json）。
+   * clear 不传时按服务端设置 clearLogsAfterReport 执行；传 true/false 可强制本次行为。
+   */
+  reportUrl: (opts: { clear?: boolean } = {}): string =>
+    buildUrl('/api/system/report', { clear: opts.clear === undefined ? undefined : opts.clear ? '1' : '0' }),
 
   /** 历史报告 / 单个报告文件下载地址（GET /api/system/report/file?name=...） */
   reportFileUrl: (name: string): string => buildUrl('/api/system/report/file', { name }),

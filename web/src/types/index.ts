@@ -92,6 +92,7 @@ export interface Settings {
   webvideoExtraArgs: string // 追加给 yt-dlp 的额外参数（空格分隔），''=无
   transcodeQuality: string // 预留
   autoDeleteAfterReport: boolean // 安卓上报后是否删除（默认 true）
+  clearLogsAfterReport: boolean // 下载诊断报告成功后是否清空已收集的历史日志（默认 false）
   /** BT 出清机制（长时间无资源/停滞/极慢 -> 清理任务与 incomplete 目录） */
   btEvict: {
     enabled: boolean
@@ -112,6 +113,19 @@ export interface CookiesStatus {
   sizeBytes: number
   updatedAt: string | null // ISO 时间
   fromBrowser: string // 设置里的“从浏览器读取”，''=未启用
+  valid: boolean // 结构是否可用（warnings 为空才算 true）
+  warnings: string[] // 需要用户处理的问题（可直接展示；为空才算结构正常）
+  notes: string[] // 提示性说明（多账号提醒、会过期等，不影响可用性）
+  /** 结构统计（只在 exists=true 时有意义） */
+  stats: {
+    total: number // cookie 条数
+    byDomain: Record<string, number> // 域名分布，例如 { 'youtube.com': 12 }
+    keys: Record<string, boolean> // 关键 cookie 是否存在，例如 SID / __Secure-1PSID / LOGIN_INFO
+    expiredCount: number // 已过期条数
+    hasHeader: boolean // 是否有 "# Netscape HTTP Cookie File" 头
+    hasGoogleDomain: boolean // 是否含 google.com 的 cookie
+    hasYoutubeDomain: boolean // 是否含 youtube.com 的 cookie
+  }
 }
 
 /** BT 出清检查结果（/api/bt/stale 预览、/api/bt/evict 执行） */
@@ -355,6 +369,8 @@ export interface ReportListResponse {
   zipHint: string | null // zipAvailable=false 时的提示（例如「sudo apt install -y zip」）
   logLevel: LogLevel // 当前落盘日志级别
   debugMode: boolean // 是否开启 Debug 模式
+  /** 服务端持久化设置：下载报告成功后是否清空已收集的历史日志 */
+  clearLogsAfterReport: boolean
   reports: { name: string; sizeBytes: number; mtime: string }[] // 历史上已生成的报告（最近 5 份）
   items: ReportListItem[]
   tasksSummary: unknown // 统计对象（仅用于展示「N 个失败任务」之类，字段不必强类型）

@@ -299,7 +299,8 @@ export function inspectCookiesFile(file: string): {
   const stats: CookiesStatus['stats'] = {
     total: 0,
     byDomain: {},
-    keys: {},
+    // 关键字段全部列出（false = 缺失），前端直接照搬即可，不必自己维护一份清单
+    keys: Object.fromEntries(CRITICAL_COOKIE_KEYS.map((k) => [k, false])),
     expiredCount: 0,
     hasHeader: false,
     hasGoogleDomain: false,
@@ -425,7 +426,7 @@ export function parseOptionsFromSettings(settings?: {
         stats: {
           total: 0,
           byDomain: {} as Record<string, number>,
-          keys: {} as Record<string, boolean>,
+          keys: Object.fromEntries(CRITICAL_COOKIE_KEYS.map((k) => [k, false])) as Record<string, boolean>,
           expiredCount: 0,
           hasHeader: false,
           hasGoogleDomain: false,

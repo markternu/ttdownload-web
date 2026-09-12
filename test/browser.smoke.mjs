@@ -269,6 +269,11 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     assert.ok((await page.locator('text=最近失败的任务').count()) > 0);
     // 反馈步骤
     assert.ok((await page.locator('text=/怎么反馈问题/').count()) > 0, '应有反馈步骤说明');
+    // 「下载后清空已有日志」开关
+    assert.ok(
+      (await page.locator('text=下载后清空已有日志').count()) > 0,
+      '应有「下载后清空已有日志」开关（每轮测试日志互不干扰）',
+    );
     // 点一下「下载」类按钮不应报错（触发浏览器下载，忽略）
     const downloadButtons = page.getByRole('button', { name: /下载/ });
     assert.ok((await downloadButtons.count()) > 0, '页面上应有下载按钮');
