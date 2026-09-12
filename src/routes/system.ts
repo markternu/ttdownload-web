@@ -6,7 +6,7 @@ import { config, DIRS } from '../core/config';
 import { dbFileSize, computeStats, logsRepo } from '../core/db';
 import { dirUsage, freeBytes, statfsBytes, toolStatus, usableBytes } from '../core/disk';
 import { bus } from '../core/events';
-import { getSettingsPublic, updateSettings } from '../services/settings';
+import { getSettings, getSettingsPublic, updateSettings } from '../services/settings';
 import {
   clearLogs,
   listLogFiles,
@@ -189,8 +189,21 @@ const diagnosticsHandler = asyncHandler(async (_req, res) => {
 });
 
 /** 一键诊断报告（推荐）：优先 zip（含 README/日志/部署日志/错误摘要/任务/网络），失败退化为 JSON */
-const reportHandler = asyncHandler(async (_req, res) => {
+const reportHandler = asyncHandler(async (req, res) => {
   const report = await createReport();
+  // 「下载后清空已有日志」：开关在网页「问题反馈」页；也可用 ?clear=1 / ?clear=0 强制覆盖
+  const q = String(req.query.clear ?? '');
+  const shouldClear = q === '1' ? true : q === '0' ? false : getSettings().clearLogsAfterReport === true;
+  let cleared: { cleared: number; bytes: number } | null = null;
+  if (shouldClear) {
+    // 注意：报告文件已经生成完毕，此时清空日志不会影响报告内容
+    cleared = clearLogs();
+    logger.child('report').mark('DIAG', `按要求清空日志（${cleared.cleared} 个文件 / ${cleared.bytes} 字节）后再提供报告下载`);
+  }
+  if (cleared) {
+    res.setHeader('X-Logs-Cleared', String(cleared.cleared));
+    res.setHeader('X-Logs-Cleared-Bytes', String(cleared.bytes));
+  }
   res.download(report.path, report.name, (err) => {
     if (err) logger.child('report').warn(`[MARK:DIAG] 报告下载中断：${err.message}`);
   });
@@ -318,6 +331,7 @@ const reportListHandler = asyncHandler(async (_req, res) => {
   ];
   res.json({
     generatedAt: new Date().toISOString(),
+    clearLogsAfterReport: getSettings().clearLogsAfterReport === true,
     zipAvailable: zipOk.ok,
     zipHint: zipOk.ok ? null : '未检测到 zip 命令：完整报告会退化为单个 JSON。可执行 sudo apt install -y zip 后重试。',
     logLevel: logger.getLevel(),
@@ -630,6 +644,7 @@ systemRouter.put(
       'autoDeleteAfterReport',
       'scriptUploadEnabled',
       'scriptRunTimeoutSec',
+      'clearLogsAfterReport',
       'btEvict',
     ];
     const clean: Record<string, unknown> = {};

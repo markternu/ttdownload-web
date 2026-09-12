@@ -229,6 +229,10 @@ export function humanizeYtDlpError(raw: string): string {
     return '该视频有年龄限制，必须带登录态：请在「设置 → 公开视频（yt-dlp）」上传 cookies.txt（或填「从浏览器读取 cookies」），然后重试';
   }
   // 登录 / 人机校验 / 需要 cookies
+  // yt-dlp 已知问题：YouTube 返回 "The page needs to be reloaded."（多为版本/瞬时问题，见 issue #14610）
+  if (has('the page needs to be reloaded', 'page needs to be reloaded')) {
+    return 'YouTube 返回「The page needs to be reloaded.」：这是 yt-dlp 的已知问题（多与版本/瞬时风控有关，不是你的网络）。程序会自动换客户端/重试；若持续出现，请把 yt-dlp 升级到最新版（可用网页「修复脚本」页跑 deploy/scripts/fix-ytdlp.sh），或改用「跳过网页抓取」方式';
+  }
   if (has('sign in', 'login required', 'please log in', 'not a bot', 'this video requires login', 'use --cookies', 'cookies')) {
     return '该平台要求登录或人机校验：请在「设置 → 公开视频（yt-dlp）」上传 cookies.txt（或填「从浏览器读取 cookies」）后重试';
   }
@@ -261,6 +265,98 @@ export interface CookiesStatus {
   updatedAt: string | null;
   /** 设置里的「从浏览器读取 cookies」 */
   fromBrowser: string;
+  /** 结构校验结论（上传后立刻能看出 cookies 有没有问题） */
+  valid: boolean;
+  /** 需要用户处理的问题（中文，可直接展示；为空才算 valid） */
+  warnings: string[];
+  /** 只是提示性说明（不影响可用性，例如多账号注意事项） */
+  notes: string[];
+  stats: {
+    total: number;
+    byDomain: Record<string, number>;
+    /** 关键 cookie 是否存在（YouTube 登录态必需） */
+    keys: Record<string, boolean>;
+    expiredCount: number;
+    hasHeader: boolean;
+    hasGoogleDomain: boolean;
+    hasYoutubeDomain: boolean;
+  };
+}
+
+/** YouTube 登录态真正依赖的关键 cookie 名 */
+const CRITICAL_COOKIE_KEYS = ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID', '__Secure-1PSID', '__Secure-3PSID', 'LOGIN_INFO'];
+
+/**
+ * 校验 Netscape 格式的 cookies.txt：
+ * 只看结构与关键字段（不联网），把常见"上传了但没用"的原因直接说清楚。
+ */
+export function inspectCookiesFile(file: string): {
+  valid: boolean;
+  warnings: string[];
+  notes: string[];
+  stats: CookiesStatus['stats'];
+} {
+  const stats: CookiesStatus['stats'] = {
+    total: 0,
+    byDomain: {},
+    keys: {},
+    expiredCount: 0,
+    hasHeader: false,
+    hasGoogleDomain: false,
+    hasYoutubeDomain: false,
+  };
+  const warnings: string[] = [];
+  const notes: string[] = [];
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    return { valid: false, warnings: [`读取 cookies 文件失败：${(e as Error).message}`], notes, stats };
+  }
+  const lines = text.split('\n');
+  stats.hasHeader = /^#\s*(Netscape )?HTTP Cookie File/i.test(lines[0] ?? '') || text.includes('HTTP Cookie File');
+  const nowSec = Math.floor(Date.now() / 1000);
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const parts = line.split('\t');
+    if (parts.length < 7) continue;
+    const [domain, , , , expiry, name] = parts;
+    stats.total += 1;
+    const d = (domain || '').replace(/^\./, '');
+    stats.byDomain[d] = (stats.byDomain[d] ?? 0) + 1;
+    if (/youtube\.com$/.test(d) || d === 'youtube.com') stats.hasYoutubeDomain = true;
+    if (/google\.com$/.test(d) || d === 'google.com') stats.hasGoogleDomain = true;
+    if (CRITICAL_COOKIE_KEYS.includes(name)) stats.keys[name] = true;
+    const exp = Number(expiry);
+    if (Number.isFinite(exp) && exp > 0 && exp < nowSec) stats.expiredCount += 1;
+  }
+
+  if (stats.total === 0) {
+    warnings.push('文件里没解析出任何 cookie 行：可能不是 Netscape 格式（用 "Get cookies.txt LOCALLY" 导出，别手改）');
+  }
+  if (!stats.hasHeader) {
+    warnings.push('缺少 "# Netscape HTTP Cookie File" 头：导出方式不对（不要用 JSON/zip 导出）');
+  }
+  if (!stats.hasYoutubeDomain) warnings.push('没有 youtube.com 的 cookie：导出时请先打开并登录 youtube.com');
+  if (!stats.hasGoogleDomain) {
+    warnings.push('没有 google.com 的 cookie：YouTube 登录态依赖它，导出时选"全部/当前站点"都行但要包含 google.com');
+  }
+  const missingKeys = CRITICAL_COOKIE_KEYS.filter((k) => !stats.keys[k]);
+  if (stats.total > 0 && missingKeys.length >= 5) {
+    warnings.push(
+      `缺少关键登录 cookie（${missingKeys.slice(0, 5).join('、')}…）：说明导出时其实没有登录态，请确认导出前已登录 YouTube`,
+    );
+  }
+  if (stats.expiredCount > 0) {
+    warnings.push(`有 ${stats.expiredCount} 条 cookie 已过期：重新导出一次最常见的过期项是 __Secure-1PSID/3PSID`);
+  }
+  if (Object.keys(stats.byDomain).some((d) => d.includes('youtube') || d.includes('google'))) {
+    // 多账号提示：无法从 cookies 判断账号，但这是最常见的坑，作为"提示"给出（不算错误）
+    notes.push('多账号提醒：cookies 代表导出时 Chrome 配置里的「主账号」；若目标（会员）账号是次要账号，请新建 Profile 只登录它再导出');
+  }
+  notes.push('cookies 会过期：以后突然报「Sign in to confirm you\'re not a bot」，重新导出上传即可');
+  return { valid: warnings.length === 0, warnings, notes, stats };
 }
 
 /** 把 "a --b 'c d'" 解析成参数数组（支持单双引号） */
@@ -320,6 +416,22 @@ export function parseOptionsFromSettings(settings?: {
   } catch {
     /* 不存在 */
   }
+  const inspected = exists
+    ? inspectCookiesFile(file)
+    : {
+        valid: false,
+        warnings: ['还没有上传 cookies：会员专享 / 需登录 / 年龄限制的视频需要它'],
+        notes: [] as string[],
+        stats: {
+          total: 0,
+          byDomain: {} as Record<string, number>,
+          keys: {} as Record<string, boolean>,
+          expiredCount: 0,
+          hasHeader: false,
+          hasGoogleDomain: false,
+          hasYoutubeDomain: false,
+        },
+      };
   return {
     cookiesFile: file,
     defaultPath: config.webvideo.defaultCookiesFile,
@@ -327,6 +439,10 @@ export function parseOptionsFromSettings(settings?: {
     sizeBytes,
     updatedAt,
     fromBrowser: String(s.webvideoCookiesFromBrowser ?? ''),
+    valid: inspected.valid,
+    warnings: inspected.warnings,
+    notes: inspected.notes,
+    stats: inspected.stats,
   };
 }
 
@@ -354,6 +470,15 @@ export interface AttemptContext {
 export const YOUTUBE_TRY_CLIENTS = 'youtube:player_client=default,tv,web_safari,android_vr,web_embedded,mweb';
 /** 只走网页内嵌播放器（对部分受限视频可绕过 web 端校验） */
 export const YOUTUBE_EMBEDDED_CLIENT = 'youtube:player_client=web_embedded,tv_embedded';
+/**
+ * 跳过网页/配置抓取，直接打 player API。
+ * 用于 yt-dlp 报 "The page needs to be reloaded." 的场景（见 yt-dlp issue #14610 等）。
+ */
+export const YOUTUBE_SKIP_WEBPAGE = 'youtube:player_skip=webpage,configs;player_client=web_safari,web';
+
+/** 常见桌面 Chrome UA（有些站点会因 UA/语言不匹配而拒绝） */
+export const DESKTOP_CHROME_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 /**
  * 生成按「成功率优先」排序的下载方式序列：
@@ -391,14 +516,18 @@ export function buildDownloadAttempts(ctx: AttemptContext): DownloadAttempt[] {
     if (cookieArgs.length) push('登录态 + 指定格式', withCookies(['-f', f]));
     push('指定格式', ['-f', f]);
   }
-  // 2) 带登录态（cookies）的最佳画质 / 多客户端 —— 会员与登录受限视频的关键一步
+  // 2) 带登录态的各个档位（会员/风控视频成功率最高，因此全部排在最前）
   if (cookieArgs.length) {
     push('登录态 + 最佳画质', withCookies(best));
     if (ctx.isYouTube) push('登录态 + 多客户端', withCookies([...multiClient, ...best]));
+    push('登录态 + 浏览器 UA/语言', withCookies(['--user-agent', DESKTOP_CHROME_UA, '--add-header', 'Accept-Language:en-US,en;q=0.9', ...best]));
+    // 「The page needs to be reloaded.」的绕法：跳过网页抓取直接请求 player API（有 cookies 时最有效）
+    if (ctx.isYouTube) push('登录态 + 跳过网页抓取', withCookies(['--extractor-args', YOUTUBE_SKIP_WEBPAGE, ...best]));
   }
   // 3) 无登录态的各种尝试
   push('最佳画质', best);
   if (ctx.isYouTube) push('多客户端回退', [...multiClient, ...best]);
+  if (ctx.isYouTube) push('跳过网页抓取（player API 直连）', ['--extractor-args', YOUTUBE_SKIP_WEBPAGE, ...best]);
   push('长重试 + 放宽校验', [
     '--retries',
     '20',
@@ -440,6 +569,8 @@ interface RunningJob {
   attemptIndex: number;
   attemptStartedAt: number;
   attemptErrors: AttemptFailure[];
+  /** 每个方式已原地重试次数（瞬时错误用） */
+  attemptRetries?: Record<number, number>;
   stdout: string;
   stderr: string;
   startedAt: number;
@@ -512,6 +643,27 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
     }
     const message = humanizeYtDlpError(job.stderr || job.stdout);
     const failedLabel = job.attempts[job.attemptIndex].label;
+    const rawErr = `${job.stderr}\n${job.stdout}`.toLowerCase();
+    // 瞬时性错误（YouTube 风控抖一下/页面需要刷新）：先原地重试，不急着换方式
+    const transient =
+      rawErr.includes('page needs to be reloaded') ||
+      rawErr.includes('sign in to confirm') ||
+      rawErr.includes('http error 5') ||
+      rawErr.includes('connection reset') ||
+      rawErr.includes('timed out') ||
+      rawErr.includes('temporarily unavailable');
+    const retries = job.attemptRetries?.[job.attemptIndex] ?? 0;
+    if (transient && retries < 2 && !job.cancelled) {
+      job.attemptRetries = { ...(job.attemptRetries ?? {}), [job.attemptIndex]: retries + 1 };
+      const delay = 3000 * (retries + 1);
+      scoped.warn(
+        `[MARK:YTDLP_EXIT] 方式「${failedLabel}」遇到瞬时错误，${delay / 1000}s 后原地重试（第 ${retries + 1}/2 次）：${message}`,
+      );
+      setTimeout(() => {
+        if (!job.cancelled && job.exitCode === null) launchAttempt(taskId, job, ctx);
+      }, delay);
+      return;
+    }
     job.attemptErrors.push({ label: failedLabel, message });
     scoped.warn(
       `[MARK:YTDLP_EXIT] 方式「${failedLabel}」失败 code=${exit}（${ms}ms）：${message}`,

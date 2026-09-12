@@ -80,7 +80,11 @@ N=$(cat "$LADDER_COUNT" 2>/dev/null || echo 0)
 N=$((N + 1))
 echo "$N" > "$LADDER_COUNT"
 if [ "$N" -le "\${LADDER_FAIL_TIMES:-0}" ]; then
-  echo "\${LADDER_DOWNLOAD_ERROR:-$LADDER_MEMBERS_ERROR}" >&2
+  if [ "$N" = "1" ] && [ -n "$LADDER_FIRST_ERROR" ]; then
+    echo "$LADDER_FIRST_ERROR" >&2
+  else
+    echo "\${LADDER_DOWNLOAD_ERROR:-$LADDER_MEMBERS_ERROR}" >&2
+  fi
   exit 1
 fi
 DIR=$(dirname "$OUT")
@@ -216,8 +220,8 @@ test('会员专享报错被识别成可操作中文提示（不再出现“不�
   assert.equal(msg.startsWith('下载失败：ERROR'), false, '应被专门识别，而不是落到兜底文案');
 });
 
-test('策略阶梯：前 3 种方式失败后自动换第 4 种并成功（任务最终完成）', async () => {
-  resetLadder({ failTimes: 3 });
+test('策略阶梯：逐种换挡直到成功（含新增的「跳过网页抓取」档）', async () => {
+  resetLadder({ failTimes: 4 });
   const { taskId, result } = await runWebvideoTask();
   assert.ok(result.done, result.error ?? '应在多次尝试后成功');
   assert.match(path.basename(result.done.files[0]), /ladder/);
@@ -231,8 +235,11 @@ test('策略阶梯：前 3 种方式失败后自动换第 4 种并成功（任�
   const iPlain = calls.findIndex((c) => c.includes('-f bv*+ba/b') && !c.includes('--extractor-args') && !c.includes('--retries 20'));
   assert.ok(iPlain > 0, '应包含「最佳画质」这一档');
   assert.ok(iMulti > iPlain, '多客户端回退应排在最佳画质之后');
-  assert.ok(iRetry > iMulti, '长重试应排在多客户端之后');
-  assert.equal(fs.readFileSync(ladderCount, 'utf8').trim(), '4', '第 4 次下载尝试应成功（长重试那一档）');
+  // 新增档位：跳过网页抓取（针对 "The page needs to be reloaded."）
+  const iSkip = calls.findIndex((c) => c.includes('player_skip=webpage'));
+  assert.ok(iSkip > iMulti, '「跳过网页抓取」应排在多客户端之后');
+  assert.ok(iRetry > iSkip, '长重试应排在「跳过网页抓取」之后');
+  assert.equal(fs.readFileSync(ladderCount, 'utf8').trim(), '5', '第 5 次下载尝试应成功（长重试那一档）');
   assert.ok(taskId > 0);
 });
 
@@ -288,6 +295,12 @@ test('配上 cookies 后，会带登录态优先尝试（会员视频的关键�
     .map((a) => a.label);
   assert.match(labels[0], /登录态/);
   assert.equal(labels.some((l) => l.includes('多客户端')), true);
+  assert.ok(labels.includes('登录态 + 浏览器 UA/语言'), '带 cookies 时应有一档伪装浏览器 UA');
+  assert.ok(labels.includes('登录态 + 跳过网页抓取'), '带 cookies 时应有一档跳过网页抓取');
+  // 所有带登录态的档必须排在最前面（成功率最高）
+  const firstPlain = labels.findIndex((l) => !l.includes('登录态'));
+  const lastCookie = labels.map((l) => l.includes('登录态')).lastIndexOf(true);
+  assert.ok(lastCookie < firstPlain, `登录态档应全部排在无 cookies 档之前（lastCookie=${lastCookie}, firstPlain=${firstPlain}）`);
 
   const { taskId, result } = await runWebvideoTask();
   assert.ok(result.done, result.error ?? '带 cookies 应能下载');
@@ -377,4 +390,42 @@ test('会员/登录类失败走“自动重试”耗尽次数才失败；DRM 等
   delete process.env.LADDER_DOWNLOAD_ERROR;
   updateSettings({ autoRetry: prevAutoRetry });
   config.bins.ytdlp = fakeBin;
+});
+
+test('瞬时错误（The page needs to be reloaded）会原地重试，而不是白白换方式', async () => {
+  resetLadder({ failTimes: 1 });
+  process.env.LADDER_FIRST_ERROR = 'ERROR: [youtube] jNQXAC9IVRw: The page needs to be reloaded.';
+  try {
+    const started = Date.now();
+    const { result } = await runWebvideoTask({ url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw' });
+    assert.ok(result.done, result.error ?? '瞬时错误重试后应成功');
+    assert.match(result.done.originalName, /ladder/);
+    // 只应该跑 2 次下载（第 1 次失败 + 原地重试成功），不该把整条阶梯走一遍
+    assert.equal(fs.readFileSync(ladderCount, 'utf8').trim(), '2', '应在同一方式内原地重试成功');
+    assert.ok(Date.now() - started >= 2500, '应等待退避时间后再重试（约 3s）');
+    assert.equal(ladderArgs().length, 2, '不应切换到其它方式');
+  } finally {
+    delete process.env.LADDER_FIRST_ERROR;
+  }
+});
+
+test('「The page needs to be reloaded.」有专门的中文解释与建议', () => {
+  const msg = webvideo.humanizeYtDlpError('ERROR: [youtube] jNQXAC9IVRw: The page needs to be reloaded.');
+  assert.match(msg, /page needs to be reloaded/i);
+  assert.match(msg, /yt-dlp/);
+  assert.match(msg, /升级|最新/);
+  assert.equal(msg.startsWith('下载失败：ERROR'), false, '应被专门识别');
+});
+
+test('抖音/哔哩哔哩等非 YouTube 平台不会带上 youtube 专用参数', () => {
+  const labels = webvideo
+    .buildDownloadAttempts({ formatId: '', cookiesFile: null, cookiesFromBrowser: '', isYouTube: false })
+    .map((a) => a.label);
+  assert.equal(labels.some((l) => l.includes('多客户端')), false);
+  assert.equal(labels.some((l) => l.includes('跳过网页抓取')), false);
+  assert.ok(labels.includes('最佳画质'));
+  const yt = webvideo
+    .buildDownloadAttempts({ formatId: '', cookiesFile: null, cookiesFromBrowser: '', isYouTube: true })
+    .map((a) => a.label);
+  assert.ok(yt.includes('跳过网页抓取（player API 直连）'), 'YouTube 应有跳过网页抓取档');
 });

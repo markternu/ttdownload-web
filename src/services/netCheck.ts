@@ -409,12 +409,59 @@ async function runChecks(): Promise<NetworkReport> {
     return out;
   })();
 
-  const [httpsChecks, ytdlpChecks, localChecks] = await Promise.all([Promise.all(httpsTasks), ytdlpTask, localTask]);
-  checks.push(...httpsChecks, ...ytdlpChecks, ...localChecks);
+  const cookiesTask = (async (): Promise<NetworkCheck[]> => {
+    const { inspectCookiesFile } = await import('../modules/webvideo');
+    if (!cookiesFile) {
+      return [
+        {
+          id: 'cookies',
+          label: 'cookies（会员/登录视频）',
+          status: 'skip',
+          latencyMs: null,
+          detail: '未配置 cookies：公开视频不受影响；会员专享 / 需登录 / 年龄限制的视频必须用它',
+          hint: '在「设置 → 公开视频（yt-dlp）」上传 cookies.txt（用登录了目标账号的浏览器导出）',
+          group: 'ytdlp',
+        },
+      ];
+    }
+    const r = inspectCookiesFile(cookiesFile);
+    const domains = Object.entries(r.stats.byDomain)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([d, n]) => `${d}×${n}`)
+      .join('，');
+    const keys = Object.entries(r.stats.keys)
+      .filter(([, v]) => v)
+      .map(([k]) => k)
+      .join('、');
+    return [
+      {
+        id: 'cookies',
+        label: 'cookies（会员/登录视频）',
+        status: r.valid ? 'ok' : 'fail',
+        latencyMs: null,
+        detail: `${cookiesFile}｜${r.stats.total} 条 cookie（${domains || '无域名'}）｜关键字段：${keys || '无'}｜已过期 ${r.stats.expiredCount} 条${
+          r.warnings.length ? `｜问题：${r.warnings.join('；')}` : '｜结构检查通过'
+        }`,
+        hint: r.valid
+          ? undefined
+          : '按上面的问题说明重新导出 cookies（务必：先登录目标账号、导出 Netscape 格式、包含 google.com 与 youtube.com、只用该账号的 Chrome Profile）',
+        group: 'ytdlp',
+      },
+    ];
+  })();
+
+  const [httpsChecks, ytdlpChecks, localChecks, cookiesChecks] = await Promise.all([
+    Promise.all(httpsTasks),
+    ytdlpTask,
+    localTask,
+    cookiesTask,
+  ]);
+  checks.push(...httpsChecks, ...ytdlpChecks, ...cookiesChecks, ...localChecks);
 
   // ---- 结论 ----
   const netFail = checks.filter((c) => c.group === 'net' && c.id !== 'proxy' && c.status === 'fail');
-  const ytFail = checks.filter((c) => c.group === 'ytdlp' && c.status === 'fail');
+  const ytFail = checks.filter((c) => c.group === 'ytdlp' && c.status === 'fail' && c.id !== 'cookies');
   const overall: NetworkReport['overall'] = netFail.length > 0 ? 'fail' : ytFail.length > 0 ? 'partial' : 'ok';
   const summary =
     overall === 'ok'

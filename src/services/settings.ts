@@ -28,6 +28,7 @@ export function defaultSettings(): Settings {
     autoDeleteAfterReport: true,
     scriptUploadEnabled: config.scriptUploadEnabled,
     scriptRunTimeoutSec: config.scriptRunTimeoutSec,
+    clearLogsAfterReport: false,
     btEvict: { ...config.btEvict },
   };
 }

@@ -195,10 +195,11 @@ test('运维子命令齐备：--update / --stop / --start / --logs / --logs-foll
   assert.match(deploySrc, /PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1/, '应跳过 playwright 浏览器下载');
 });
 
-test('内置环境脚本：diagnose-env.sh 与 fix-node20.sh 存在、可执行、内容正确', () => {
+test('内置环境脚本：diagnose-env.sh / fix-node20.sh / fix-ytdlp.sh 存在、可执行、内容正确', () => {
   const scripts = [
     { file: 'deploy/scripts/diagnose-env.sh', must: [/体检/, /aria2/, /yt-dlp/, /resolve_host/, /safe\.directory/, /exit 0/], readonly: true },
     { file: 'deploy/scripts/fix-node20.sh', must: [/setup_20\.x/, /npm ci/, /npm run build/, /systemctl restart/, /回滚/, /safe\.directory/, /PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD/], readonly: false },
+    { file: 'deploy/scripts/fix-ytdlp.sh', must: [/pip3 install -U/, /--break-system-packages/, /releases\/latest\/download\/yt-dlp/, /curl_cffi/, /升级前/, /回滚/], readonly: false },
   ];
   for (const { file, must, readonly } of scripts) {
     const full = path.join(projectRoot, file);

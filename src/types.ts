@@ -111,6 +111,8 @@ export interface Settings {
   scriptUploadEnabled: boolean;
   /** 修复脚本执行超时（秒，默认 600） */
   scriptRunTimeoutSec: number;
+  /** 问题反馈：下载诊断报告后是否清空已有日志（避免新旧日志混在一起） */
+  clearLogsAfterReport: boolean;
   /** BT 出清机制（长时间无资源/停滞/极慢 -> 清理任务与 incomplete 目录） */
   btEvict: {
     enabled: boolean;

@@ -104,7 +104,7 @@ sudo ./deploy.sh --uninstall    # 移除服务（保留数据）
 
 - 日志文件：`/ttdownload/state/app.log`（20MB 轮转），部署日志：`/ttdownload/state/logs/deploy.log`
 - 默认 `LOG_LEVEL=debug`：记录外部命令完整 argv、退出码、stdout/stderr 摘要、HTTP 请求、RPC 调用
-- 网页「**问题反馈**」页：**一键下载诊断报告**（zip：日志+部署日志+错误摘要+任务失败原因+网络自检+README），也可单项下载日志/任务清单/网络报告；页面直接列出最近失败任务与原因
+- 网页「**问题反馈**」页：可勾选「**下载后清空已有日志**」（每轮测试互不干扰）；**一键下载诊断报告**（zip：日志+部署日志+错误摘要+任务失败原因+网络自检+README），也可单项下载日志/任务清单/网络报告；页面直接列出最近失败任务与原因
 - 网页「**日志**」页：调试开关、级别/标记/关键字过滤、下载日志、清空
 - 首页「**网络自检**」：DNS / HTTPS(Google,YouTube,GitHub) / yt-dlp 解析 / googlevideo CDN / 本机 RPC 逐项实测
 - 标记速查与排查流程：见 [`docs/排查手册.md`](./docs/排查手册.md)

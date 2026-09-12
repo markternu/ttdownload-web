@@ -589,3 +589,134 @@ test('日志净化：含 NUL/控制字符/其它编码残留时，日志文件�
   const grepNoA = execFileSync('grep', ['MARK:PROC_EXIT', config.logPath], { encoding: 'utf8' });
   assert.ok(grepNoA.includes('MARK:PROC_EXIT'), '不加 -a 也应能正常输出');
 });
+
+/* ------------------------------------------------------------------ */
+/* cookies 结构校验 + 「下载后清空日志」开关                             */
+/* ------------------------------------------------------------------ */
+
+test('cookies 结构校验：缺头/缺关键字段/过期都会给出中文告警', async () => {
+  const webvideo = await import('../dist/modules/webvideo.js');
+  const dir = path.join(root, 'state');
+  fs.mkdirSync(dir, { recursive: true });
+
+  // 1) 正常文件
+  const good = path.join(dir, 'good-cookies.txt');
+  fs.writeFileSync(
+    good,
+    [
+      '# Netscape HTTP Cookie File',
+      '.youtube.com\tTRUE\t/\tTRUE\t9999999999\t__Secure-1PSID\tAAA',
+      '.youtube.com\tTRUE\t/\tTRUE\t9999999999\t__Secure-3PSID\tBBB',
+      '.youtube.com\tTRUE\t/\tTRUE\t9999999999\tLOGIN_INFO\tCCC',
+      '.google.com\tTRUE\t/\tFALSE\t9999999999\tSID\tDDD',
+      '.google.com\tTRUE\t/\tFALSE\t9999999999\tHSID\tEEE',
+      '.google.com\tTRUE\t/\tFALSE\t9999999999\tSSID\tFFF',
+      '.google.com\tTRUE\t/\tFALSE\t9999999999\tAPISID\tGGG',
+      '.google.com\tTRUE\t/\tFALSE\t9999999999\tSAPISID\tHHH',
+    ].join('\n'),
+  );
+  const g = webvideo.inspectCookiesFile(good);
+  assert.equal(g.stats.hasHeader, true);
+  assert.equal(g.stats.hasYoutubeDomain, true);
+  assert.equal(g.stats.hasGoogleDomain, true);
+  assert.equal(g.stats.total, 8);
+  assert.equal(g.stats.keys.SID, true);
+  assert.equal(g.stats.keys['__Secure-1PSID'], true);
+  assert.equal(g.stats.expiredCount, 0);
+
+  // 2) 只有 youtube.com、没有 google.com；且有已过期项
+  const partial = path.join(dir, 'partial-cookies.txt');
+  fs.writeFileSync(
+    partial,
+    ['# Netscape HTTP Cookie File', '.youtube.com\tTRUE\t/\tTRUE\t1000000000\tPREF\tx'].join('\n'),
+  );
+  const pr = webvideo.inspectCookiesFile(partial);
+  assert.equal(pr.valid, false);
+  assert.ok(pr.warnings.some((w) => w.includes('google.com')), '应提示缺 google.com');
+  assert.ok(pr.warnings.some((w) => w.includes('关键登录 cookie')), '应提示缺关键登录 cookie');
+  assert.equal(pr.stats.expiredCount, 1);
+  assert.ok(pr.warnings.some((w) => w.includes('过期')));
+
+  // 3) 完全不是 cookies.txt
+  const junk = path.join(dir, 'junk-cookies.txt');
+  fs.writeFileSync(junk, '{"cookies": "这是 JSON，不是 Netscape 格式"}');
+  const jr = webvideo.inspectCookiesFile(junk);
+  assert.equal(jr.valid, false);
+  assert.ok(jr.warnings.some((w) => w.includes('没解析出任何 cookie')));
+  assert.ok(jr.warnings.some((w) => w.includes('Netscape')));
+
+  // 4) cookiesStatus 会把校验结果带出来
+  const { updateSettings } = await import('../dist/services/settings.js');
+  const before = { ...(await import('../dist/services/settings.js')).getSettings() };
+  updateSettings({ webvideoCookiesFile: good });
+  const status = await webvideo.cookiesStatus();
+  assert.equal(status.exists, true);
+  assert.equal(status.valid, true);
+  assert.equal(status.stats.total, 8);
+  assert.ok(Array.isArray(status.warnings));
+  assert.ok(status.notes.some((n) => n.includes('主账号')), '多账号说明应作为提示（notes）而不是错误');
+  assert.deepEqual(status.warnings, [], '结构正常的 cookies 不应有警告');
+  updateSettings({ webvideoCookiesFile: before.webvideoCookiesFile });
+});
+
+test('网络自检包含 cookies 检查项（未配置时明确说 skip + 指引）', async () => {
+  netCheck.resetNetworkCache();
+  const report = await netCheck.networkReport(true);
+  const cookies = report.checks.find((c) => c.id === 'cookies');
+  assert.ok(cookies, '自检应有 cookies 项');
+  assert.ok(['ok', 'fail', 'skip'].includes(cookies.status));
+  assert.equal(cookies.group, 'ytdlp');
+  assert.ok(cookies.detail.length > 0);
+  if (cookies.status !== 'ok') assert.ok(cookies.hint && cookies.hint.length > 0, '非 ok 时应给建议');
+});
+
+test('「下载后清空已有日志」：开关可保存、report/list 会带出来', async () => {
+  const off = await req('/api/system/report/list');
+  assert.equal(off.json.clearLogsAfterReport, false);
+
+  const put = await req('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clearLogsAfterReport: true }),
+  });
+  assert.equal(put.status, 200);
+  assert.equal(put.json.clearLogsAfterReport, true);
+
+  const on = await req('/api/system/report/list');
+  assert.equal(on.json.clearLogsAfterReport, true);
+
+  await req('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clearLogsAfterReport: false }),
+  });
+});
+
+test('下载诊断报告后清空日志：报告里仍有内容，磁盘上的日志被清空', async () => {
+  loggerMod.clearLogs();
+  loggerMod.logger.child('clear-test').mark('TASK_CREATE', '清空测试专用标记行-CLEARMARK');
+  const before = await req('/api/system/logs?lines=50');
+  assert.ok(before.json.lines.some((l) => l.includes('CLEARMARK')), '清空前应能读到该行');
+
+  // ?clear=1 强制清空
+  const res = await reqBinary('/api/system/report?clear=1');
+  assert.equal(res.status, 200);
+  assert.ok(Number(res.headers.get('x-logs-cleared') ?? '0') >= 1, '应返回清空的文件数');
+
+  // 报告内容仍然完整（清空发生在报告生成之后）
+  const tmp = path.join(root, 'report-clear.zip');
+  if (res.buf.slice(0, 2).toString() === 'PK') {
+    fs.writeFileSync(tmp, res.buf);
+    const inside = execFileSync('unzip', ['-p', tmp, 'app.log'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    assert.ok(inside.includes('CLEARMARK'), '报告里的 app.log 应包含清空前的日志');
+  } else {
+    assert.ok(res.buf.toString('utf8').includes('CLEARMARK'), 'JSON 报告里应包含清空前的日志');
+  }
+
+  const after = await req('/api/system/logs?lines=50');
+  assert.equal(
+    after.json.lines.some((l) => l.includes('CLEARMARK')),
+    false,
+    '下载报告后日志应已清空（只剩本次请求自身产生的日志）',
+  );
+});
