@@ -361,6 +361,18 @@ test('cookies 查询 / 上传（JSON 与 multipart）/ 删除', async () => {
   assert.equal(viaFormJson.exists, true);
   assert.ok(viaFormJson.sizeBytes > uploaded.json.sizeBytes);
 
+  // 再传一次：应自动备份上一份（避免"新导出的其实是没登录的残缺文件"时无从回退）
+  const second = await get('/api/webvideo/cookies', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t9999999999\tPREF\ty\n' }),
+  });
+  assert.equal(second.status, 200);
+  assert.equal(second.json.backup.exists, true, '第二次上传应留下 .bak 备份');
+  assert.ok(second.json.backup.sizeBytes > 0);
+  const recheck = await get('/api/webvideo/cookies');
+  assert.equal(recheck.json.backup.exists, true, '状态查询里应能看到备份');
+
   const removed = await get('/api/webvideo/cookies', { method: 'DELETE' });
   assert.equal(removed.json.exists, false);
 

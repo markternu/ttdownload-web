@@ -38,10 +38,28 @@ webvideoRouter.get(
 
 /* ---------------- cookies（会员 / 登录 / 年龄限制视频） ---------------- */
 
+/** cookies 状态 + 上一份备份信息（上传会覆盖，保留 .bak 便于回退） */
+async function cookiesStatusWithBackup(): Promise<Record<string, unknown>> {
+  const status = await cookiesStatus();
+  const backupPath = `${status.cookiesFile}.bak`;
+  let backup: { exists: boolean; sizeBytes: number; updatedAt: string | null } = {
+    exists: false,
+    sizeBytes: 0,
+    updatedAt: null,
+  };
+  try {
+    const st = fs.statSync(backupPath);
+    backup = { exists: true, sizeBytes: st.size, updatedAt: st.mtime.toISOString() };
+  } catch {
+    /* 没有备份 */
+  }
+  return { ...status, backup };
+}
+
 webvideoRouter.get(
   '/cookies',
   asyncHandler(async (_req, res) => {
-    res.json(await cookiesStatus());
+    res.json(await cookiesStatusWithBackup());
   }),
 );
 
@@ -56,6 +74,18 @@ webvideoRouter.post(
     const { getSettings } = await import('../services/settings');
     const target = cookiesPathOf(getSettings());
     fs.mkdirSync(path.dirname(target), { recursive: true });
+    // 上传前先备份上一份：如果新导出是"没登录"的残缺文件，还能把好的换回来
+    try {
+      if (fs.existsSync(target) && fs.statSync(target).size > 0) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const backup = `${target}.bak`;
+        fs.copyFileSync(target, backup);
+        fs.writeFileSync(`${target}.bak.info`, `备份时间：${new Date().toISOString()}\n`, { mode: 0o600 });
+        logger.child('webvideo').mark('SETTINGS', `上传新 cookies 前已备份旧文件到 ${backup}（${stamp}）`);
+      }
+    } catch {
+      /* 备份失败不阻断上传 */
+    }
     fs.writeFileSync(target, content, { mode: 0o600 });
     try {
       fs.chmodSync(target, 0o600);
@@ -63,7 +93,7 @@ webvideoRouter.post(
       /* ignore */
     }
     logger.info(`已保存公开视频 cookies：${target}（${content.length} 字节）`);
-    res.json(await cookiesStatus());
+    res.json(await cookiesStatusWithBackup());
   }),
 );
 
@@ -78,7 +108,7 @@ webvideoRouter.delete(
     } catch {
       /* 本来就不存在 */
     }
-    res.json(await cookiesStatus());
+    res.json(await cookiesStatusWithBackup());
   }),
 );
 
