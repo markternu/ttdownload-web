@@ -132,6 +132,22 @@ if command -v yt-dlp >/dev/null 2>&1; then
     COOKIE_ARGS=""
   fi
 
+  echo "  --- JS 运行时（解 YouTube n challenge 必需，缺了会报 No video formats found / page needs to be reloaded）："
+  JS_OK=0
+  if command -v deno >/dev/null 2>&1; then OK "deno：$(deno --version 2>/dev/null | head -1)"; JS_OK=1
+  elif command -v bun >/dev/null 2>&1; then OK "bun：$(bun --version 2>/dev/null)"; JS_OK=1
+  elif command -v qjs >/dev/null 2>&1; then OK "quickjs：$(qjs --version 2>&1 | head -1)"; JS_OK=1
+  elif command -v node >/dev/null 2>&1; then
+    NMAJ="$(node -v | sed 's/^v//' | cut -d. -f1)"
+    if [ "${NMAJ}" -ge 22 ]; then OK "node $(node -v)（>= 22，yt-dlp 可用）"; JS_OK=1
+    else BAD "node $(node -v)：yt-dlp 视为 unsupported（需要 deno/bun/quickjs 或 node >= 22）"; fi
+  else BAD "没有任何 JS 运行时（deno/bun/quickjs/node）"; fi
+  if pip3 show yt-dlp-ejs >/dev/null 2>&1; then OK "yt-dlp-ejs：已安装"; else BAD "yt-dlp-ejs 未安装（挑战求解脚本缺失）"; fi
+  [ "${JS_OK}" = "1" ] || INFO "  → 修复：在「修复脚本」页上传执行 deploy/scripts/fix-ytdlp.sh（会装 deno + yt-dlp-ejs）"
+  if OUTV="$(timeout 60 yt-dlp -v --simulate --no-warnings "https://www.youtube.com/watch?v=jNQXAC9IVRw" 2>&1 | grep -iE 'JS runtimes|jsc\]' | head -2)"; then
+    printf '%s\n' "${OUTV}" | sed 's/^/    /'
+  fi
+
   INFO "正在试解析一个公开测试视频（不带 cookies，最多 25 秒）…"
   if OUT="$(timeout 25 yt-dlp -J --no-warnings --no-playlist --socket-timeout 15 \
         'https://www.youtube.com/watch?v=jNQXAC9IVRw' 2>&1)"; then

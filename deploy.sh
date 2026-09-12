@@ -410,12 +410,25 @@ if [[ $SKIP_APT -eq 0 ]]; then
     warn "Node 大版本变化后需要重建原生模块（better-sqlite3）——下面的 npm ci 会重新编译，属正常现象"
   fi
 
+  # JS 运行时：yt-dlp 解 YouTube n challenge 必需（缺了会报 No video formats found）。
+  # deno 是独立二进制，不影响项目自己的 Node
+  if ! command -v deno >/dev/null 2>&1 && ! command -v bun >/dev/null 2>&1 && ! command -v qjs >/dev/null 2>&1; then
+    log "安装 deno（yt-dlp 的 JS 运行时，约 40MB）..."
+    if DENO_INSTALL=/usr/local curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null 2>&1; then
+      ln -sf /usr/local/bin/deno /usr/bin/deno 2>/dev/null || true
+      log "deno 已安装：$(deno --version 2>/dev/null | head -1)"
+    else
+      warn "deno 安装失败（公开视频的 YouTube 下载可能报 No video formats found；可稍后跑 deploy/scripts/fix-ytdlp.sh）"
+    fi
+  fi
+
   # yt-dlp：优先 pip（版本新；Ubuntu 24.04 需 --break-system-packages），否则 apt，最后下官方二进制
   if ! command -v yt-dlp >/dev/null 2>&1; then
     log "安装 yt-dlp ..."
     apt-get install -y python3-pip >/dev/null 2>&1 || true
-    if pip3 install -U yt-dlp >/dev/null 2>&1 \
-      || pip3 install -U --break-system-packages yt-dlp >/dev/null 2>&1 \
+    # yt-dlp[default] 会带上 yt-dlp-ejs（n challenge 求解脚本），是能下载 YouTube 的前提
+    if pip3 install -U "yt-dlp[default]" >/dev/null 2>&1 \
+      || pip3 install -U --break-system-packages "yt-dlp[default]" >/dev/null 2>&1 \
       || apt-get install -y yt-dlp >/dev/null 2>&1; then
       :
     elif curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp; then
@@ -423,6 +436,11 @@ if [[ $SKIP_APT -eq 0 ]]; then
     else
       warn "yt-dlp 安装失败（公开视频模块将不可用，可稍后手动安装）"
     fi
+  elif command -v yt-dlp >/dev/null 2>&1 && ! pip3 show yt-dlp-ejs >/dev/null 2>&1; then
+    # 已经装了 yt-dlp 但缺 yt-dlp-ejs（老部署）：补上，否则解不了 n challenge
+    log "补齐 yt-dlp-ejs（YouTube 挑战求解脚本）..."
+    pip3 install -U "yt-dlp[default]" >/dev/null 2>&1 || pip3 install -U --break-system-packages "yt-dlp[default]" >/dev/null 2>&1 || \
+      warn "yt-dlp-ejs 安装失败，可稍后跑 deploy/scripts/fix-ytdlp.sh"
   fi
 else
   warn "按参数要求跳过 apt 安装"

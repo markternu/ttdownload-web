@@ -6,7 +6,7 @@
  * 这里逐项测试并给出中文原因与修复建议。
  */
 import dns from 'node:dns/promises';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { config } from '../core/config';
 import { logger } from '../core/logger';
 import { toolStatus } from '../core/disk';
@@ -409,6 +409,50 @@ async function runChecks(): Promise<NetworkReport> {
     return out;
   })();
 
+  /**
+   * JS 运行时检查：yt-dlp 需要一个受支持的 JS 运行时（deno/bun/quickjs，或 node >= 22）
+   * 才能求解 YouTube 的 n challenge。实测缺失时表现为
+   * "No video formats found!" / "The page needs to be reloaded."（非常容易被误判成网络问题）。
+   */
+  const jsRuntimeTask = (async (): Promise<NetworkCheck[]> => {
+    const probe = (bin: string, args: string[]): string | null => {
+      try {
+        const out = execFileSync(bin, args, { timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+        return out.trim().split('\n')[0] ?? '';
+      } catch {
+        return null;
+      }
+    };
+    const deno = probe('deno', ['--version']);
+    const bun = probe('bun', ['--version']);
+    const qjs = probe('qjs', ['--version']) ?? probe('quickjs', ['--version']);
+    const nodeRaw = probe('node', ['--version']);
+    const nodeMajor = nodeRaw ? Number(nodeRaw.replace(/^v/, '').split('.')[0]) : 0;
+    const found: string[] = [];
+    if (deno) found.push(`deno ${deno.split(' ')[1] ?? deno}`);
+    if (bun) found.push(`bun ${bun}`);
+    if (qjs) found.push(`quickjs ${qjs}`);
+    if (nodeRaw) found.push(`node ${nodeRaw.replace(/^v/, '')}${nodeMajor >= 22 ? '' : '（yt-dlp 视为 unsupported）'}`);
+    const usable = Boolean(deno) || Boolean(bun) || Boolean(qjs) || nodeMajor >= 22;
+    return [
+      {
+        id: 'ytdlp-jsruntime',
+        label: 'yt-dlp JS 运行时（解 YouTube n challenge）',
+        status: usable ? 'ok' : 'fail',
+        latencyMs: null,
+        detail: usable
+          ? `可用：${found.join('，')}`
+          : found.length
+            ? `不可用：${found.join('，')}。yt-dlp 需要 deno/bun/quickjs，或 node >= 22 才能解 n challenge`
+            : '未检测到任何 JS 运行时（yt-dlp 需要 deno/bun/quickjs 或 node >= 22）',
+        hint: usable
+          ? undefined
+          : '安装 deno（约 40MB，独立二进制，不影响项目 Node）：网页「修复脚本」页上传执行 deploy/scripts/fix-ytdlp.sh；装完 yt-dlp 才能拿到视频格式',
+        group: 'ytdlp',
+      },
+    ];
+  })();
+
   const cookiesTask = (async (): Promise<NetworkCheck[]> => {
     const { inspectCookiesFile } = await import('../modules/webvideo');
     if (!cookiesFile) {
@@ -451,13 +495,14 @@ async function runChecks(): Promise<NetworkReport> {
     ];
   })();
 
-  const [httpsChecks, ytdlpChecks, localChecks, cookiesChecks] = await Promise.all([
+  const [httpsChecks, ytdlpChecks, localChecks, cookiesChecks, jsRuntimeChecks] = await Promise.all([
     Promise.all(httpsTasks),
     ytdlpTask,
     localTask,
     cookiesTask,
+    jsRuntimeTask,
   ]);
-  checks.push(...httpsChecks, ...ytdlpChecks, ...cookiesChecks, ...localChecks);
+  checks.push(...httpsChecks, ...ytdlpChecks, ...cookiesChecks, ...jsRuntimeChecks, ...localChecks);
 
   // ---- 结论 ----
   const netFail = checks.filter((c) => c.group === 'net' && c.id !== 'proxy' && c.status === 'fail');

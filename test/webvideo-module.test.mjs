@@ -409,6 +409,37 @@ test('瞬时错误（The page needs to be reloaded）会原地重试，而不是
   }
 });
 
+test('YouTube 多客户端顺序：web_safari 最前、mweb 已移出；带 cookies 有专门 web_safari 档', () => {
+  const clients = webvideo.YOUTUBE_TRY_CLIENTS;
+  assert.match(clients, /player_client=web_safari,default/);
+  assert.equal(clients.includes('mweb'), false, 'mweb 实测必失败，应移出候选');
+  const labels = webvideo
+    .buildDownloadAttempts({ formatId: '', cookiesFile: '/x/cookies.txt', cookiesFromBrowser: '', isYouTube: true })
+    .map((a) => a.label);
+  assert.ok(labels.includes('登录态 + web_safari'), '应有一档单独的 web_safari（实测最稳）');
+});
+
+test('机器人校验/限流类失败：连续 2 种就停手，并提示「等待 10~30 分钟」', async () => {
+  resetLadder({ failTimes: 999 });
+  process.env.YTDLP_RATE_LIMIT_BACKOFF_MS = '40';
+  process.env.YTDLP_ATTEMPT_GAP_MS = '40';
+  process.env.LADDER_DOWNLOAD_ERROR =
+    "ERROR: [youtube] x: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication.";
+  try {
+    const { result } = await runWebvideoTask({ url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw' });
+    assert.ok(result.error, '应返回错误');
+    assert.match(result.error, /等待 10~30 分钟|别连打|等待/, '应提示等待冷却');
+    assert.match(result.error, /JS 运行时|deno/, '应提示确认 JS 运行时');
+    // 连续限流应停止：只试 2 种方式就收手（每种方式内含 2 次原地重试），不把整条阶梯走完
+    assert.match(result.error, /已自动尝试 2 种方式/, `应只尝试 2 种方式，实际错误：${result.error}`);
+    assert.ok(ladderArgs().length <= 7, `连续限流应尽早停手，实际发起 ${ladderArgs().length} 次请求`);
+  } finally {
+    delete process.env.LADDER_DOWNLOAD_ERROR;
+    delete process.env.YTDLP_RATE_LIMIT_BACKOFF_MS;
+    delete process.env.YTDLP_ATTEMPT_GAP_MS;
+  }
+});
+
 test('「The page needs to be reloaded.」有专门的中文解释与建议', () => {
   const msg = webvideo.humanizeYtDlpError('ERROR: [youtube] jNQXAC9IVRw: The page needs to be reloaded.');
   assert.match(msg, /page needs to be reloaded/i);

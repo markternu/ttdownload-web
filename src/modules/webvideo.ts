@@ -467,8 +467,12 @@ export interface AttemptContext {
   isYouTube: boolean;
 }
 
-/** YouTube 多客户端回退：某个客户端被限流/要求登录时换下一个 */
-export const YOUTUBE_TRY_CLIENTS = 'youtube:player_client=default,tv,web_safari,android_vr,web_embedded,mweb';
+/**
+ * YouTube 多客户端回退：某个客户端被限流/要求登录时换下一个。
+ * 实测（树莓派 + cookies + deno 挑战求解）web_safari 成功率最高，放在最前；
+ * mweb 基本必失败，已移出列表。
+ */
+export const YOUTUBE_TRY_CLIENTS = 'youtube:player_client=web_safari,default,tv,android_vr,web_embedded';
 /** 只走网页内嵌播放器（对部分受限视频可绕过 web 端校验） */
 export const YOUTUBE_EMBEDDED_CLIENT = 'youtube:player_client=web_embedded,tv_embedded';
 /**
@@ -520,7 +524,11 @@ export function buildDownloadAttempts(ctx: AttemptContext): DownloadAttempt[] {
   // 2) 带登录态的各个档位（会员/风控视频成功率最高，因此全部排在最前）
   if (cookieArgs.length) {
     push('登录态 + 最佳画质', withCookies(best));
-    if (ctx.isYouTube) push('登录态 + 多客户端', withCookies([...multiClient, ...best]));
+    if (ctx.isYouTube) {
+      // 实测最稳的一档（需要 deno 解 n challenge；没有 JS 运行时这档也会失败）
+      push('登录态 + web_safari', withCookies(['--extractor-args', 'youtube:player_client=web_safari', ...best]));
+      push('登录态 + 多客户端', withCookies([...multiClient, ...best]));
+    }
     push('登录态 + 浏览器 UA/语言', withCookies(['--user-agent', DESKTOP_CHROME_UA, '--add-header', 'Accept-Language:en-US,en;q=0.9', ...best]));
     // 「The page needs to be reloaded.」的绕法：跳过网页抓取直接请求 player API（有 cookies 时最有效）
     if (ctx.isYouTube) push('登录态 + 跳过网页抓取', withCookies(['--extractor-args', YOUTUBE_SKIP_WEBPAGE, ...best]));
@@ -548,6 +556,36 @@ export function buildDownloadAttempts(ctx: AttemptContext): DownloadAttempt[] {
   return attempts;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* 退避策略（机器人校验/限流）                                          */
+/* ------------------------------------------------------------------ */
+
+/** 机器人校验/限流类错误：短时间连打只会让 IP 被封得更久 */
+export function isRateLimitError(raw: string): boolean {
+  const s = raw.toLowerCase();
+  return (
+    // 原始英文（yt-dlp 输出）
+    s.includes('not a bot') ||
+    s.includes('sign in to confirm') ||
+    s.includes('too many requests') ||
+    s.includes('http error 429') ||
+    s.includes('try again later') ||
+    s.includes('rate limit') ||
+    // 已经过 humanizeYtDlpError 的中文文案（计数时拿到的可能是中文）
+    raw.includes('人机校验') ||
+    raw.includes('机器人') ||
+    raw.includes('限流')
+  );
+}
+
+/** 读可配置毫秒数：**未设置/为空时必须用默认值**（Number('') === 0 曾把阈值误设成 0） */
+const envMs = (name: string, def: number): number => {
+  const raw = process.env[name];
+  if (raw === undefined || String(raw).trim() === '') return def;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : def;
+};
 
 /* ------------------------------------------------------------------ */
 /* 下载进程管理                                                        */
@@ -587,9 +625,17 @@ const jobs = new Map<number, RunningJob>();
 function buildFinalError(job: RunningJob): string {
   const last = job.attemptErrors[job.attemptErrors.length - 1];
   const base = last?.message ?? '下载失败（未知原因）';
-  if (job.attemptErrors.length <= 1) return base;
-  const tried = job.attemptErrors.map((e) => e.label).join('、');
-  return `${base}（已自动尝试 ${job.attemptErrors.length} 种方式：${tried}）`;
+  const rateLimited = job.attemptErrors.filter((e) => /机器人|not a bot|人机校验|限流/i.test(e.message)).length;
+  const suffix =
+    job.attemptErrors.length <= 1
+      ? ''
+      : `（已自动尝试 ${job.attemptErrors.length} 种方式：${job.attemptErrors.map((e) => e.label).join('、')}）`;
+  const advice =
+    rateLimited >= Math.max(2, Math.ceil(job.attemptErrors.length / 2))
+      ? '。多数失败都是「YouTube 判定为机器人/限流」：请等待 10~30 分钟再重试（短时间内反复重试会让该 IP 被限流更久），' +
+        '并确认已安装 JS 运行时（deno，见首页网络自检的「yt-dlp JS 运行时」一项）；如有代理，可在设置里加 --proxy 换出口 IP'
+      : '';
+  return `${base}${suffix}${advice}`;
 }
 
 /** 启动当前 attemptIndex 指向的那次尝试 */
@@ -654,9 +700,13 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
       rawErr.includes('timed out') ||
       rawErr.includes('temporarily unavailable');
     const retries = job.attemptRetries?.[job.attemptIndex] ?? 0;
+    // 机器人校验 / 限流类错误：**连打只会让 IP 更被封**，所以退避要长（30s / 90s）
+    const rateLimited = isRateLimitError(rawErr);
     if (transient && retries < 2 && !job.cancelled) {
       job.attemptRetries = { ...(job.attemptRetries ?? {}), [job.attemptIndex]: retries + 1 };
-      const delay = 3000 * (retries + 1);
+      const delay = rateLimited
+        ? envMs('YTDLP_RATE_LIMIT_BACKOFF_MS', 30_000) * (retries + 1)
+        : envMs('YTDLP_TRANSIENT_BACKOFF_MS', 3_000) * (retries + 1);
       scoped.warn(
         `[MARK:YTDLP_EXIT] 方式「${failedLabel}」遇到瞬时错误，${delay / 1000}s 后原地重试（第 ${retries + 1}/2 次）：${message}`,
       );
@@ -671,9 +721,27 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
       { stderr: tailText(job.stderr, 2000), stdout: tailText(job.stdout, 1000), args },
     );
     const next = job.attemptIndex + 1;
+    // 连续两种方式都被判为机器人/限流：继续换方式只会加剧风控，直接停手并给建议
+    const rateLimitHits = job.attemptErrors.filter((e) => isRateLimitError(e.message)).length;
+    if (next < job.attempts.length && rateLimitHits >= envMs('YTDLP_RATE_LIMIT_MAX_ATTEMPTS', 2)) {
+      scoped.error(
+        `[MARK:TASK_FAIL] 连续 ${rateLimitHits} 种方式被 YouTube 判定为机器人/限流，停止继续尝试（避免加剧风控，请等待 10~30 分钟后重试）`,
+      );
+      job.exitCode = exit;
+      return;
+    }
     if (next < job.attempts.length) {
       job.attemptIndex = next;
-      launchAttempt(taskId, job, ctx);
+      // 机器人校验/限流：换下一种方式前也留出间隔，否则连打只会让 IP 被封得更久
+      const gap = rateLimited ? envMs('YTDLP_ATTEMPT_GAP_MS', 15_000) : 0;
+      if (gap > 0) {
+        scoped.warn(`[MARK:YTDLP_ATTEMPT] 疑似被 YouTube 限流，等待 ${gap / 1000}s 后再换下一种方式（避免加剧风控）`);
+        setTimeout(() => {
+          if (!job.cancelled && job.exitCode === null) launchAttempt(taskId, job, ctx);
+        }, gap);
+      } else {
+        launchAttempt(taskId, job, ctx);
+      }
       return;
     }
     job.exitCode = exit;

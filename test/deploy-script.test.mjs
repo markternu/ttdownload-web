@@ -197,9 +197,22 @@ test('运维子命令齐备：--update / --stop / --start / --logs / --logs-foll
 
 test('内置环境脚本：diagnose-env.sh / fix-node20.sh / fix-ytdlp.sh 存在、可执行、内容正确', () => {
   const scripts = [
-    { file: 'deploy/scripts/diagnose-env.sh', must: [/体检/, /aria2/, /yt-dlp/, /resolve_host/, /safe\.directory/, /exit 0/], readonly: true },
+    { file: 'deploy/scripts/diagnose-env.sh', must: [/体检/, /aria2/, /yt-dlp/, /resolve_host/, /safe\.directory/, /JS 运行时/, /yt-dlp-ejs/, /exit 0/], readonly: true },
     { file: 'deploy/scripts/fix-node20.sh', must: [/setup_20\.x/, /npm ci/, /npm run build/, /systemctl restart/, /回滚/, /safe\.directory/, /PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD/], readonly: false },
-    { file: 'deploy/scripts/fix-ytdlp.sh', must: [/pip3 install -U/, /--break-system-packages/, /releases\/latest\/download\/yt-dlp/, /curl_cffi/, /升级前/, /回滚/], readonly: false },
+    {
+      file: 'deploy/scripts/fix-ytdlp.sh',
+      must: [
+        /pip3 install -U/,
+        /--break-system-packages/,
+        /yt-dlp\[default\]/,        // yt-dlp-ejs 挑战求解脚本
+        /yt-dlp-ejs/,
+        /deno\.land\/install\.sh/,  // JS 运行时（本次问题的关键）
+        /curl_cffi/,
+        /升级前/,
+        /回滚/,
+      ],
+      readonly: false,
+    },
   ];
   for (const { file, must, readonly } of scripts) {
     const full = path.join(projectRoot, file);

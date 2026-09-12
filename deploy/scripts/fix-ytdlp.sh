@@ -10,10 +10,12 @@
 #
 #  这个脚本做什么：
 #    1) 记录升级前的版本
-#    2) 优先用 pip 升级（Debian/树莓派 OS 走 --break-system-packages；Ubuntu 22.04 走普通 pip）
-#    3) pip 不行就用官方单文件二进制（自带 Python，最省事）
-#    4) 顺带尝试安装 curl_cffi（支持 --impersonate，能提高绕过风控的成功率；失败也不影响）
-#    5) 打印升级后版本，并用「不带 cookies」「带 cookies」各试解析一次公开视频
+#    2) **安装/更新 yt-dlp[default]**（含 yt-dlp-ejs：解 YouTube n challenge 的必需组件）
+#    3) **安装 deno**（yt-dlp 推荐的 JS 运行时；没有它 → n challenge 求解失败 →
+#       表现为 "No video formats found!" / "The page needs to be reloaded."，很容易被误判成网络问题）
+#    4) pip 不行就用官方单文件二进制（自带 Python，最省事）
+#    5) 顺带尝试安装 curl_cffi（支持 --impersonate；失败也不影响）
+#    6) 打印升级后版本、JS 运行时状态，并用「不带 cookies」「带 cookies」各试解析一次公开视频
 #
 #  回滚方法：
 #    - pip 安装的：pip3 install -U "yt-dlp==<旧版本号>"
@@ -55,19 +57,25 @@ else
   INFO "暂不支持 --impersonate（本脚本会尝试补上 curl_cffi）"
 fi
 
-MARK "2. 用 pip 升级（首选）"
+MARK "2. 用 pip 安装/升级 yt-dlp[default]（含 yt-dlp-ejs 挑战求解脚本）"
 PIP_OK=0
 export DEBIAN_FRONTEND=noninteractive
 apt-get install -y python3-pip >/dev/null 2>&1 || true
-if pip3 install -U yt-dlp 2>&1 | tail -5; then
+if pip3 install -U "yt-dlp[default]" 2>&1 | tail -4; then
   PIP_OK=1
-  OK "pip 升级成功"
+  OK "pip 安装成功（含 yt-dlp-ejs）"
 else
-  BAD "普通 pip 升级失败（Debian 13+ 有 PEP 668 限制），改用 --break-system-packages"
-  if pip3 install -U --break-system-packages yt-dlp 2>&1 | tail -5; then
+  BAD "普通 pip 失败（Debian 13+ 有 PEP 668 限制），改用 --break-system-packages"
+  if pip3 install -U --break-system-packages "yt-dlp[default]" 2>&1 | tail -4; then
     PIP_OK=1
-    OK "pip --break-system-packages 升级成功"
+    OK "pip --break-system-packages 安装成功（含 yt-dlp-ejs）"
   fi
+fi
+if pip3 show yt-dlp-ejs >/dev/null 2>&1; then
+  OK "yt-dlp-ejs 已安装：$(pip3 show yt-dlp-ejs 2>/dev/null | awk -F': ' '/^Version/{print $2}')"
+else
+  BAD "yt-dlp-ejs 缺失（n challenge 会解不了）：尝试单独安装"
+  pip3 install -U --break-system-packages yt-dlp-ejs 2>&1 | tail -2 || true
 fi
 
 NEW_VER="$(yt-dlp --version 2>/dev/null || echo '未安装')"
@@ -84,7 +92,30 @@ if [ "${PIP_OK}" != "1" ] || [ "${NEW_VER}" = "未安装" ]; then
   fi
 fi
 
-MARK "4. 可选：安装 curl_cffi（支持 --impersonate，提高过风控成功率）"
+MARK "4. 安装 deno（yt-dlp 推荐的 JS 运行时；**这一步是解决 n challenge 的关键**）"
+if command -v deno >/dev/null 2>&1; then
+  OK "deno 已安装：$(deno --version 2>/dev/null | head -1)"
+else
+  export DENO_INSTALL=/usr/local
+  if curl -fsSL https://deno.land/install.sh | sh -s -- -y >/tmp/deno-install.log 2>&1; then
+    OK "deno 已安装：$(/usr/local/bin/deno --version 2>/dev/null | head -1)"
+  else
+    BAD "deno 安装脚本失败，改用 GitHub release"
+    if curl -fL -o /tmp/deno.zip https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip 2>/dev/null || \
+       curl -fL -o /tmp/deno.zip https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip; then
+      python3 -c "import zipfile;zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')" 2>/dev/null || unzip -o -q /tmp/deno.zip -d /usr/local/bin
+      chmod +x /usr/local/bin/deno
+      OK "deno 已安装：$(/usr/local/bin/deno --version 2>/dev/null | head -1)"
+    else
+      BAD "deno 下载失败（网络/GitHub 不通）：n challenge 仍无法求解，可稍后重跑本脚本"
+    fi
+  fi
+  ln -sf /usr/local/bin/deno /usr/bin/deno 2>/dev/null || true
+fi
+echo "--- yt-dlp 识别到的 JS 运行时:"
+timeout 60 yt-dlp -v --simulate --no-warnings "https://www.youtube.com/watch?v=jNQXAC9IVRw" 2>&1 | grep -iE "JS runtimes|jsc\]" | head -3
+
+MARK "5. 可选：安装 curl_cffi（支持 --impersonate，提高过风控成功率）"
 if command -v yt-dlp >/dev/null 2>&1 && yt-dlp --list-impersonate-targets >/dev/null 2>&1; then
   OK "已经支持，跳过"
 else
@@ -99,7 +130,7 @@ else
   fi
 fi
 
-MARK "5. 升级结果与解析测试"
+MARK "6. 升级结果与解析测试"
 NEW_VER="$(yt-dlp --version 2>/dev/null || echo '未安装')"
 if [ "${NEW_VER}" != "未安装" ]; then OK "yt-dlp：${OLD_VER} → ${NEW_VER}"; else BAD "yt-dlp 仍不可用"; fi
 
@@ -132,7 +163,7 @@ if [ -n "${COOKIE_FILE}" ]; then
   fi
 fi
 
-MARK "6. 让服务用上新版本"
+MARK "7. 让服务用上新版本"
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^ttdownload-web.service'; then
   systemctl restart ttdownload-web
   sleep 3
@@ -142,7 +173,7 @@ if [ -n "${PROJ}" ]; then
   INFO "接下来在网页上重试任务即可（无需重新部署）"
 fi
 
-MARK "7. 尾巴"
+MARK "8. 尾巴"
 echo "  升级前：${OLD_VER}"
 echo "  升级后：$(yt-dlp --version 2>/dev/null || echo '未安装')"
 echo

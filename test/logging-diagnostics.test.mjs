@@ -662,6 +662,21 @@ test('cookies 结构校验：缺头/缺关键字段/过期都会给出中文告�
   updateSettings({ webvideoCookiesFile: before.webvideoCookiesFile });
 });
 
+test('网络自检包含「yt-dlp JS 运行时」项（缺 deno 时必须明确报失败并给指引）', async () => {
+  netCheck.resetNetworkCache();
+  const report = await netCheck.networkReport(true);
+  const js = report.checks.find((c) => c.id === 'ytdlp-jsruntime');
+  assert.ok(js, '自检应有 yt-dlp JS 运行时项');
+  assert.equal(js.group, 'ytdlp');
+  assert.ok(['ok', 'fail'].includes(js.status));
+  if (js.status === 'fail') {
+    assert.ok(js.hint && /fix-ytdlp|deno/i.test(js.hint), `失败时应指引装 deno/fix-ytdlp.sh，实际：${js.hint}`);
+    assert.match(js.detail, /deno|bun|quickjs|node/, '应说明检测到了什么');
+  } else {
+    assert.match(js.detail, /可用/);
+  }
+});
+
 test('网络自检包含 cookies 检查项（未配置时明确说 skip + 指引）', async () => {
   netCheck.resetNetworkCache();
   const report = await netCheck.networkReport(true);
