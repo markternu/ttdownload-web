@@ -43,6 +43,7 @@
 | 部署 | 一键 `deploy.sh`（Ubuntu）+ systemd + Docker/docker-compose |
 | 运维 | `--update` 拉取最新代码并重新部署、`--stop/--start/--restart`、`--logs/--logs-follow` |
 | 调试 | 全链路 `[MARK:XXX]` 标记日志 + 网页「日志」页 + 一键导出诊断包 + 首页「网络自检」 |
+| 待下载清单 | 网页「待下载」页：列出已加密归档、安卓端还没取走的成品，可一键下载到本机（`GET /api/files/pending`） |
 | 远程修复 | 网页「修复脚本」页：上传环境修复脚本并一键执行（默认关闭 + 维护令牌 + 执行前预览 + 输出日志） |
 
 ## 三、快速开始（开发环境）

@@ -48,7 +48,12 @@ CREATE TABLE IF NOT EXISTS published_files (
   path TEXT NOT NULL,
   created_at TEXT NOT NULL,
   downloaded INTEGER NOT NULL DEFAULT 0,
-  downloaded_at TEXT
+  downloaded_at TEXT,
+  -- 下载跟踪（只统计，不影响 downloaded 语义：downloaded=1 仍表示"安卓已上报完成/已消费"）
+  android_downloads INTEGER NOT NULL DEFAULT 0,
+  last_android_download_at TEXT,
+  web_downloads INTEGER NOT NULL DEFAULT 0,
+  last_web_download_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS seeds (
@@ -303,6 +308,10 @@ interface PublishedRow {
   created_at: string;
   downloaded: number;
   downloaded_at: string | null;
+  android_downloads: number | null;
+  last_android_download_at: string | null;
+  web_downloads: number | null;
+  last_web_download_at: string | null;
 }
 
 export const filesRepo = {
@@ -339,6 +348,18 @@ export const filesRepo = {
       .all(...(args as never[]), pageSize, (page - 1) * pageSize) as PublishedRow[];
     return { rows, total, sum };
   },
+  /** 记录一次下载（安卓端 / 网页端分开统计；不影响 downloaded 语义） */
+  trackDownload(id: number, kind: 'android' | 'web'): void {
+    const col = kind === 'android' ? 'android_downloads' : 'web_downloads';
+    const atCol = kind === 'android' ? 'last_android_download_at' : 'last_web_download_at';
+    db.prepare(`UPDATE published_files SET ${col} = COALESCE(${col},0) + 1, ${atCol} = ? WHERE id = ?`).run(nowIso(), id);
+  },
+
+  /** 待下载清单（安卓还没上报完成 = 还没被取走的成品） */
+  pending(opts: { q?: string; page?: number; pageSize?: number } = {}) {
+    return this.list({ ...opts, pendingOnly: true });
+  },
+
   markDownloaded(id: number): void {
     db.prepare('UPDATE published_files SET downloaded=1, downloaded_at=? WHERE id=?').run(nowIso(), id);
   },

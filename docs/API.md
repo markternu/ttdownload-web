@@ -212,7 +212,8 @@ interface SeedItem {
 | --- | --- | --- |
 | GET | `/api/files?q=&page=&pageSize=` | `{ items: PublishedFile[], total, totalBytes }` |
 | DELETE | `/api/files/:id?withFile=1` | 删除记录 / 同时删除磁盘文件（默认只删记录） |
-| GET | `/api/files/:id/download` | 管理端下载（不鉴权，便于排障；安卓用 android 接口） |
+| GET | `/api/files/:id/download` | 管理端下载（不鉴权，便于排障）；**会累计网页端下载次数**并打 `[MARK:FILE_DOWNLOAD]` |
+| GET | `/api/files/pending?q=&page=&pageSize=` | **待下载清单**：已下载完成并加密归档、**安卓端还没上报完成**的成品；返回 `{ items, total, totalBytes, oldestWaitingSec, generatedAt }` |
 
 ---
 

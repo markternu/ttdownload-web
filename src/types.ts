@@ -61,6 +61,16 @@ export interface Task {
 }
 
 export interface PublishedFile {
+  /** 安卓端下载地址（需要 X-Auth-Token；App 自己用这个） */
+  androidDownloadUrl?: string;
+  /** 安卓端下载次数 / 最后时间（用于"是否已被取走但未上报"） */
+  androidDownloads?: number;
+  lastAndroidDownloadAt?: string | null;
+  /** 网页端（管理界面）下载次数 / 最后时间 */
+  webDownloads?: number;
+  lastWebDownloadAt?: string | null;
+  /** 发布至今等待了多少秒 */
+  waitingSec?: number;
   id: number;
   name: string;
   title: string;

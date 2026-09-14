@@ -90,6 +90,11 @@ androidRouter.get(
         res.status(416).setHeader('Content-Range', `bytes */${stat.size}`).end();
         return;
       }
+      // 只在第一块（start=0）记一次，避免 aria2 多线程分片把下载次数刷爆
+      if (start === 0) {
+        filesRepo.trackDownload(id, 'android');
+        logger.child('android').mark('FILE_DOWNLOAD', `安卓端开始下载成品文件 #${id}`, { name: file.name, sizeBytes: stat.size });
+      }
       res.status(206);
       res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
       res.setHeader('Content-Length', String(end - start + 1));
@@ -97,6 +102,9 @@ androidRouter.get(
       return;
     }
 
+    // 整文件下载（不带 Range）
+    filesRepo.trackDownload(id, 'android');
+    logger.child('android').mark('FILE_DOWNLOAD', `安卓端开始下载成品文件 #${id}`, { name: file.name, sizeBytes: stat.size });
     res.setHeader('Content-Length', String(stat.size));
     fs.createReadStream(file.path).pipe(res);
   }),

@@ -43,6 +43,7 @@ export const MARKERS: Record<string, string> = {
   ENCRYPT: 'AES 加密与 V-L-T 标记',
   PUBLISH: '发布到消费者目录',
   CLEANUP: '消费者上报完成后的清理',
+  FILE_DOWNLOAD: '成品文件被下载（区分安卓端 / 网页端）',
   BT_EVICT: 'BT 出清判定（10 小时门槛/停滞/极慢）',
   BT_CLEANUP: 'BT 目录清理',
   ANDROID: '安卓端接口调用（鉴权/清单/上报）',

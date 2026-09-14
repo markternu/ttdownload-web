@@ -36,7 +36,7 @@ process.env.YTDLP_BIN = fakeYtdlp;
 
 const { createApp } = await import('../dist/app.js');
 const { handoffToArchive, pipelineTick } = await import('../dist/services/pipeline.js');
-const { tasksRepo } = await import('../dist/core/db.js');
+const { tasksRepo, filesRepo } = await import('../dist/core/db.js');
 
 const server = http.createServer(createApp());
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -404,4 +404,83 @@ test('SSE /api/events 返回事件流', async () => {
   ]);
   assert.ok(chunk.value);
   ac.abort();
+});
+
+/* ------------------------------------------------------------------ */
+/* 待下载清单（已加密归档、安卓还没取走的成品）                          */
+/* ------------------------------------------------------------------ */
+
+test('待下载清单：发布后出现在 /api/files/pending，网页下载只计网页次数', async () => {
+  const consumers = path.join(root, 'xiaofeizhe_downd');
+  fs.mkdirSync(consumers, { recursive: true });
+  const filePath = path.join(consumers, 'pend1');
+  fs.writeFileSync(filePath, 'encrypted-fixture-content');
+
+  const id = filesRepo.add({
+    taskId: null,
+    name: 'pend1',
+    title: '待下载测试视频.mp4',
+    module: 'webvideo',
+    sizeBytes: 24,
+    path: filePath,
+  });
+
+  // 1) 出现在待下载清单里
+  let pending = await get('/api/files/pending');
+  assert.equal(pending.status, 200);
+  const item = pending.json.items.find((f) => f.id === id);
+  assert.ok(item, '新发布的文件应出现在待下载清单');
+  assert.equal(item.name, 'pend1');
+  assert.equal(item.module, 'webvideo');
+  assert.equal(item.downloadUrl, `/api/files/${id}/download`, '管理端下载地址应指向 /api/files/:id/download');
+  assert.equal(item.androidDownloadUrl, `/api/android/download/${id}`, '安卓端下载地址也应给出');
+  assert.equal(item.downloaded, false);
+  assert.equal(item.androidDownloads, 0, '还没被安卓取走');
+  assert.ok(typeof item.waitingSec === 'number' && item.waitingSec >= 0, '应给出已等待秒数');
+  assert.ok(pending.json.total >= 1);
+  assert.ok(pending.json.totalBytes >= 24);
+
+  // 2) 网页端下载 → 只增加网页计数，安卓计数不变，仍在待下载清单里
+  const webDl = await get(`/api/files/${id}/download`);
+  assert.equal(webDl.status, 200);
+  assert.equal(webDl.text, 'encrypted-fixture-content');
+  pending = await get('/api/files/pending');
+  let after = pending.json.items.find((f) => f.id === id);
+  assert.equal(after.webDownloads, 1, '网页端下载次数应为 1');
+  assert.equal(after.androidDownloads, 0, '网页端下载不应算作安卓已取走');
+  assert.ok(after.lastWebDownloadAt, '应记录网页端最后下载时间');
+  assert.equal(after.downloaded, false);
+
+  // 3) 安卓端下载（带 token）→ 安卓计数 +1，但**仍是待下载**（没上报完成不能算已消费）
+  const anDl = await get(`/api/android/download/${id}`, { headers: { 'X-Auth-Token': token } });
+  assert.equal(anDl.status, 200);
+  pending = await get('/api/files/pending');
+  after = pending.json.items.find((f) => f.id === id);
+  assert.equal(after.androidDownloads, 1, '安卓端下载次数应为 1');
+  assert.ok(after.lastAndroidDownloadAt, '应记录安卓端最后下载时间');
+  assert.equal(after.downloaded, false, '未上报完成前不应标记为已下载');
+  assert.ok(pending.json.items.some((f) => f.id === id), '取走但未上报的文件仍应留在待下载清单');
+
+  // 4) 安卓上报完成 → 从待下载清单消失
+  const done = await get('/api/android/done', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Auth-Token': token },
+    body: JSON.stringify({ ids: [id] }),
+  });
+  assert.equal(done.status, 200);
+  pending = await get('/api/files/pending');
+  assert.equal(pending.json.items.some((f) => f.id === id), false, '上报完成后应从待下载清单移除');
+});
+
+test('待下载清单支持搜索，且旧的 /api/files 列表也带上跟踪字段', async () => {
+  const all = await get('/api/files?pageSize=50');
+  assert.equal(all.status, 200);
+  for (const f of all.json.items) {
+    assert.ok(typeof f.androidDownloads === 'number', 'items 应带 androidDownloads');
+    assert.ok(typeof f.webDownloads === 'number', 'items 应带 webDownloads');
+    assert.ok(f.downloadUrl.startsWith('/api/files/'), 'items 应带管理端下载地址');
+  }
+  const noMatch = await get('/api/files/pending?q=绝对不存在的文件名zzz');
+  assert.equal(noMatch.json.items.length, 0);
+  assert.equal(noMatch.json.total, 0);
 });
