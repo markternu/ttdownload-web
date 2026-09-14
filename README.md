@@ -43,6 +43,7 @@
 | 部署 | 一键 `deploy.sh`（Ubuntu）+ systemd + Docker/docker-compose |
 | 运维 | `--update` 拉取最新代码并重新部署、`--stop/--start/--restart`、`--logs/--logs-follow` |
 | 调试 | 全链路 `[MARK:XXX]` 标记日志 + 网页「日志」页 + 一键导出诊断包 + 首页「网络自检」 |
+| 全站鉴权 | 账号密码由部署脚本生成并打印；未登录只能看到登录页（Cookie 会话 7 天、失败限流、安卓 Token 与 HTTP Basic 供程序化访问） |
 | 待下载清单 | 网页「待下载」页：列出已加密归档、安卓端还没取走的成品，可一键下载到本机（`GET /api/files/pending`） |
 | 远程修复 | 网页「修复脚本」页：上传环境修复脚本并一键执行（默认关闭 + 维护令牌 + 执行前预览 + 输出日志） |
 
@@ -112,6 +113,18 @@ sudo ./deploy.sh --proxy         # 用 nginx 子路径反代（默认 /ttdownloa
 ```
 前端已支持任意子路径部署（API 走相对路径 + BrowserRouter basename 自动推导），无需额外构建参数；
 反代会自动备份 nginx 配置、`nginx -t` 校验失败自动回滚，卸载用 `setup-nginx-proxy.sh --remove`。
+
+### 登录（全站鉴权）
+
+部署脚本会生成并打印网页登录账号密码（同时写入 `.env` 的 `WEB_AUTH_USER` / `WEB_AUTH_PASSWORD`）：
+
+```
+[deploy] 网页登录账号 : admin
+[deploy] 网页登录密码 : xxxxxxxxxxxxxxxx
+```
+未登录时任何接口都返回 401，页面只显示登录页；直接访问 `:8080` 或走 nginx 子路径都一视同仁。
+程序化访问（curl/aria2）可用 `-u admin:<密码>` 或 `X-Auth-Token: <安卓Token>`；`/api/health` 与
+`/api/android/*` 例外（安卓端用自己的 Token）。老部署执行 `sudo ./deploy.sh --update` 会自动补上账号密码并打印。
 
 ### 日志与排查（调试期）
 

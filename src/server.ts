@@ -7,10 +7,12 @@ import { recoverTasks, startScheduler, stopScheduler, kickScheduler } from './co
 import { startPipeline, stopPipeline } from './services/pipeline';
 import { startBtEvictWorker, stopBtEvictWorker } from './services/btEvict';
 import { ensureAria2Daemon } from './modules/aria2Client';
+import { logAuthBootState } from './services/auth';
 
 async function main(): Promise<void> {
   ensureDirs();
   initNamePrefix();
+  logAuthBootState();
   logger.mark('BOOT', '==============================================');
   logger.mark('BOOT', `ttdownload-web v${config.version} 启动中...`);
   logger.mark('CONFIG', '运行配置', {

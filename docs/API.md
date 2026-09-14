@@ -131,6 +131,21 @@ interface Stats {
 
 ---
 
+## 1.5 鉴权（全站）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/auth/me` | 当前登录状态 `{ enabled, authenticated, username, sessionHours }`（公开，前端启动时调用） |
+| POST | `/api/auth/login` | `{ username, password }` → 200 + `AuthStatus`，并下发 `Set-Cookie: ttd_session=…`（HttpOnly/SameSite=Lax） |
+| POST | `/api/auth/logout` | 清除会话 Cookie |
+
+- **除下列例外，所有 `/api/*` 未登录一律 401** `{ error: { code: 'UNAUTHORIZED', message: '需要登录…' } }`
+- 公开例外：`/api/health`（探活）、`/api/auth/*`、`/api/android/*`（安卓端用 `X-Auth-Token` 自行鉴权）
+- 程序化访问：HTTP Basic（`-u 账号:密码`）或 `X-Auth-Token: <ANDROID_TOKEN>` 或 `?token=<ANDROID_TOKEN>`（便于 aria2 直接拉）
+- 会话是 HMAC 签名的无状态 Cookie（密钥 `WEB_SESSION_SECRET`，默认由账号密码派生）→ 服务重启不掉线
+- 登录失败限流：同一 IP 60 秒内失败 ≥10 次 → 429 `TOO_MANY_ATTEMPTS`
+- 账号密码来自 `.env` 的 `WEB_AUTH_USER` / `WEB_AUTH_PASSWORD`；**未配置 = 不鉴权**（启动日志会显著告警）
+
 ## 2. 任务（统一队列，所有模块共用）
 
 | 方法 | 路径 | 说明 |

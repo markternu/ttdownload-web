@@ -77,6 +77,9 @@ if mkdir -p "$DEPLOY_LOG_DIR" 2>/dev/null; then
   printf '\n===== %s 执行 deploy.sh %s =====\n' "$(date '+%F %T')" "$*" >>"$DEPLOY_LOG" 2>/dev/null || true
 fi
 
+# 生成 16 位随机密码（只用字母数字，避免 .env/shell/URL 转义问题）
+gen_password() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16; }
+
 log()  { printf '\033[1;32m[deploy]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[deploy]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[deploy]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -488,6 +491,18 @@ case "$ACTION" in
     fi
     # 老部署升级时自愈：补 yt-dlp-ejs / JS 运行时（缺了 YouTube 一定失败）
     if [[ $SKIP_APT -eq 0 ]]; then ensure_ytdlp_stack; fi
+    # 老部署升级时补齐「全站鉴权」账号密码（缺了就生成并打印，否则等于没有鉴权）
+    if [[ -f .env ]]; then
+      if ! grep -q '^WEB_AUTH_USER=' .env; then echo "WEB_AUTH_USER=${WEB_AUTH_USER:-admin}" >> .env; log "已补齐 WEB_AUTH_USER"; fi
+      if ! grep -q '^WEB_SESSION_HOURS=' .env; then echo "WEB_SESSION_HOURS=168" >> .env; fi
+      if ! grep -q '^WEB_SESSION_SECRET=' .env; then echo "WEB_SESSION_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> .env; fi
+      if ! grep -q '^WEB_AUTH_PASSWORD=' .env; then
+        GEN_PW="$(gen_password)"
+        echo "WEB_AUTH_PASSWORD=${GEN_PW}" >> .env
+        log "已为现有部署生成网页登录密码（写入 .env）：${GEN_PW}"
+      fi
+      chmod 600 .env 2>/dev/null || true
+    fi
     log "重新安装依赖并构建后端（以 ${REPO_OWNER} 身份，避免产物变 root 所有）..."
     if [[ -f package-lock.json ]]; then as_owner npm ci --no-audit --no-fund || as_owner npm install --no-audit --no-fund; else as_owner npm install --no-audit --no-fund; fi
     as_owner npm run build
@@ -618,6 +633,9 @@ fi
 if [[ ! -f .env ]]; then
   log "生成 .env（首次部署）"
   ANDROID_TOKEN_VALUE="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  WEB_AUTH_USER_VALUE="${WEB_AUTH_USER:-admin}"
+  WEB_AUTH_PASSWORD_VALUE="${WEB_AUTH_PASSWORD:-$(gen_password)}"
+  WEB_SESSION_SECRET_VALUE="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   cat > .env <<EOF
 HOST=0.0.0.0
 PORT=${PORT}
@@ -629,6 +647,11 @@ CONCURRENCY_TRANSMISSION=1
 CONCURRENCY_ARIA2=2
 CONCURRENCY_WEBVIDEO=2
 ANDROID_TOKEN=${ANDROID_TOKEN_VALUE}
+# 网页登录账号密码（全站鉴权；部署完成后终端会打印一次）
+WEB_AUTH_USER=${WEB_AUTH_USER_VALUE}
+WEB_AUTH_PASSWORD=${WEB_AUTH_PASSWORD_VALUE}
+WEB_SESSION_HOURS=168
+WEB_SESSION_SECRET=${WEB_SESSION_SECRET_VALUE}
 # 调试期：debug 记录外部命令 argv/退出码/stdout 摘要，排查完可改成 info 以减小日志
 LOG_LEVEL=debug
 SCRIPT_UPLOAD_ENABLED=0
@@ -672,7 +695,16 @@ else
     "LOG_MAX_MB=20" \
     "LOG_KEEP_FILES=5" \
     "SCRIPT_UPLOAD_ENABLED=0" \
-    "SCRIPT_RUN_TIMEOUT_SEC=600"
+    "SCRIPT_RUN_TIMEOUT_SEC=600" \
+    "WEB_AUTH_USER=${WEB_AUTH_USER:-admin}" \
+    "WEB_SESSION_HOURS=168" \
+    "WEB_SESSION_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  # 密码单独处理：缺了就生成一个，并在下面显著打印出来
+  if ! grep -q '^WEB_AUTH_PASSWORD=' .env; then
+    GEN_PW="$(gen_password)"
+    echo "WEB_AUTH_PASSWORD=${GEN_PW}" >> .env
+    warn "本次为老部署生成了网页登录密码（已写入 .env）：${GEN_PW}"
+  fi
 fi
 set -a; . ./.env; set +a
 PORT="${PORT:-8080}"
@@ -739,6 +771,13 @@ if [[ "${OK:-0}" -eq 1 ]]; then
   log "Web 管理界面 : http://${IP:-<服务器IP>}:${PORT}/"
   log "API 健康检查 : http://${IP:-<服务器IP>}:${PORT}/api/health"
   log "安卓 App 填写 : 服务器地址 http://${IP:-<服务器IP>}:${PORT}   Token ${TOKEN}"
+  WEB_USER_SHOW="$(grep -E '^WEB_AUTH_USER=' .env 2>/dev/null | cut -d= -f2-)"
+  WEB_PASS_SHOW="$(grep -E '^WEB_AUTH_PASSWORD=' .env 2>/dev/null | cut -d= -f2-)"
+  log "网页登录账号 : ${WEB_USER_SHOW:-（未配置）}"
+  log "网页登录密码 : ${WEB_PASS_SHOW:-（未配置，任何人不登录即可访问！）}"
+  if [[ -n "$WEB_USER_SHOW" && -n "$WEB_PASS_SHOW" ]]; then
+    log "登录地址     : http://${IP:-<服务器IP>}:${PORT}/  （走反代则为 http://<公网IP>${PROXY_PATH}/）"
+  fi
   log "下载根目录   : ${DOWNLOAD_ROOT}"
   log "服务管理     : systemctl status|restart|stop ${SERVICE_NAME}"
   log "项目属主     : ${REPO_OWNER}（如发现 git/npm 报权限错误，跑 deploy/scripts/fix-ownership.sh 归位）"

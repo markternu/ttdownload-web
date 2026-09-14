@@ -103,6 +103,16 @@ export const config = {
     unzip: str(process.env.UNZIP_BIN, 'unzip'),
   },
 
+  /** 全站鉴权（账号密码由部署脚本生成并写入 .env；为空表示未开启鉴权） */
+  webAuth: {
+    user: str(process.env.WEB_AUTH_USER, ''),
+    password: str(process.env.WEB_AUTH_PASSWORD, ''),
+    /** 会话有效期（小时） */
+    sessionHours: num(process.env.WEB_SESSION_HOURS, 168),
+    /** 会话签名密钥（留空则由账号密码派生，重启后仍有效） */
+    sessionSecret: str(process.env.WEB_SESSION_SECRET, ''),
+  },
+
   /** 公开视频（yt-dlp）：cookies 与额外参数，用于会员/登录/年龄限制视频 */
   webvideo: {
     /** cookies.txt 默认路径（会员/登录/年龄限制视频必需，可在 Web 设置页里上传或改路径） */

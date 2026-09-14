@@ -5,6 +5,8 @@ import path from 'node:path';
 import { config } from './core/config';
 import { logger } from './core/logger';
 import { HttpError } from './utils/http';
+import { authRouter } from './routes/auth';
+import { authMiddleware } from './services/auth';
 import { systemRouter } from './routes/system';
 import { tasksRouter } from './routes/tasks';
 import { aria2Router } from './routes/aria2';
@@ -49,6 +51,10 @@ export function createApp(): express.Express {
     });
     next();
   });
+
+  // 鉴权：/api/auth/* 用于登录；其余 /api 一律要求已登录（安卓端接口用 Token，见 services/auth）
+  app.use('/api/auth', authRouter);
+  app.use('/api', authMiddleware);
 
   app.use('/api', systemRouter);
   app.use('/api/tasks', tasksRouter);
