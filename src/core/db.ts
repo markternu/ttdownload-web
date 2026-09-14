@@ -82,6 +82,22 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 `);
 
+/**
+ * 老库补列（幂等）：SQLite 不支持 ADD COLUMN IF NOT EXISTS，先查 PRAGMA 再 ALTER。
+ * 必须放在上面的建表语句**之后**执行，否则表还没建出来，ALTER 会失败并被吞掉。
+ */
+function ensureColumn(table: string, column: string, definition: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (cols.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+// published_files 的下载跟踪列（新库建表时已包含；老库在这里补上）
+ensureColumn('published_files', 'android_downloads', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('published_files', 'last_android_download_at', 'TEXT');
+ensureColumn('published_files', 'web_downloads', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('published_files', 'last_web_download_at', 'TEXT');
+
 const nowIso = (): string => new Date().toISOString();
 
 interface TaskRow {
