@@ -67,6 +67,7 @@ SKIP_APT=0
 SKIP_WEB=0
 ACTION="deploy"
 LOG_LINES=200
+ORIGINAL_ARGS=("$@")   # git pull 后要用新脚本重新执行同样的参数
 PROXY_PATH="${PROXY_PATH:-/ttdownload}"
 
 DEPLOY_LOG_DIR="${DOWNLOAD_ROOT}/state/logs"
@@ -488,6 +489,15 @@ case "$ACTION" in
       log "已更新到：$(git -c safe.directory='*' log --oneline -1)"
     else
       warn "当前目录不是 git 仓库（可能是 scp 上传的），跳过 git pull，仅重新构建"
+    fi
+
+    # 关键：git pull 可能已经把 deploy.sh 自己更新了，而 bash 还在按旧文件的偏移继续读，
+    # 会导致"新加的步骤被跳过"。这里用**新脚本**重新执行同样的参数（DEPLOY_REEXEC 防死循环）。
+    if [[ -z "${DEPLOY_REEXEC:-}" ]]; then
+      DEPLOY_REEXEC=1
+      log "代码已更新，改用最新版 deploy.sh 继续执行 ..."
+      export DEPLOY_REEXEC
+      exec bash "${PROJECT_DIR}/deploy.sh" "${ORIGINAL_ARGS[@]}"
     fi
     # 老部署升级时自愈：补 yt-dlp-ejs / JS 运行时（缺了 YouTube 一定失败）
     if [[ $SKIP_APT -eq 0 ]]; then ensure_ytdlp_stack; fi

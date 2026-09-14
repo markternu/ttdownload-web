@@ -201,6 +201,10 @@ test('运维子命令齐备：--update / --stop / --start / --logs / --logs-foll
   // --update 的自愈：检测到属主不符（历史 sudo 造成的 root 文件）时自动归位并重试
   assert.match(deploySrc, /OWNER_MISMATCH/, '应检测属主不符的文件');
   assert.match(deploySrc, /自动归位属主后重试 git pull/, '应自动归位后重试');
+  // --update 拉取到新代码后必须用新脚本重新执行，否则"新加的部署步骤会被跳过"
+  assert.match(deploySrc, /ORIGINAL_ARGS=/, '应保留原始参数供 re-exec');
+  assert.match(deploySrc, /DEPLOY_REEXEC/, '应用 DEPLOY_REEXEC 防死循环');
+  assert.match(deploySrc, /exec bash "\$\{PROJECT_DIR\}\/deploy\.sh"/, '应 re-exec 新脚本继续执行');
 });
 
 test('内置环境脚本：diagnose-env.sh / fix-node20.sh / fix-ytdlp.sh 存在、可执行、内容正确', () => {
