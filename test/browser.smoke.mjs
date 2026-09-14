@@ -75,6 +75,8 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
   const contexts = [];
 
   test.after(async () => {
+    // SSE/长连接会让 server.close() 一直等 → 先主动断开所有连接，保证测试进程能退出
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
     for (const c of contexts) await c.close().catch(() => {});
     if (browser) await browser.close();
     await new Promise((r) => server.close(r));

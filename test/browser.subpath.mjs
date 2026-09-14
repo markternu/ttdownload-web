@@ -91,6 +91,11 @@ DIR=$(dirname "$OUT"); mkdir -p "$DIR"; echo "v" > "$DIR/subpath.mp4"; echo "PRO
   const pageErrors = [];
 
   test.after(async () => {
+    // SSE/长连接会让 close() 一直等 → 先主动断开所有连接，保证测试进程能退出
+    // （本文件的两个 server 叫 app / proxy，别抄成 server）
+    for (const srv of [proxy, app]) {
+      if (typeof srv.closeAllConnections === 'function') srv.closeAllConnections();
+    }
     if (browser) await browser.close();
     await new Promise((r) => proxy.close(r));
     await new Promise((r) => app.close(r));
