@@ -466,7 +466,22 @@ case "$ACTION" in
     cd "$PROJECT_DIR"
     if [[ -d .git ]]; then
       log "git pull（属主 ${REPO_OWNER}；当前版本：$(git -c safe.directory='*' log --oneline -1 2>/dev/null || echo 未知)）"
-      as_owner git -c safe.directory='*' pull --ff-only || die "git pull 失败：请检查网络/凭据，或手动处理冲突后再执行"
+      git_pull_ok=0
+      if as_owner git -c safe.directory='*' pull --ff-only; then
+        git_pull_ok=1
+      else
+        # 常见原因一：项目里混入了 root 所有的文件（历史上用 sudo 跑过 git/npm）→ 自动归位后重试
+        OWNER_MISMATCH="$(find "$PROJECT_DIR" -not -user "$REPO_OWNER" 2>/dev/null | head -1)"
+        if [[ -n "$OWNER_MISMATCH" && "$REPO_OWNER" != "root" ]]; then
+          warn "检测到不属于 ${REPO_OWNER} 的文件（例如 $OWNER_MISMATCH），正在自动归位属主后重试 git pull ..."
+          chown -R "${REPO_OWNER}:${REPO_OWNER}" "$PROJECT_DIR" && log "属主已归位"
+          as_owner git -c safe.directory='*' pull --ff-only && git_pull_ok=1
+        fi
+      fi
+      if [[ $git_pull_ok -ne 1 ]]; then
+        warn "若提示 'insufficient permission for adding an object'：执行 sudo bash deploy/scripts/fix-ownership.sh 后重试；"
+        die "git pull 失败：请检查网络/凭据，或手动处理冲突后再执行"
+      fi
       log "已更新到：$(git -c safe.directory='*' log --oneline -1)"
     else
       warn "当前目录不是 git 仓库（可能是 scp 上传的），跳过 git pull，仅重新构建"

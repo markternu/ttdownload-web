@@ -198,6 +198,9 @@ test('运维子命令齐备：--update / --stop / --start / --logs / --logs-foll
   assert.match(deploySrc, /as_owner\(\)/, '应有 as_owner 包装函数');
   assert.match(deploySrc, /as_owner npm run build/, '构建应以属主身份执行');
   assert.match(deploySrc, /as_owner git -c safe\.directory/, 'git pull 应以属主身份执行');
+  // --update 的自愈：检测到属主不符（历史 sudo 造成的 root 文件）时自动归位并重试
+  assert.match(deploySrc, /OWNER_MISMATCH/, '应检测属主不符的文件');
+  assert.match(deploySrc, /自动归位属主后重试 git pull/, '应自动归位后重试');
 });
 
 test('内置环境脚本：diagnose-env.sh / fix-node20.sh / fix-ytdlp.sh 存在、可执行、内容正确', () => {
