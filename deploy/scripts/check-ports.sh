@@ -70,6 +70,11 @@ done
 if [ -n "$PUBLIC_IP" ]; then OK "公网 IP：${PUBLIC_IP}"; else BAD "取不到公网 IP（无外网？）"; fi
 LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 [ -n "$LAN_IP" ] && INFO "内网 IP：${LAN_IP}"
+ROUTE_SRC="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)"
+if printf '%s' "${ROUTE_SRC:-}" | grep -qE '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)'; then
+  INFO "本机处于 NAT 之后（出口源地址 ${ROUTE_SRC}）：外部探测反映的是**网关/VPN 的公网 IP**，"
+  INFO "  若网关没做端口转发、或走的是 VPN 代理，探测结果可能不代表你需要的入站可达性 —— 请以手机 4G 实测为准"
+fi
 
 MARK "1. 本机监听情况（服务有没有起来）"
 # 返回某个端口的本地监听地址（空 = 没监听）。优先 ss，退回 /proc/net/tcp，跨发行版都可用。
@@ -167,23 +172,30 @@ else
     SUMMARY="$(printf '%s' "$RES" | python3 -c "
 import json,sys
 try: d=json.load(sys.stdin)
-except Exception: print('解析失败'); raise SystemExit
+except Exception: print('ERR|0|0'); raise SystemExit
 ok=bad=0
 for node,val in d.items():
     if not val: continue
     r=val[0]
     if isinstance(r, dict) and 'time' in r: ok+=1
     else: bad+=1
-sub=[k for k in d.keys() if k.startswith('node')]
-print(f'{ok} 个探测点可达 / {bad} 个不可达')
-" 2>/dev/null || echo "解析失败")"
-    case "$SUMMARY" in
-      *"0 个探测点可达"*) BAD "端口 ${p}：外部**不可达**（${SUMMARY}）" ;;
-      *"解析失败"*) WARN "端口 ${p}：结果解析失败（${SUMMARY}）" ;;
-      *可达*) OK "端口 ${p}：外部可达（${SUMMARY}）" ;;
-      *) WARN "端口 ${p}：${SUMMARY}" ;;
-    esac
-    EXT_RESULT="${EXT_RESULT}${p}=${SUMMARY}; "
+print(f'{ok}|{bad}')
+" 2>/dev/null || echo "ERR|0|0")"
+    OK_CNT="${SUMMARY%%|*}"; BAD_CNT="${SUMMARY##*|}"
+    if [ "$OK_CNT" = "ERR" ]; then
+      WARN "端口 ${p}：外部探测结果解析失败"
+      VERDICT="unknown"
+    elif [ "${OK_CNT:-0}" -gt 0 ] && [ "${BAD_CNT:-0}" -eq 0 ]; then
+      OK "端口 ${p}：外部**可达**（${OK_CNT} 个探测点全部可达）"
+      VERDICT="reachable"
+    elif [ "${OK_CNT:-0}" -gt 0 ]; then
+      WARN "端口 ${p}：**部分探测点可达**（${OK_CNT} 可达 / ${BAD_CNT} 不可达）——可能是地区/运营商差异，用手机实测确认"
+      VERDICT="partial"
+    else
+      BAD "端口 ${p}：外部**不可达**（0/${BAD_CNT} 可达）"
+      VERDICT="unreachable"
+    fi
+    EXT_RESULT="${EXT_RESULT}${p}=${VERDICT}(${OK_CNT}/${BAD_CNT}); "
   done
 fi
 
@@ -196,7 +208,7 @@ fi
 PORT80_LISTEN="$(port_listen_addr 80)"
 if [ -n "$EXT_RESULT" ]; then
   INFO "外部探测汇总：${EXT_RESULT}"
-  if printf '%s' "$EXT_RESULT" | grep -q "${APP_PORT}=.*不可达"; then
+  if printf '%s' "$EXT_RESULT" | grep -q "${APP_PORT}=unreachable"; then
     if [ "${PORT80_LISTEN:-0}" != "0" ]; then
       INFO "→ ${APP_PORT} 外网不可达、但 80 端口有服务监听（多半是 nginx）：**建议用 nginx 子路径反向代理**，"
       INFO "   这样不用开放 ${APP_PORT}，也不影响别人用 80 端口根路径："
