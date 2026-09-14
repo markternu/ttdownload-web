@@ -231,6 +231,21 @@ export interface ApiErrorBody {
   error: { code: string; message: string }
 }
 
+/* ------------------------------ 鉴权 ------------------------------ */
+
+/**
+ * 当前登录状态（GET /api/auth/me、POST /api/auth/login）。
+ * 服务端未配置账号密码时 enabled=false，此时 authenticated 恒为 true（无需登录）。
+ */
+export interface AuthStatus {
+  /** 服务端是否配置了账号密码 */
+  enabled: boolean
+  authenticated: boolean
+  username: string | null
+  /** 会话有效期（小时） */
+  sessionHours: number
+}
+
 export interface TaskListResponse {
   items: Task[]
   total: number

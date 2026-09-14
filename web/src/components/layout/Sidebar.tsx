@@ -1,4 +1,5 @@
-import { NavLink } from 'react-router-dom'
+import { useState } from 'react'
+import { NavLink, useNavigate } from 'react-router-dom'
 import {
   BarChart3,
   CheckCircle2,
@@ -11,9 +12,11 @@ import {
   LifeBuoy,
   Link2,
   ListChecks,
+  LogOut,
   Magnet,
   ScrollText,
   Settings as SettingsIcon,
+  UserRound,
   Video,
   Wrench,
   X,
@@ -22,6 +25,7 @@ import type { LucideIcon } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { formatBytes } from '../../lib/format'
 import { useAppData } from '../../context/AppDataContext'
+import { useAuth } from '../../context/AuthContext'
 
 interface NavItem {
   to: string
@@ -52,6 +56,16 @@ export interface SidebarProps {
 
 function SidebarContent({ onClose }: { onClose: () => void }) {
   const { stats, system } = useAppData()
+  const { username, logout } = useAuth()
+  const navigate = useNavigate()
+  const [loggingOut, setLoggingOut] = useState(false)
+
+  const handleLogout = () => {
+    if (loggingOut) return
+    setLoggingOut(true)
+    onClose()
+    void logout().finally(() => navigate('/login', { replace: true }))
+  }
 
   const diskPercent =
     system && system.disk.totalBytes > 0
@@ -149,6 +163,29 @@ function SidebarContent({ onClose }: { onClose: () => void }) {
             任务 {stats?.totalTasks ?? 0}
           </span>
         </div>
+      </div>
+
+      {/* 当前登录账号 + 退出登录（桌面端与移动端抽屉共用） */}
+      <div className="flex items-center gap-2.5 rounded-2xl border border-slate-200 bg-white px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+          <UserRound className="h-4 w-4" />
+        </span>
+        <div className="min-w-0 flex-1 leading-tight">
+          <p className="truncate text-xs font-medium text-slate-700 dark:text-slate-200">
+            {username ?? '已登录'}
+          </p>
+          <p className="text-[11px] text-slate-400 dark:text-slate-500">当前登录账号</p>
+        </div>
+        <button
+          type="button"
+          onClick={handleLogout}
+          disabled={loggingOut}
+          title="退出登录"
+          aria-label="退出登录"
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-red-950/30 dark:hover:text-red-400"
+        >
+          <LogOut className="h-4 w-4" />
+        </button>
       </div>
     </div>
   )

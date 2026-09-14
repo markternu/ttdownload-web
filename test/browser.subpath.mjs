@@ -21,7 +21,11 @@ if (!hasBuild) {
   test('子路径部署测试（跳过：public/ 未构建）', { skip: true }, () => {});
 } else {
   const mock = await startAria2Mock({ workDir: '/tmp' });
-  const root = setupRuntime({ env: { ARIA2_RPC_PORT: String(mock.port) } });
+  const AUTH_USER = 'admin';
+  const AUTH_PASS = 'test-web-pass-123';
+  const root = setupRuntime({
+    env: { ARIA2_RPC_PORT: String(mock.port), WEB_AUTH_USER: AUTH_USER, WEB_AUTH_PASSWORD: AUTH_PASS },
+  });
 
   const fakeYtdlp = path.join(root, 'bin', 'yt-dlp');
   fs.mkdirSync(path.dirname(fakeYtdlp), { recursive: true });
@@ -93,9 +97,26 @@ DIR=$(dirname "$OUT"); mkdir -p "$DIR"; echo "v" > "$DIR/subpath.mp4"; echo "PRO
     await mock.close();
   });
 
+  /** 通过子路径代理登录并把会话 Cookie 注入 context（验证反代下登录也正常） */
+  const loginViaProxy = async (context) => {
+    const res = await fetch(`${base}${PREFIX}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: AUTH_USER, password: AUTH_PASS }),
+    });
+    if (!res.ok) throw new Error(`子路径登录失败：${res.status}`);
+    const raw = (res.headers.getSetCookie?.()[0] ?? res.headers.get('set-cookie') ?? '').split(';')[0];
+    const idx = raw.indexOf('=');
+    await context.addCookies([
+      { name: raw.slice(0, idx), value: raw.slice(idx + 1), domain: new URL(base).hostname, path: '/', httpOnly: true, sameSite: 'Lax' },
+    ]);
+  };
+
   test('子路径下首页可打开，且 API/SSE 都带上前缀（不是打到根路径）', async (t) => {
     if (!browser) return t.skip('无 Chrome');
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    await loginViaProxy(context);
+    const page = await context.newPage();
     page.on('pageerror', (e) => pageErrors.push(String(e)));
     page.on('console', (m) => {
       if (m.type() === 'error' && !/ERR_NAME_NOT_RESOLVED|Failed to load resource|net::ERR_/.test(m.text())) {
@@ -130,7 +151,9 @@ DIR=$(dirname "$OUT"); mkdir -p "$DIR"; echo "v" > "$DIR/subpath.mp4"; echo "PRO
 
   test('子路径下的深层路由刷新（SPA fallback）与其它站点互不影响', async (t) => {
     if (!browser) return t.skip('无 Chrome');
-    const page = await browser.newPage();
+    const context = await browser.newContext();
+    await loginViaProxy(context);
+    const page = await context.newPage();
     const loaded = [];
     page.on('request', (r) => loaded.push(new URL(r.url()).pathname));
     // 直接刷新深层路由：nginx 会转发 /ttdownload/tasks → 后端 /tasks → 返回 index.html

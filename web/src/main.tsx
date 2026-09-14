@@ -2,7 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
-import { AppDataProvider, SettingsProvider } from './context/AppDataContext'
+import { AuthProvider } from './context/AuthContext'
 import { ThemeProvider } from './context/ThemeContext'
 import { ToastProvider } from './context/ToastContext'
 import { APP_BASENAME } from './lib/basePath'
@@ -19,11 +19,10 @@ createRoot(container).render(
     <BrowserRouter basename={APP_BASENAME || undefined}>
       <ThemeProvider>
         <ToastProvider>
-          <SettingsProvider>
-            <AppDataProvider>
-              <App />
-            </AppDataProvider>
-          </SettingsProvider>
+          {/* 登录状态在最外层：未登录时 App 只渲染登录页，业务数据 Provider 不挂载 */}
+          <AuthProvider>
+            <App />
+          </AuthProvider>
         </ToastProvider>
       </ThemeProvider>
     </BrowserRouter>

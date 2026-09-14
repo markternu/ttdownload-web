@@ -16,7 +16,11 @@ if (!hasBuild) {
   test('浏览器冒烟测试（跳过：public/ 未构建）', { skip: true }, () => {});
 } else {
   const mock = await startAria2Mock({ workDir: '/tmp' });
-  const root = setupRuntime({ env: { ARIA2_RPC_PORT: String(mock.port) } });
+  const AUTH_USER = 'admin';
+  const AUTH_PASS = 'test-web-pass-123';
+  const root = setupRuntime({
+    env: { ARIA2_RPC_PORT: String(mock.port), WEB_AUTH_USER: AUTH_USER, WEB_AUTH_PASSWORD: AUTH_PASS },
+  });
 
   const fakeYtdlp = path.join(root, 'bin', 'yt-dlp');
   fs.mkdirSync(path.dirname(fakeYtdlp), { recursive: true });
@@ -68,15 +72,36 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
   }
 
   const pageErrors = [];
+  const contexts = [];
 
   test.after(async () => {
+    for (const c of contexts) await c.close().catch(() => {});
     if (browser) await browser.close();
     await new Promise((r) => server.close(r));
     await mock.close();
   });
 
+  /** 通过 API 登录并把会话 Cookie 注入浏览器 context（等价于用户在页面登录一次） */
+  const loginContext = async (context) => {
+    const res = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: AUTH_USER, password: AUTH_PASS }),
+    });
+    if (!res.ok) throw new Error(`测试登录失败：${res.status}`);
+    const raw = (res.headers.getSetCookie?.()[0] ?? res.headers.get('set-cookie') ?? '').split(';')[0];
+    const idx = raw.indexOf('=');
+    const name = raw.slice(0, idx);
+    const value = raw.slice(idx + 1);
+    const host = new URL(base).hostname;
+    await context.addCookies([{ name, value, domain: host, path: '/', httpOnly: true, sameSite: 'Lax' }]);
+  };
+
   const newPage = async () => {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    await loginContext(context);
+    contexts.push(context);
+    const page = await context.newPage();
     page.on('pageerror', (e) => pageErrors.push(String(e)));
     page.on('console', (m) => {
       if (m.type() !== 'error') return;
@@ -175,7 +200,9 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
 
   test('手机视口：无横向滚动', async (t) => {
     if (!browser) return t.skip('无 Chrome');
-    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    await loginContext(mobileContext);
+    const page = await mobileContext.newPage();
     page.on('pageerror', (e) => pageErrors.push(String(e)));
     await page.goto(base, { waitUntil: 'networkidle' });
     await page.waitForTimeout(800);
@@ -338,6 +365,57 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     assert.match(decodeURIComponent(download.url()), new RegExp(`/api/files/${pendingId}/download$`), `下载地址应为管理端下载接口，实际 ${download.url()}`);
     assert.deepEqual(pageErrors, [], `待下载页不应有 JS 报错：${pageErrors.join('; ')}`);
     await page.close();
+  });
+
+  test('鉴权：未登录访问任何页面都只能看到登录页（不会闪出数据）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    // 注意：这里刻意**不**注入登录 Cookie，模拟陌生人直接访问
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    const apiStatus = [];
+    page.on('response', (r) => {
+      const u = new URL(r.url());
+      if (u.pathname.includes('/api/') && !u.pathname.includes('/api/auth/')) apiStatus.push(r.status());
+    });
+    await page.goto(base, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=ttdownload-web 下载管理器', { timeout: 20000 });
+    assert.ok((await page.locator('text=请先登录后再使用').count()) > 0, '应显示登录页');
+    assert.ok((await page.getByPlaceholder('请输入用户名').count()) > 0, '应有用户名输入框');
+    assert.ok((await page.getByPlaceholder('请输入密码').count()) > 0, '应有密码输入框');
+    // 关键：不能看到系统内容
+    assert.equal(await page.locator('text=在线视频下载管理器').count(), 0, '未登录不应看到首页内容');
+    assert.equal(await page.locator('text=待下载文件').count(), 0, '未登录不应看到业务页面');
+    // 业务接口一个都不能成功（401/403）；未登录时前端守卫甚至会完全不发这些请求，两种都算通过
+    assert.ok(
+      apiStatus.every((code) => code === 401 || code === 403 || code === 404),
+      `未登录时不应有业务接口成功，实际状态：${[...new Set(apiStatus)].join(',')}`,
+    );
+    await context.close();
+  });
+
+  test('鉴权：错误密码给出提示，正确密码进入系统，退出后回到登录页', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    await page.goto(`${base}/dashboard`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=请先登录后再使用', { timeout: 20000 });
+
+    // 错误密码
+    await page.getByPlaceholder('请输入用户名').fill(AUTH_USER);
+    await page.getByPlaceholder('请输入密码').fill('wrong-password');
+    await page.getByRole('button', { name: /^登录$/ }).click();
+    await page.waitForSelector('text=/账号或密码错误|登录失败/', { timeout: 15000 });
+
+    // 正确密码 → 进入系统（会回跳到之前想去的 /dashboard）
+    await page.getByPlaceholder('请输入密码').fill(AUTH_PASS);
+    await page.getByRole('button', { name: /^登录$/ }).click();
+    await page.waitForSelector('text=在线视频下载管理器', { timeout: 20000 });
+    assert.equal(await page.locator('text=请先登录后再使用').count(), 0, '登录后不应再显示登录页');
+
+    // 退出登录 → 回到登录页
+    await page.getByRole('button', { name: '退出登录' }).first().click();
+    await page.waitForSelector('text=请先登录后再使用', { timeout: 20000 });
+    await context.close();
   });
 
   test('页面无 JS 报错', async (t) => {

@@ -2,6 +2,7 @@ import type {
   ApiErrorBody,
   Aria2Status,
   Aria2SubmitResponse,
+  AuthStatus,
   BtEvictSummary,
   BtStatus,
   BtUploadResponse,
@@ -61,6 +62,44 @@ export class ApiError extends Error {
 
 type QueryValue = string | number | boolean | null | undefined
 
+/* ------------------------- 会话过期（401）广播 ------------------------- */
+
+type UnauthorizedHandler = () => void
+
+const unauthorizedHandlers = new Set<UnauthorizedHandler>()
+
+/**
+ * 订阅「会话已过期」信号：任意业务接口返回 401（且不是登录接口本身）时触发。
+ * 返回取消订阅函数。React 层据此切回登录页，不需要整页刷新。
+ */
+export function onUnauthorized(handler: UnauthorizedHandler): () => void {
+  unauthorizedHandlers.add(handler)
+  return () => {
+    unauthorizedHandlers.delete(handler)
+  }
+}
+
+/** 通知所有订阅者（单个订阅者抛错不影响其它订阅者） */
+function notifyUnauthorized(): void {
+  // 直接迭代 Set：订阅者在回调里取消订阅是安全的（已删除的元素不会再被访问）
+  for (const handler of unauthorizedHandlers) {
+    try {
+      handler()
+    } catch {
+      /* 忽略订阅者自身异常 */
+    }
+  }
+}
+
+/**
+ * 是否为鉴权接口本身（/api/auth/...）。
+ * 这些接口的 401 代表「账号或密码错误」，是登录尝试失败，不是会话过期，
+ * 因此不能触发全局的 unauthorized 广播。
+ */
+function isAuthPath(path: string): boolean {
+  return path.startsWith('/api/auth/')
+}
+
 function buildUrl(path: string, query?: Record<string, QueryValue>): string {
   // 无显式前缀时去掉前导 '/' → 相对当前页面解析（子路径反代下自动带上前缀）
   const url = API_BASE ? `${API_BASE}${path}` : path.replace(/^\//, '')
@@ -114,6 +153,9 @@ async function request<T>(
     const body = payload as ApiErrorBody | undefined
     const code = body?.error?.code ?? `HTTP_${response.status}`
     const message = body?.error?.message ?? fallbackMessage(response.status)
+    // 会话过期（Cookie 失效 / 服务端重启换了账号密码）→ 广播给 React 层切回登录页。
+    // 登录接口自身的 401（BAD_CREDENTIALS）属于「这次登录输错了」，不广播。
+    if (response.status === 401 && !isAuthPath(path)) notifyUnauthorized()
     throw new ApiError(code, message, response.status)
   }
 
@@ -125,7 +167,7 @@ function fallbackMessage(status: number): string {
     case 400:
       return '请求参数有误'
     case 401:
-      return '鉴权失败，请检查访问令牌'
+      return '需要登录：请先在本页面登录'
     case 404:
       return '请求的资源不存在'
     case 409:
@@ -150,6 +192,18 @@ function maintTokenHeader(token?: string): Record<string, string> {
 /* ------------------------------- 系统 ------------------------------- */
 
 export const api = {
+  /* ------------------------------ 鉴权 ------------------------------ */
+
+  /** 当前登录状态（公开接口，未登录也返回 200） */
+  authMe: () => request<AuthStatus>('/api/auth/me'),
+
+  /** 登录：成功后服务端种下 HttpOnly 会话 Cookie，返回最新状态 */
+  authLogin: (username: string, password: string) =>
+    request<AuthStatus>('/api/auth/login', jsonBody({ username, password })),
+
+  /** 退出登录：服务端清除会话 Cookie */
+  authLogout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+
   health: () => request<HealthStatus>('/api/health'),
 
   system: () => request<SystemStatus>('/api/system'),
