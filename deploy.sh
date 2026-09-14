@@ -79,7 +79,14 @@ if mkdir -p "$DEPLOY_LOG_DIR" 2>/dev/null; then
 fi
 
 # 生成 16 位随机密码（只用字母数字，避免 .env/shell/URL 转义问题）
-gen_password() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16; }
+# 注意：**不能**写成 `tr </dev/urandom | head -c N` —— head 提前退出会让 tr 收到 SIGPIPE(141)，
+# 在 set -e + pipefail 下会直接中断整个部署（实机踩过：只补了一半 .env 就退出）。
+gen_password() {
+  local raw
+  raw="$(LC_ALL=C dd if=/dev/urandom bs=64 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  if [[ -z "$raw" ]]; then raw="$(date +%s%N)$$"; fi
+  printf '%s' "${raw:0:16}"
+}
 
 log()  { printf '\033[1;32m[deploy]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[deploy]\033[0m %s\n' "$*"; }
@@ -507,7 +514,8 @@ case "$ACTION" in
       if ! grep -q '^WEB_SESSION_HOURS=' .env; then echo "WEB_SESSION_HOURS=168" >> .env; fi
       if ! grep -q '^WEB_SESSION_SECRET=' .env; then echo "WEB_SESSION_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> .env; fi
       if ! grep -q '^WEB_AUTH_PASSWORD=' .env; then
-        GEN_PW="$(gen_password)"
+        GEN_PW="$(gen_password || true)"
+        [[ -n "$GEN_PW" ]] || GEN_PW="ChangeMe$(date +%s)"
         echo "WEB_AUTH_PASSWORD=${GEN_PW}" >> .env
         log "已为现有部署生成网页登录密码（写入 .env）：${GEN_PW}"
       fi
@@ -644,7 +652,9 @@ if [[ ! -f .env ]]; then
   log "生成 .env（首次部署）"
   ANDROID_TOKEN_VALUE="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   WEB_AUTH_USER_VALUE="${WEB_AUTH_USER:-admin}"
-  WEB_AUTH_PASSWORD_VALUE="${WEB_AUTH_PASSWORD:-$(gen_password)}"
+  WEB_AUTH_PASSWORD_VALUE="${WEB_AUTH_PASSWORD:-}"
+  [[ -n "$WEB_AUTH_PASSWORD_VALUE" ]] || WEB_AUTH_PASSWORD_VALUE="$(gen_password || true)"
+  [[ -n "$WEB_AUTH_PASSWORD_VALUE" ]] || WEB_AUTH_PASSWORD_VALUE="ChangeMe$(date +%s)"
   WEB_SESSION_SECRET_VALUE="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   cat > .env <<EOF
 HOST=0.0.0.0

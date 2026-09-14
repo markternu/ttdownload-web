@@ -256,3 +256,13 @@ test('内置环境脚本：diagnose-env.sh / fix-node20.sh / fix-ytdlp.sh 存在
     }
   }
 });
+
+test('gen_password 在 set -e + pipefail 下不会因 SIGPIPE 中断部署', () => {
+  const fn = deploySrc.slice(deploySrc.indexOf('gen_password() {'), deploySrc.indexOf('log()  {'));
+  assert.ok(fn.includes('dd if=/dev/urandom'), '应使用 dd 读取随机字节（避免 tr|head 的 SIGPIPE）');
+  const script = `set -euo pipefail\n${fn}\npw="$(gen_password)"; echo "PW=$pw"; echo "LEN=${'${#pw}'}"\n`;
+  const out = execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+  const pw = /PW=(\S+)/.exec(out)?.[1] ?? '';
+  assert.match(pw, /^[A-Za-z0-9]{16}$/, `应生成 16 位字母数字密码，实际 ${pw}`);
+  assert.match(out, /LEN=16/);
+});
