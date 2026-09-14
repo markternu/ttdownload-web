@@ -41,6 +41,20 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
   process.env.YTDLP_BIN = fakeYtdlp;
 
   const { createApp } = await import('../dist/app.js');
+  const { filesRepo } = await import('../dist/core/db.js');
+  // 造一个"已加密归档、安卓端还没取走"的成品，供「待下载」页测试
+  const consumerDir = path.join(root, 'xiaofeizhe_downd');
+  fs.mkdirSync(consumerDir, { recursive: true });
+  const pendingName = 'purpending1';
+  fs.writeFileSync(path.join(consumerDir, pendingName), 'encrypted-pending-fixture');
+  const pendingId = filesRepo.add({
+    taskId: null,
+    name: pendingName,
+    title: '待下载页测试文件.mp4',
+    module: 'webvideo',
+    sizeBytes: 24,
+    path: path.join(consumerDir, pendingName),
+  });
   const server = http.createServer(createApp());
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -298,6 +312,31 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     // 默认关闭：应提示先开启（后端 enabled=false 时）
     assert.ok((await page.locator('text=/未开启|关闭|开启/').count()) > 0, '应显示开关状态');
     assert.deepEqual(pageErrors, [], `修复脚本页不应有 JS 报错：${pageErrors.join('; ')}`);
+    await page.close();
+  });
+
+  test('待下载页：列出已加密归档但安卓未取走的成品，并提供下载按钮', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/pending`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=待下载文件', { timeout: 20000 });
+    // 统计卡
+    assert.ok((await page.locator('text=/待下载文件数|总大小|等待最久/').count()) >= 3, '应有三块统计卡');
+    // 我们造的那条记录
+    assert.ok((await page.locator(`text=${pendingName}`).count()) > 0, '应列出待下载的成品文件名');
+    assert.ok((await page.locator('text=待下载页测试文件.mp4').count()) > 0, '应显示原始标题');
+    assert.ok((await page.locator('text=/安卓尚未下载/').count()) > 0, '应显示安卓端状态');
+    // 行内「下载」按钮（页面用临时 <a> 触发下载，所以是 button 而不是 link）
+    const dl = page.getByRole('button', { name: /^下载$/ }).first();
+    assert.ok(await dl.isVisible(), '每行应有「下载」按钮');
+    // 点一下应触发浏览器下载（Playwright 会以 download 事件捕获）
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 15000 }).catch(() => null),
+      dl.click(),
+    ]);
+    assert.ok(download, '点击下载应触发浏览器下载');
+    assert.match(decodeURIComponent(download.url()), new RegExp(`/api/files/${pendingId}/download$`), `下载地址应为管理端下载接口，实际 ${download.url()}`);
+    assert.deepEqual(pageErrors, [], `待下载页不应有 JS 报错：${pageErrors.join('; ')}`);
     await page.close();
   });
 

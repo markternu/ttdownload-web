@@ -11,6 +11,7 @@ const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const Aria2Page = lazy(() => import('./pages/Aria2Page'))
 const BtPage = lazy(() => import('./pages/BtPage'))
 const FilesPage = lazy(() => import('./pages/FilesPage'))
+const PendingFilesPage = lazy(() => import('./pages/PendingFilesPage'))
 const LogsPage = lazy(() => import('./pages/LogsPage'))
 const ReportPage = lazy(() => import('./pages/ReportPage'))
 const ScriptsPage = lazy(() => import('./pages/ScriptsPage'))
@@ -67,6 +68,14 @@ export default function App() {
           element={
             <Suspense fallback={<LoadingBlock text="正在加载文件页…" />}>
               <FilesPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/pending"
+          element={
+            <Suspense fallback={<LoadingBlock text="正在加载待下载页…" />}>
+              <PendingFilesPage />
             </Suspense>
           }
         />

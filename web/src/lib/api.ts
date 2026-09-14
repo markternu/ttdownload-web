@@ -14,6 +14,7 @@ import type {
   ModuleId,
   NetworkReport,
   ParseResult,
+  PendingFilesResponse,
   ReportListResponse,
   ScriptDetail,
   ScriptItem,
@@ -383,6 +384,10 @@ export const api = {
 
   files: (query: { q?: string; page?: number; pageSize?: number } = {}) =>
     request<FileListResponse>('/api/files', {}, query),
+
+  /** 待下载清单（GET /api/files/pending）：已加密归档但安卓端还没取走的成品 + 等待时长统计 */
+  pendingFiles: (params: { q?: string; page?: number; pageSize?: number } = {}) =>
+    request<PendingFilesResponse>('/api/files/pending', {}, params),
 
   deleteFile: (id: number, withFile = false) =>
     request<{ ok?: boolean } | undefined>(

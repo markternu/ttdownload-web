@@ -66,9 +66,15 @@ export interface PublishedFile {
   module: ModuleId
   sizeBytes: number
   createdAt: string
-  downloadUrl: string // /api/android/download/<id>
+  downloadUrl: string // 管理端下载地址：/api/files/<id>/download（不鉴权）
+  androidDownloadUrl?: string // 安卓端下载地址：/api/android/download/<id>（需 X-Auth-Token，仅供参考/复制）
   downloaded: boolean // 是否已被安卓上报下载完成
   downloadedAt?: string | null
+  androidDownloads?: number // 安卓端已开始下载的次数
+  lastAndroidDownloadAt?: string | null // 安卓端最后一次开始下载的时间
+  webDownloads?: number // 网页端（本机）下载次数
+  lastWebDownloadAt?: string | null // 网页端最后一次下载的时间
+  waitingSec?: number // 发布至今等待秒数（待下载清单用）
 }
 
 export interface Settings {
@@ -236,6 +242,15 @@ export interface FileListResponse {
   items: PublishedFile[]
   total: number
   totalBytes: number
+}
+
+/** 待下载清单（GET /api/files/pending）：已完成加密归档、安卓端还没取走的成品 */
+export interface PendingFilesResponse {
+  items: PublishedFile[]
+  total: number
+  totalBytes: number
+  oldestWaitingSec: number // 等待最久的文件已等待秒数（无数据时为 0）
+  generatedAt: string // 清单生成时间（ISO）
 }
 
 export interface ParseResult {
