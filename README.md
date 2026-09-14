@@ -95,10 +95,22 @@ sudo ./deploy.sh --stop         # 停止（数据不动）
 sudo ./deploy.sh --start        # 启动
 sudo ./deploy.sh --logs         # 看最近 200 行日志（--logs 2000 指定行数）
 sudo ./deploy.sh --logs-follow  # 实时跟踪日志
+sudo ./deploy.sh --check-ports  # 端口可达性体检（本机监听/防火墙/公网是否真的能访问）
+sudo ./deploy.sh --proxy        # nginx 子路径反代：http://IP/ttdownload/ → 127.0.0.1:8080（8080 外网不通时用）
 sudo ./deploy.sh --port 9000    # 指定端口
 sudo ./deploy.sh --root /data/ttdownload
 sudo ./deploy.sh --uninstall    # 移除服务（保留数据）
 ```
+
+### 只开放 22/80/443 的服务器（8080 外网访问不到）
+
+```bash
+sudo ./deploy.sh --check-ports   # 先体检，确认 8080 到底通不通
+sudo ./deploy.sh --proxy         # 用 nginx 子路径反代（默认 /ttdownload，不动 80 根路径）
+# 网页 http://<公网IP>/ttdownload/ ；安卓 App 服务器地址填 http://<公网IP>/ttdownload
+```
+前端已支持任意子路径部署（API 走相对路径 + BrowserRouter basename 自动推导），无需额外构建参数；
+反代会自动备份 nginx 配置、`nginx -t` 校验失败自动回滚，卸载用 `setup-nginx-proxy.sh --remove`。
 
 ### 日志与排查（调试期）
 

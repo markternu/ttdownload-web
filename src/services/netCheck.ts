@@ -29,6 +29,8 @@ export interface NetworkCheck {
 export interface NetworkReport {
   checkedAt: string;
   cached: boolean;
+  /** 结果是否来自过期缓存（报告里会标注） */
+  stale?: boolean;
   overall: 'ok' | 'partial' | 'fail';
   summary: string;
   proxy: { env: Record<string, string>; extraArgs: string };
@@ -275,6 +277,13 @@ async function runChecks(): Promise<NetworkReport> {
       const err = (r.stderr || r.stdout).trim().split('\n').filter(Boolean).pop() ?? '未知错误';
       failures.push(`${candidate.name}(${candidate.id}) → ${r.timedOut ? '超时' : `退出码 ${r.code}`}：${err.slice(0, 160)}`);
       scoped.warn('[MARK:NET_CHECK] 候选视频解析失败', { id: candidate.id, code: r.code, timedOut: r.timedOut, err: err.slice(0, 300) });
+      // 自检本身不能变成"连打"：一旦被判定为机器人/限流，立即停止后续候选（否则会把出口 IP 拖进风控）
+      if (/not a bot|sign in to confirm|too many requests|429|unusual traffic/i.test(err)) {
+        failures.push('（已停止后续候选：YouTube 判定为机器人/限流，继续试只会加剧风控）');
+        scoped.warn('[MARK:NET_CHECK] 检测到机器人/限流，停止剩余候选探测');
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
     }
 
     if (okVideo) {
@@ -556,8 +565,12 @@ export async function networkReport(force = false): Promise<NetworkReport> {
  * 超过预算就返回一个带说明的占位结果（报告里会写明可单独下载完整网络报告）。
  */
 export async function networkReportWithBudget(budgetMs = 8000): Promise<NetworkReport> {
-  const cached = cache && Date.now() - cache.at < TTL_MS ? { ...cache.report, cached: true } : null;
-  if (cached) return cached;
+  const fresh = cache && Date.now() - cache.at < TTL_MS ? { ...cache.report, cached: true } : null;
+  if (fresh) return fresh;
+  // 没有新鲜缓存时，宁可给"上次的结果"（标注过期）也不要给空占位 —— 诊断报告里这份数据很重要
+  if (cache) {
+    return { ...cache.report, cached: true, stale: true, summary: `${cache.report.summary}（注意：这是 ${Math.round((Date.now() - cache.at) / 60000)} 分钟前的结果）` };
+  }
   const timeout = new Promise<NetworkReport>((resolve) =>
     setTimeout(
       () =>

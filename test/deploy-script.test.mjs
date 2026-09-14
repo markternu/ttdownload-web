@@ -179,7 +179,7 @@ test('deploy/ubuntutr.sh 与原始脚本逐字节一致（交互提示原样保�
 });
 
 test('运维子命令齐备：--update / --stop / --start / --logs / --logs-follow', () => {
-  for (const sub of ['--update', '--stop', '--start', '--logs', '--logs-follow', '--collect', '--restart', '--status', '--uninstall']) {
+  for (const sub of ['--update', '--stop', '--start', '--logs', '--logs-follow', '--collect', '--check-ports', '--proxy', '--proxy-path', '--restart', '--status', '--uninstall']) {
     assert.ok(deploySrc.includes(sub), `deploy.sh 应支持 ${sub}`);
   }
   assert.match(deploySrc, /pull --ff-only/, '--update 应拉取最新代码');
@@ -204,6 +204,16 @@ test('内置环境脚本：diagnose-env.sh / fix-node20.sh / fix-ytdlp.sh 存在
   const scripts = [
     { file: 'deploy/scripts/diagnose-env.sh', must: [/体检/, /aria2/, /yt-dlp/, /resolve_host/, /safe\.directory/, /JS 运行时/, /yt-dlp-ejs/, /exit 0/], readonly: true },
     { file: 'deploy/scripts/fix-node20.sh', must: [/setup_20\.x/, /npm ci/, /npm run build/, /systemctl restart/, /回滚/, /safe\.directory/, /PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD/], readonly: false },
+    {
+      file: 'deploy/scripts/check-ports.sh',
+      must: [/ss -ltn|sport = :/, /ufw/, /iptables|nft/, /check-host\.net/, /不可达/, /setup-nginx-proxy\.sh/, /只读/],
+      readonly: true,
+    },
+    {
+      file: 'deploy/scripts/setup-nginx-proxy.sh',
+      must: [/location =/, /location /, /proxy_pass http:\/\/127\.0\.0\.1:/, /proxy_buffering off/, /nginx -t/, /include/, /备份|backup/, /--remove/],
+      readonly: false,
+    },
     {
       file: 'deploy/scripts/fix-ownership.sh',
       must: [/chown -R/, /safe\.directory/, /归位/, /sudo -u/, /回滚/],
@@ -235,7 +245,7 @@ test('内置环境脚本：diagnose-env.sh / fix-node20.sh / fix-ytdlp.sh 存在
     const mode = fs.statSync(full).mode & 0o777;
     assert.ok((mode & 0o100) !== 0, `${file} 应有可执行位（实际 ${mode.toString(8)}）`);
     if (readonly) {
-      assert.equal(/\brm -rf\b|apt-get install|npm install/.test(text), false, '只读体检脚本不应包含修改性命令');
+      assert.equal(/\brm -rf\b|apt-get install|npm install|chown |sed -i/.test(text), false, '只读脚本不应包含修改性命令');
     }
   }
 });

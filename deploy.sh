@@ -23,6 +23,9 @@
 #      sudo ./deploy.sh --logs       # 查看最近日志（默认 200 行；--logs 500 可指定行数）
 #      sudo ./deploy.sh --logs-follow# 实时跟踪日志（Ctrl+C 退出）
 #      sudo ./deploy.sh --collect    # 【服务起不来也能用】离线打包日志到当前目录，发给开发者排查
+#      sudo ./deploy.sh --check-ports# 端口可达性体检（本机监听/防火墙/公网是否真的能访问）
+#      sudo ./deploy.sh --proxy      # 用 nginx 把 http://IP/ttdownload/ 反代到本服务（8080 外网不通时用）
+#      sudo ./deploy.sh --proxy --proxy-path /dl   # 自定义子路径
 #
 #  环境问题自检/修复脚本（可在网页「修复脚本」页上传执行，也可 sudo bash 直接跑）：
 #      deploy/scripts/diagnose-env.sh   只读体检（Node/aria2/transmission/yt-dlp/DNS/磁盘/服务）
@@ -64,6 +67,7 @@ SKIP_APT=0
 SKIP_WEB=0
 ACTION="deploy"
 LOG_LINES=200
+PROXY_PATH="${PROXY_PATH:-/ttdownload}"
 
 DEPLOY_LOG_DIR="${DOWNLOAD_ROOT}/state/logs"
 DEPLOY_LOG="${DEPLOY_LOG_DIR}/deploy.log"
@@ -92,13 +96,16 @@ while [[ $# -gt 0 ]]; do
     --logs) ACTION="logs"; shift; if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then LOG_LINES="$1"; shift; fi ;;
     --logs-follow) ACTION="logs-follow"; shift ;;
     --collect) ACTION="collect"; shift ;;
+    --check-ports) ACTION="check-ports"; shift ;;
+    --proxy) ACTION="proxy"; shift ;;
+    --proxy-path) PROXY_PATH="$2"; shift 2 ;;
     --uninstall) ACTION="uninstall"; shift ;;
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) die "未知参数: $1（--help 查看用法）" ;;
   esac
 done
 
-if [[ $EUID -ne 0 && "$ACTION" != "check-deps" && "$ACTION" != "logs" && "$ACTION" != "logs-follow" && "$ACTION" != "collect" ]]; then
+if [[ $EUID -ne 0 && "$ACTION" != "check-deps" && "$ACTION" != "logs" && "$ACTION" != "logs-follow" && "$ACTION" != "collect" && "$ACTION" != "check-ports" ]]; then
   die "请用 root 运行：sudo ./deploy.sh（仅 --check-deps 可以在普通用户下运行）"
 fi
 
@@ -156,7 +163,13 @@ print_dep_status() {
   fi
   have_cmd jq       && echo "  ✓ jq          已安装"       || echo "  ✗ jq          未安装（transmission 安装脚本会一并安装）"
   have_cmd openssl  && echo "  ✓ openssl     已安装"       || echo "  ✗ openssl     未安装（加密功能必需）"
-  have_cmd yt-dlp   && echo "  ✓ yt-dlp      已安装"       || echo "  ✗ yt-dlp      未安装（公开视频模块需要）"
+  if have_cmd yt-dlp; then
+    echo "  ✓ yt-dlp      $(yt-dlp --version 2>/dev/null)"
+    if pip3 show yt-dlp-ejs >/dev/null 2>&1; then echo "  ✓ yt-dlp-ejs  已安装（n challenge 求解脚本）"; else echo "  ✗ yt-dlp-ejs  未安装 → YouTube 会报 No video formats found（部署时会自动补）"; fi
+    if js_runtime_available; then echo "  ✓ JS 运行时   $( { deno --version 2>/dev/null | head -1; } || { node -v; } )"; else echo "  ✗ JS 运行时   缺失（deno/bun/quickjs/node>=22）→ YouTube 一定失败（部署时会自动装 deno）"; fi
+  else
+    echo "  ✗ yt-dlp      未安装（公开视频模块需要）"
+  fi
   have_cmd ffmpeg   && echo "  ✓ ffmpeg      已安装"       || echo "  ✗ ffmpeg      未安装（视频合并需要）"
   if have_cmd node; then
     NODE_MAJ="$(detect_node_major || echo 0)"
@@ -270,6 +283,107 @@ configure_transmission_env() {
   fi
 }
 
+
+# -------------------------------------------------------------------------------- yt-dlp 全家桶
+#  YouTube 现在必须解 n challenge：需要
+#    (a) yt-dlp 本体；(b) yt-dlp-ejs 挑战求解脚本；(c) 一个受支持的 JS 运行时（deno/bun/quickjs 或 node>=22）
+#  三者缺一就会报 "No video formats found!" / "The page needs to be reloaded."，看起来像网络问题。
+#  这里做多重兜底，并在最后如实汇报状态（幂等，可重复执行）。
+
+js_runtime_available() {
+  command -v deno >/dev/null 2>&1 && return 0
+  command -v bun >/dev/null 2>&1 && return 0
+  command -v qjs >/dev/null 2>&1 && return 0
+  command -v node >/dev/null 2>&1 && [[ "$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)" -ge 22 ]] && return 0
+  return 1
+}
+
+install_js_runtime() {
+  js_runtime_available && { log "JS 运行时已就绪：$( { deno --version 2>/dev/null | head -1; } || { bun --version 2>/dev/null; } || { node -v; } )"; return 0; }
+
+  log "安装 JS 运行时（yt-dlp 解 YouTube n challenge 必需）..."
+  # ① 官方安装脚本（deno.land）
+  if DENO_INSTALL=/usr/local curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null 2>&1; then
+    ln -sf /usr/local/bin/deno /usr/bin/deno 2>/dev/null || true
+    log "deno 已安装：$(deno --version 2>/dev/null | head -1)"
+    return 0
+  fi
+  warn "deno.land 安装失败，改用 GitHub release"
+
+  # ② GitHub release（按架构）
+  case "$(uname -m)" in
+    aarch64|arm64) DENO_ASSET="deno-aarch64-unknown-linux-gnu.zip" ;;
+    x86_64|amd64)  DENO_ASSET="deno-x86_64-unknown-linux-gnu.zip" ;;
+    *)             DENO_ASSET="" ;;
+  esac
+  if [[ -n "$DENO_ASSET" ]] && curl -fL --retry 2 -o /tmp/deno.zip "https://github.com/denoland/deno/releases/latest/download/${DENO_ASSET}" >/dev/null 2>&1; then
+    if command -v unzip >/dev/null 2>&1; then unzip -o -q /tmp/deno.zip -d /usr/local/bin; else python3 -c "import zipfile;zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')"; fi
+    chmod +x /usr/local/bin/deno 2>/dev/null || true
+    ln -sf /usr/local/bin/deno /usr/bin/deno 2>/dev/null || true
+    rm -f /tmp/deno.zip
+    if command -v deno >/dev/null 2>&1; then log "deno 已安装（GitHub release）：$(deno --version 2>/dev/null | head -1)"; return 0; fi
+  fi
+  warn "GitHub release 也失败，尝试发行版仓库的 quickjs"
+
+  # ③ 发行版仓库的 quickjs（体积小、apt 直装）
+  if apt-get install -y quickjs >/dev/null 2>&1 && command -v qjs >/dev/null 2>&1; then
+    log "quickjs 已安装：$(qjs --version 2>&1 | head -1)"
+    return 0
+  fi
+
+  # ④ npm 上的 deno 包（有些环境只有 npm 通）
+  if command -v npm >/dev/null 2>&1 && npm install -g deno >/dev/null 2>&1 && command -v deno >/dev/null 2>&1; then
+    log "deno 已通过 npm 安装：$(deno --version 2>/dev/null | head -1)"
+    return 0
+  fi
+
+  warn "❌ 未能安装任何 JS 运行时：YouTube 下载会报 No video formats found!"
+  warn "   请稍后执行：sudo bash deploy/scripts/fix-ytdlp.sh（或手动装 deno：https://deno.com/）"
+  return 1
+}
+
+ensure_ytdlp_ejs() {
+  command -v yt-dlp >/dev/null 2>&1 || return 1
+  pip3 show yt-dlp-ejs >/dev/null 2>&1 && return 0
+  log "安装 yt-dlp-ejs（n challenge 求解脚本）..."
+  apt-get install -y python3-pip >/dev/null 2>&1 || true
+  pip3 install -U "yt-dlp[default]" >/dev/null 2>&1 \
+    || pip3 install -U --break-system-packages "yt-dlp[default]" >/dev/null 2>&1 \
+    || pip3 install -U --break-system-packages yt-dlp-ejs >/dev/null 2>&1 || true
+  pip3 show yt-dlp-ejs >/dev/null 2>&1
+}
+
+ensure_ytdlp_stack() {
+  # yt-dlp 本体：pip[default] → apt → 官方二进制
+  if ! command -v yt-dlp >/dev/null 2>&1; then
+    log "安装 yt-dlp ..."
+    apt-get install -y python3-pip >/dev/null 2>&1 || true
+    if pip3 install -U "yt-dlp[default]" >/dev/null 2>&1 \
+      || pip3 install -U --break-system-packages "yt-dlp[default]" >/dev/null 2>&1 \
+      || apt-get install -y yt-dlp >/dev/null 2>&1; then
+      :
+    elif curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp; then
+      chmod +x /usr/local/bin/yt-dlp
+    else
+      warn "yt-dlp 安装失败（公开视频模块将不可用；可稍后跑 deploy/scripts/fix-ytdlp.sh）"
+    fi
+  fi
+  ensure_ytdlp_ejs || warn "yt-dlp-ejs 未装上（YouTube 会报 No video formats found；可跑 deploy/scripts/fix-ytdlp.sh）"
+  install_js_runtime || true
+
+  # 如实汇报（这行会出现在部署日志与「网络自检」里）
+  local ytv ejs js
+  ytv="$(yt-dlp --version 2>/dev/null || echo 未安装)"
+  ejs="$(pip3 show yt-dlp-ejs 2>/dev/null | awk -F': ' '/^Version/{print $2}' || true)"
+  js="$( { deno --version 2>/dev/null | head -1; } || { bun --version 2>/dev/null; } || { qjs --version 2>&1 | head -1; } || { node -v 2>/dev/null; } )"
+  log "公开视频依赖：yt-dlp ${ytv}｜yt-dlp-ejs ${ejs:-缺失}｜JS 运行时 ${js:-缺失}"
+  if [[ -z "${ejs}" ]] || [[ -z "${js}" ]]; then
+    warn "⚠️  公开视频（YouTube）可能仍失败：缺 yt-dlp-ejs 或 JS 运行时 → 稍后执行 sudo bash deploy/scripts/fix-ytdlp.sh"
+  else
+    log "✅ YouTube 下载依赖齐全（yt-dlp + ejs + JS 运行时）"
+  fi
+}
+
 # ---------------------------------------------------------------- 已部署后的管理动作
 case "$ACTION" in
   check-deps)
@@ -333,6 +447,20 @@ case "$ACTION" in
     log "包含 ${#files[@]} 个文件：$(printf '%s ' "${files[@]##*/}")"
     log "把这个文件发给开发者即可（内含 app.log / 轮转日志 / deploy.log / app.db）"
     exit 0 ;;
+  check-ports)
+    if [[ -f "${PROJECT_DIR}/deploy/scripts/check-ports.sh" ]]; then
+      bash "${PROJECT_DIR}/deploy/scripts/check-ports.sh"
+    else
+      die "缺少 deploy/scripts/check-ports.sh（先 git pull / --update 拿到最新代码）"
+    fi
+    exit 0 ;;
+  proxy)
+    if [[ -f "${PROJECT_DIR}/deploy/scripts/setup-nginx-proxy.sh" ]]; then
+      bash "${PROJECT_DIR}/deploy/scripts/setup-nginx-proxy.sh" --path "${PROXY_PATH}"
+    else
+      die "缺少 deploy/scripts/setup-nginx-proxy.sh（先 git pull / --update 拿到最新代码）"
+    fi
+    exit 0 ;;
   update)
     log "更新代码并重新部署 ..."
     cd "$PROJECT_DIR"
@@ -343,6 +471,8 @@ case "$ACTION" in
     else
       warn "当前目录不是 git 仓库（可能是 scp 上传的），跳过 git pull，仅重新构建"
     fi
+    # 老部署升级时自愈：补 yt-dlp-ejs / JS 运行时（缺了 YouTube 一定失败）
+    if [[ $SKIP_APT -eq 0 ]]; then ensure_ytdlp_stack; fi
     log "重新安装依赖并构建后端（以 ${REPO_OWNER} 身份，避免产物变 root 所有）..."
     if [[ -f package-lock.json ]]; then as_owner npm ci --no-audit --no-fund || as_owner npm install --no-audit --no-fund; else as_owner npm install --no-audit --no-fund; fi
     as_owner npm run build
@@ -422,38 +552,8 @@ if [[ $SKIP_APT -eq 0 ]]; then
     warn "Node 大版本变化后需要重建原生模块（better-sqlite3）——下面的 npm ci 会重新编译，属正常现象"
   fi
 
-  # JS 运行时：yt-dlp 解 YouTube n challenge 必需（缺了会报 No video formats found）。
-  # deno 是独立二进制，不影响项目自己的 Node
-  if ! command -v deno >/dev/null 2>&1 && ! command -v bun >/dev/null 2>&1 && ! command -v qjs >/dev/null 2>&1; then
-    log "安装 deno（yt-dlp 的 JS 运行时，约 40MB）..."
-    if DENO_INSTALL=/usr/local curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null 2>&1; then
-      ln -sf /usr/local/bin/deno /usr/bin/deno 2>/dev/null || true
-      log "deno 已安装：$(deno --version 2>/dev/null | head -1)"
-    else
-      warn "deno 安装失败（公开视频的 YouTube 下载可能报 No video formats found；可稍后跑 deploy/scripts/fix-ytdlp.sh）"
-    fi
-  fi
-
-  # yt-dlp：优先 pip（版本新；Ubuntu 24.04 需 --break-system-packages），否则 apt，最后下官方二进制
-  if ! command -v yt-dlp >/dev/null 2>&1; then
-    log "安装 yt-dlp ..."
-    apt-get install -y python3-pip >/dev/null 2>&1 || true
-    # yt-dlp[default] 会带上 yt-dlp-ejs（n challenge 求解脚本），是能下载 YouTube 的前提
-    if pip3 install -U "yt-dlp[default]" >/dev/null 2>&1 \
-      || pip3 install -U --break-system-packages "yt-dlp[default]" >/dev/null 2>&1 \
-      || apt-get install -y yt-dlp >/dev/null 2>&1; then
-      :
-    elif curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp; then
-      chmod +x /usr/local/bin/yt-dlp
-    else
-      warn "yt-dlp 安装失败（公开视频模块将不可用，可稍后手动安装）"
-    fi
-  elif command -v yt-dlp >/dev/null 2>&1 && ! pip3 show yt-dlp-ejs >/dev/null 2>&1; then
-    # 已经装了 yt-dlp 但缺 yt-dlp-ejs（老部署）：补上，否则解不了 n challenge
-    log "补齐 yt-dlp-ejs（YouTube 挑战求解脚本）..."
-    pip3 install -U "yt-dlp[default]" >/dev/null 2>&1 || pip3 install -U --break-system-packages "yt-dlp[default]" >/dev/null 2>&1 || \
-      warn "yt-dlp-ejs 安装失败，可稍后跑 deploy/scripts/fix-ytdlp.sh"
-  fi
+  # yt-dlp 全家桶（本体 + ejs + JS 运行时），多重兜底
+  ensure_ytdlp_stack
 else
   warn "按参数要求跳过 apt 安装"
 fi
@@ -629,6 +729,16 @@ if [[ "${OK:-0}" -eq 1 ]]; then
   log "项目属主     : ${REPO_OWNER}（如发现 git/npm 报权限错误，跑 deploy/scripts/fix-ownership.sh 归位）"
   log "日志/排查    : http://${IP:-<服务器IP>}:${PORT}/logs 与 /report（一键下载诊断报告发给开发者）"
   log "修复脚本页   : http://${IP:-<服务器IP>}:${PORT}/scripts（维护令牌 = 上面的安卓 Token；也可在 .env 里自设 MAINTENANCE_TOKEN）"
+  # 若本机 80 端口已有服务（多半是 nginx）而本服务端口未必对外开放，给出子路径反代建议
+  if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :80" 2>/dev/null | grep -q .; then
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active && ! ufw status 2>/dev/null | grep -qE "(^|[[:space:]])${PORT}(/tcp)?([[:space:]]|$)"; then
+      warn "检测到 80 端口已有服务（nginx?），且 ufw 未放行 ${PORT}：外网很可能访问不到本服务"
+      log "   → 建议用子路径反向代理（不影响 80 根路径）：sudo ./deploy.sh --proxy"
+    else
+      log "端口可达性   : 如需确认外网能否访问 ${PORT}：sudo ./deploy.sh --check-ports"
+      log "     若外网不通而 80 可用：sudo ./deploy.sh --proxy   → http://${IP:-<服务器IP>}${PROXY_PATH}/"
+    fi
+  fi
   log "日志文件     : journalctl -u ${SERVICE_NAME} -f   或   ${DOWNLOAD_ROOT}/state/app.log"
   log "===================================================================="
 else

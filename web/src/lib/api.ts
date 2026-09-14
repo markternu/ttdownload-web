@@ -31,8 +31,19 @@ import type {
   TestTool,
 } from '../types'
 
-/** 统一 API 前缀（生产同源部署时留空即可） */
-export const API_BASE = import.meta.env.VITE_API_BASE ?? ''
+/**
+ * 统一 API 前缀。
+ *
+ * - 默认留空 → buildUrl 会生成**相对路径**（如 `api/health`），
+ *   于是它能同时适配两种部署：
+ *     根路径部署           页面 /tasks       → api/health 解析成 /api/health
+ *     nginx 子路径反代     页面 /ttdownload/ → api/health 解析成 /ttdownload/api/health
+ * - 也可以用 VITE_API_BASE 显式指定（构建时注入），例如 VITE_API_BASE=/ttdownload
+ *
+ * 说明：本项目前端路由都是单段（/tasks、/logs…），因此相对路径解析始终正确；
+ * 这样用 nginx 挂到任意子路径都不需要重新构建前端。
+ */
+export const API_BASE = (import.meta.env.VITE_API_BASE ?? '').replace(/\/+$/, '')
 
 /** 后端统一错误体（{ error: { code, message } }）对应的异常类型 */
 export class ApiError extends Error {
@@ -50,7 +61,8 @@ export class ApiError extends Error {
 type QueryValue = string | number | boolean | null | undefined
 
 function buildUrl(path: string, query?: Record<string, QueryValue>): string {
-  const url = `${API_BASE}${path}`
+  // 无显式前缀时去掉前导 '/' → 相对当前页面解析（子路径反代下自动带上前缀）
+  const url = API_BASE ? `${API_BASE}${path}` : path.replace(/^\//, '')
   if (!query) return url
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(query)) {
@@ -399,7 +411,7 @@ export const api = {
 }
 
 /** SSE 事件地址 */
-export const eventsUrl = (): string => `${API_BASE}/api/events`
+export const eventsUrl = (): string => buildUrl('/api/events')
 
 /** 任务模块中文名 */
 export const MODULE_LABELS: Record<ModuleId, string> = {
