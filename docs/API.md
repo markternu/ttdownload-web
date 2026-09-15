@@ -276,6 +276,51 @@ sudo bash deploy/scripts/nginx-proxy-toggle.sh preview --path /transmission   # 
 | POST | `/api/webvideo/tasks` | `{ url, formatId?, quality?, title? }` → `{ task: Task }` |
 | GET | `/api/webvideo/platforms` | 支持的平台清单（首页提示用） |
 | GET | `/api/webvideo/cookies` | cookies 状态 `{ cookiesFile, defaultPath, exists, sizeBytes, updatedAt, fromBrowser }` |
+| GET | `/api/webvideo/cookies/harvest` | 自动获取访客 cookies 的状态（站点/新鲜度/浏览器是否可用） |
+| POST | `/api/webvideo/cookies/harvest` | `{ site: "douyin" }` → 立即刷新该站访客 cookies |
+
+### 5.1 自动获取访客 cookies（不需要人工导出）
+
+**先分清两类 cookies**（这是最容易误解的地方）：
+
+| 类型 | 例子 | 能不能自动化 |
+| --- | --- | --- |
+| **访客 cookies**（不需要登录） | 抖音/TikTok 的 `ttwid`、`__ac_signature` | ✅ 能，服务端自动获取 + 定期续期 |
+| **登录 cookies**（真的要账号） | 会员专享、年龄限制、私有视频 | ❌ 需要你导出一次（或维护账号池） |
+
+抖音实测：向 bytedance 的 `ttwid` 注册接口 POST 一次即可拿到可用 `ttwid`（~1 秒，不需要
+浏览器、不需要登录）；再配合站点必需的 `--referer https://www.douyin.com/` 就能正常解析下载。
+无头浏览器（服务器上的 chromium）作为兜底，用于只靠 HTTP 拿不到 cookie 的站点。
+
+```bash
+curl -u admin:密码 http://127.0.0.1:8080/api/webvideo/cookies/harvest          # 看状态
+curl -u admin:密码 -X POST -H 'Content-Type: application/json' \
+     -d '{"site":"douyin"}' http://127.0.0.1:8080/api/webvideo/cookies/harvest  # 立即刷新
+```
+
+```ts
+interface CookieHarvestStatus {
+  enabled: boolean;              // 设置项 cookieHarvestEnabled
+  chromium: string | null;       // 探测到的浏览器路径（null = 没装；有 HTTP 途径的站点不受影响）
+  available: boolean;
+  harvestSites: string[];        // 目前启用自动获取的站点（默认 douyin,tiktok）
+  hint: string;                  // 中文说明，页面原样展示
+  sites: {
+    id: string; name: string; auto: boolean;
+    hasCookies: boolean; cookieCount: number; ageMinutes: number | null;
+    url: string;
+    needsBrowser: boolean;       // false = 纯 HTTP 就能拿到
+    via: 'http' | 'browser' | null;
+  }[];
+}
+```
+
+`GET /api/webvideo/cookies` 也新增了 `sites: {domain,count,auto,note}[]`（你上传的 cookies.txt
+到底覆盖了哪些站点 —— 回答「为什么我传了 Google 的 cookies，抖音还是不行」：cookies 按站点隔离）
+与 `harvest` 字段。
+
+**自愈**：下载中若站点报「cookie 失效/需要新鲜 cookies」，程序会自动重新获取一次并重跑策略阶梯
+（每个任务最多一次），全程打 `[MARK:COOKIE_HARVEST]` 日志。
 | POST | `/api/webvideo/cookies` | 上传 cookies.txt：`multipart/form-data` 字段 `file`，或 JSON `{ text }` → 同上状态；写入 600 权限 |
 | DELETE | `/api/webvideo/cookies` | 删除 cookies 文件 → 状态 |
 | GET | `/api/webvideo/attempts?url=&formatId=` | 「尽力下载」会依次尝试的方式名列表（排障用） |

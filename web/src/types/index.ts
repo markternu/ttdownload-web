@@ -121,13 +121,17 @@ export interface CookieHarvestSite {
   cookieCount: number // 抓到了多少条 cookie
   ageMinutes: number | null // 多久之前抓的（分钟）；null = 没抓过
   url: string // 抓取时打开的页面
+  /** 是否需要无头浏览器（false = 纯 HTTP 接口就能拿到，没装 chromium 也不影响） */
+  needsBrowser: boolean
+  /** 这批 cookies 是怎么来的：http=纯 HTTP 接口（最快）/ browser=无头浏览器 */
+  via: 'http' | 'browser' | null
 }
 
 /** 自动获取访客 cookies 的总体状态（GET /api/webvideo/cookies/harvest） */
 export interface CookieHarvestStatus {
   enabled: boolean // 设置里的开关（cookieHarvestEnabled）
   chromium: string | null // 探测到的浏览器路径，null = 服务器上没装
-  available: boolean // enabled && chromium 存在
+  available: boolean // enabled 且至少有一条可用途径（HTTP 接口或浏览器）
   harvestSites: string[] // 目前启用自动抓取的站点 id，如 ["douyin","tiktok"]
   hint: string // 后端写好的中文说明（直接展示）
   sites: CookieHarvestSite[]

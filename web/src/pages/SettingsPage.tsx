@@ -881,6 +881,17 @@ export default function SettingsPage() {
                         {harvestStatus.chromium}
                       </code>
                     </p>
+                  ) : !harvestStatus.sites.some((site) => site.auto && site.needsBrowser) ? (
+                    <p className="flex items-start gap-1.5 rounded-xl bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
+                      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        服务器上没有 chromium，但当前启用的站点（抖音/TikTok）都是走纯 HTTP 接口拿 cookies 的，
+                        <b>不影响使用</b>；只有将来接入需要跑页面 JS 挑战的站点时才需要安装：
+                        <code className="mx-1 break-all rounded bg-slate-200 px-1 py-0.5 text-[11px] dark:bg-slate-700">
+                          sudo apt install -y chromium
+                        </code>
+                      </span>
+                    </p>
                   ) : (
                     <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
                       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

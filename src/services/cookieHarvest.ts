@@ -649,7 +649,8 @@ export function harvestStatus(): {
   return {
     enabled,
     chromium: exe,
-    available: enabled && !!exe,
+    // 有 HTTP 途径的站点不需要浏览器，所以可用性不能只看 chromium
+    available: enabled && (!!exe || SITE_PROFILES.some((p) => p.httpProvider && auto.includes(p.id))),
     harvestSites: auto,
     sites: SITE_PROFILES.map((p) => {
       const meta = readHarvestMeta(p.id);

@@ -452,6 +452,30 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await context.close();
   });
 
+  test('设置页：自动获取访客 cookies 小节可用（不需要人工导出 cookies 的说明与刷新按钮）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/settings`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=自动获取访客 cookies', { timeout: 20000 });
+
+    // 必须讲清「访客 cookies 不需要登录、服务器自动拿」
+    assert.ok((await page.locator('text=/访客 cookies/').count()) > 0, '应说明访客 cookies 的概念');
+    assert.ok((await page.locator('text=/不用人工导出|自动获取/').count()) > 0, '应说明不用人工导出');
+
+    // 开关
+    const toggle = page.getByRole('switch', { name: /启用自动获取/ });
+    assert.ok((await toggle.count()) > 0, '应有「启用自动获取」开关');
+
+    // 站点列表 + 刷新按钮（抖音必须在列表里）
+    assert.ok((await page.locator('text=抖音').count()) > 0, '应列出抖音');
+    assert.ok((await page.getByRole('button', { name: /立即刷新/ }).count()) > 0, '应有「立即刷新」按钮');
+
+    // 没装 chromium 时给出的说明不能吓人：抖音走 HTTP，不影响使用
+    const chromiumBlocks = await page.locator('text=/chromium/').count();
+    assert.ok(chromiumBlocks > 0, '应说明浏览器依赖情况');
+    await page.close();
+  });
+
   test('页面无 JS 报错', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     assert.deepEqual(pageErrors, [], `浏览器控制台错误：\n${pageErrors.join('\n')}`);
