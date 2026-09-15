@@ -484,3 +484,40 @@ test('待下载清单支持搜索，且旧的 /api/files 列表也带上跟踪�
   assert.equal(noMatch.json.items.length, 0);
   assert.equal(noMatch.json.total, 0);
 });
+
+test('任务状态操作：不可暂停/不可继续时给 409 + 中文原因（而不是 500 服务器内部错误）', async () => {
+  const created = await get('/api/webvideo/tasks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Auth-Token': token },
+    body: JSON.stringify({ url: 'https://www.youtube.com/watch?v=abc123' }),
+  });
+  const id = created.json?.task?.id;
+  assert.ok(id, `应能创建任务：${created.text.slice(0, 200)}`);
+
+  // 直接把它置为完成态，制造"不可暂停"的场景
+  const { tasksRepo } = await import('../dist/core/db.js');
+  tasksRepo.update(id, { status: 'completed' });
+
+  const act = (action) =>
+    get(`/api/tasks/${id}/actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Auth-Token': token },
+      body: JSON.stringify({ action }),
+    });
+
+  const paused = await act('pause');
+  assert.equal(paused.status, 409, `已完成任务暂停应为 409，实际 ${paused.status}：${paused.text.slice(0, 160)}`);
+  assert.equal(paused.json?.error?.code, 'TASK_NOT_PAUSABLE');
+  assert.match(String(paused.json?.error?.message ?? ''), /不能暂停|不可暂停/, '要给出中文原因（原来只说"服务器内部错误"）');
+
+  const resumed = await act('resume');
+  assert.equal(resumed.status, 409);
+  assert.equal(resumed.json?.error?.code, 'TASK_NOT_RESUMABLE');
+
+  const missing = await get('/api/tasks/999999/actions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Auth-Token': token },
+    body: JSON.stringify({ action: 'pause' }),
+  });
+  assert.equal(missing.status, 404, '不存在的任务应为 404');
+});

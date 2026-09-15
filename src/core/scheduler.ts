@@ -4,6 +4,7 @@ import { logger, taskLog } from './logger';
 import { tasksRepo } from './db';
 import { freeBytes } from './disk';
 import { getSettings } from '../services/settings';
+import { conflict, notFound } from '../utils/http';
 import { handoffToArchive } from '../services/pipeline';
 import { aria2Module } from '../modules/aria2';
 import { transmissionModule } from '../modules/transmission';
@@ -293,14 +294,15 @@ export async function schedulerTick(): Promise<void> {
 export async function pauseTask(taskId: number): Promise<void> {
   logger.child('scheduler').mark('TASK_STATE', `暂停任务 #${taskId}`);
   const task = tasksRepo.get(taskId) as TaskWithPayload | null;
-  if (!task) throw new Error('任务不存在');
+  if (!task) throw notFound('任务不存在');
   if (task.status === 'waiting') {
     tasksRepo.update(taskId, { status: 'paused', error: null });
   } else if (task.status === 'downloading' || task.status === 'parsing') {
     await adapters[task.module]?.pause(task);
     tasksRepo.update(taskId, { status: 'paused', speedBps: 0, error: null });
   } else {
-    throw new Error(`当前状态（${task.status}）不可暂停`);
+    // 用 409 + 明确中文：以前是普通 Error → 页面只显示「服务器内部错误」，看不出为什么
+    throw conflict(`当前状态「${task.status}」不能暂停（只有等待中/下载中/解析中可以暂停）`, 'TASK_NOT_PAUSABLE');
   }
   emit(taskId);
 }
@@ -308,8 +310,10 @@ export async function pauseTask(taskId: number): Promise<void> {
 export async function resumeTask(taskId: number): Promise<void> {
   logger.child('scheduler').mark('TASK_STATE', `继续任务 #${taskId}`);
   const task = tasksRepo.get(taskId) as TaskWithPayload | null;
-  if (!task) throw new Error('任务不存在');
-  if (!['paused', 'failed', 'cancelled'].includes(task.status)) throw new Error(`当前状态（${task.status}）不可继续`);
+  if (!task) throw notFound('任务不存在');
+  if (!['paused', 'failed', 'cancelled'].includes(task.status)) {
+    throw conflict(`当前状态「${task.status}」不能继续（只有已暂停/失败/已取消的任务可以继续）`, 'TASK_NOT_RESUMABLE');
+  }
   const needsStart = task.status !== 'paused' || !(task.payload ?? {}).torrentId;
   if (needsStart && ['failed', 'cancelled'].includes(task.status)) {
     tasksRepo.update(taskId, { status: 'waiting', error: null, progress: 0, speedBps: 0 });
@@ -323,7 +327,7 @@ export async function resumeTask(taskId: number): Promise<void> {
 
 export async function cancelTask(taskId: number): Promise<void> {
   const task = tasksRepo.get(taskId) as TaskWithPayload | null;
-  if (!task) throw new Error('任务不存在');
+  if (!task) throw notFound('任务不存在');
   try {
     await adapters[task.module]?.cancel(task);
   } catch {
@@ -335,7 +339,7 @@ export async function cancelTask(taskId: number): Promise<void> {
 
 export function retryTask(taskId: number): void {
   const task = tasksRepo.get(taskId);
-  if (!task) throw new Error('任务不存在');
+  if (!task) throw notFound('任务不存在');
   tasksRepo.update(taskId, { status: 'waiting', error: null, progress: 0, speedBps: 0, downloadedBytes: 0, finishedAt: null });
   emit(taskId);
   kickScheduler();
