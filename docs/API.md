@@ -177,6 +177,9 @@ interface Stats {
 | GET | `/api/bt/seeds` | `{ items: SeedItem[] }` |
 | POST | `/api/bt/seeds/actions` | `{ ids: number[], action: 'enqueue' \| 'delete' \| 'refresh' }` |
 | GET | `/api/bt/status` | `{ running:boolean, rpc:{host,port}, version? }` |
+| GET | `/api/bt/proxy` | transmission 反向代理状态（见 4.1） |
+| POST | `/api/bt/proxy` | `{ enabled: boolean, force?: boolean, subPath?: string }` → 开启/关闭 |
+| GET | `/api/bt/proxy/preview` | 只读预览：`{ config, include }`（将要写入的 nginx 配置，不改任何文件） |
 
 ```ts
 interface SeedItem {
@@ -191,7 +194,79 @@ interface SeedItem {
 }
 ```
 
----
+
+### 4.1 transmission 反向代理开关（远程访问 9091）
+
+**为什么需要**：远程服务器通常只开放 22/80/443，而 transmission 的 WebUI/RPC 只在
+`127.0.0.1:9091` 上 —— 外网根本没有这条路，所以「打开 BT 控制台」永远是打不开。
+开启本开关后，nginx 会多出一段配置把 `http://<域名>/transmission/` 反代到
+`127.0.0.1:9091`；**关闭时这段配置被真正删除**（不是靠防火墙），外界再也访问不到。
+
+```bash
+curl -u admin:密码 http://127.0.0.1:8080/api/bt/proxy              # 看状态
+curl -u admin:密码 -X POST -H 'Content-Type: application/json' \
+     -d '{"enabled":true}' http://127.0.0.1:8080/api/bt/proxy     # 开启
+curl -u admin:密码 -X POST -H 'Content-Type: application/json' \
+     -d '{"enabled":false}' http://127.0.0.1:8080/api/bt/proxy    # 关闭（彻底移除）
+```
+
+```ts
+interface BtProxyStatus {
+  available: boolean;         // 开关是否可用（脚本存在 + nginx 可用）
+  enabled: boolean;           // 当前是否已开启
+  subPath: string;            // 默认 '/transmission'（transmission WebUI 自带该前缀，不要改）
+  target: string;             // 反代目标，默认 '127.0.0.1:9091'
+  url: string | null;         // 给用户直接访问的地址，如 http://1.2.3.4/transmission/web/
+  rpcUrl: string | null;      // RPC 地址，如 http://1.2.3.4/transmission/rpc
+  snippet: string;            // 生成的 nginx 片段路径
+  serverFile: string;         // 被插入 include 的 nginx 配置文件
+  nginxVersion: string;       // 'nginx version: nginx/1.24.0'
+  reason: string;             // 不能自动配置时的中文原因（'' = 正常）
+  scriptFound: boolean;
+  enabledSubPaths: string[];  // 当前所有已生效的子路径反代
+  transmission: {
+    reachable: boolean; version: string | null;
+    rpcHost: string; rpcPort: number; rpcUser: string;   // 密码绝不返回
+    authRequired: boolean | null;                        // false = 没设密码（公网暴露极危险）
+    whitelistEnabled: boolean | null; peerPort: number | null;
+  };
+  warnings: string[];         // 已本地化的中文警告，前端原样展示
+}
+```
+
+**错误码**
+
+| 状态 | code | 场景 / 处理 |
+| --- | --- | --- |
+| 400 | `BAD_REQUEST` | 请求体不是 `{ enabled: boolean }` |
+| 400 | `BT_PROXY_NO_AUTH` | transmission 没设 RPC 密码却要暴露到公网；确要开启时带 `"force": true` |
+| 500 | `BT_PROXY_FAILED` | 改配置后 `nginx -t` 失败 —— **已自动回滚**，`error.message` 里有 nginx 的原始报错 |
+| 500 | `BT_PROXY_SCRIPT_MISSING` | 服务器上还没有 `deploy/scripts/nginx-proxy-toggle.sh`，先 `sudo ./deploy.sh --update` |
+
+**安全性（这是会自动改 nginx 配置的接口）**
+
+1. 只**新增**一个 `location` 片段（`snippets/ttdownload-proxy-<子路径>.conf`）并在监听 80 的
+   `server` 块里插一行 `include`，绝不改动 80 根路径、别人的站点或其它 `location`；
+2. 改动前把原文件备份到 `/etc/nginx/ttdownload-backup-<时间>/`；
+3. 每次改动后执行 `nginx -t`，**失败立即回滚**并以 500 结束（不会把用户的 nginx 搞挂）；
+4. 同一个 `server` 块里若已存在同名 `location`，直接拒绝并提示，不做任何改动；
+5. `proxy_pass http://127.0.0.1:9091;` **结尾不带斜杠** —— transmission WebUI 内部用绝对路径，
+   去掉 `/transmission` 前缀会 404；
+6. 全过程打 `[MARK:NGINX_PROXY]` 日志（`grep -a 'MARK:NGINX_PROXY' /ttdownload/state/app.log`）。
+
+命令行等价物（同一份脚本）：
+
+```bash
+sudo ./deploy.sh --bt-proxy            # 开启（默认 /transmission）
+sudo ./deploy.sh --bt-proxy-status     # 看状态
+sudo ./deploy.sh --bt-proxy-off        # 关闭
+sudo bash deploy/scripts/nginx-proxy-toggle.sh preview --path /transmission   # 只看要写什么
+```
+
+环境变量：`BT_PROXY_SUBPATH`（默认 `/transmission`）、`BT_PROXY_TARGET`（默认 `127.0.0.1:<TRANSMISSION_RPC_PORT>`）、
+`BT_PROXY_SCRIPT`（覆盖脚本路径，测试用）、`NGINX_BIN` / `NGINX_CONF_DIR` / `NGINX_SERVICE`、
+`PUBLIC_BASE_URL`（`url` 字段的前缀，反代下自动用 `X-Forwarded-*` 推断）。
+
 
 ## 5. 公开视频 URL（webvideo）模块
 

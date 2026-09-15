@@ -26,6 +26,10 @@
 #      sudo ./deploy.sh --check-ports# 端口可达性体检（本机监听/防火墙/公网是否真的能访问）
 #      sudo ./deploy.sh --proxy      # 用 nginx 把 http://IP/ttdownload/ 反代到本服务（8080 外网不通时用）
 #      sudo ./deploy.sh --proxy --proxy-path /dl   # 自定义子路径
+#      sudo ./deploy.sh --bt-proxy   # 【BT 页面上的「反向代理开关」命令行版】把 transmission 9091
+#                                    #   反代成 http://IP/transmission/ ，让外网也能打开 BT 控制台
+#      sudo ./deploy.sh --bt-proxy-off      # 关闭上面这个反代（配置彻底删除，外界访问不到 9091）
+#      sudo ./deploy.sh --bt-proxy-status   # 查看当前状态
 #
 #  环境问题自检/修复脚本（可在网页「修复脚本」页上传执行，也可 sudo bash 直接跑）：
 #      deploy/scripts/diagnose-env.sh   只读体检（Node/aria2/transmission/yt-dlp/DNS/磁盘/服务）
@@ -69,6 +73,8 @@ ACTION="deploy"
 LOG_LINES=200
 ORIGINAL_ARGS=("$@")   # git pull 后要用新脚本重新执行同样的参数
 PROXY_PATH="${PROXY_PATH:-/ttdownload}"
+BT_PROXY_PATH="${BT_PROXY_PATH:-/transmission}"
+BT_PROXY_TOGGLE="${PROJECT_DIR}/deploy/scripts/nginx-proxy-toggle.sh"
 
 DEPLOY_LOG_DIR="${DOWNLOAD_ROOT}/state/logs"
 DEPLOY_LOG="${DEPLOY_LOG_DIR}/deploy.log"
@@ -110,8 +116,12 @@ while [[ $# -gt 0 ]]; do
     --check-ports) ACTION="check-ports"; shift ;;
     --proxy) ACTION="proxy"; shift ;;
     --proxy-path) PROXY_PATH="$2"; shift 2 ;;
+    --bt-proxy) ACTION="bt-proxy"; shift ;;
+    --bt-proxy-off|--no-bt-proxy) ACTION="bt-proxy-off"; shift ;;
+    --bt-proxy-status) ACTION="bt-proxy-status"; shift ;;
+    --bt-proxy-path) BT_PROXY_PATH="$2"; shift 2 ;;
     --uninstall) ACTION="uninstall"; shift ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) die "未知参数: $1（--help 查看用法）" ;;
   esac
 done
@@ -472,6 +482,23 @@ case "$ACTION" in
       die "缺少 deploy/scripts/setup-nginx-proxy.sh（先 git pull / --update 拿到最新代码）"
     fi
     exit 0 ;;
+  bt-proxy|bt-proxy-off|bt-proxy-status)
+    # transmission 9091 的反向代理开关（网页「BT 种子下载」页上那个开关的命令行版本）
+    [[ -f "$BT_PROXY_TOGGLE" ]] || die "缺少 deploy/scripts/nginx-proxy-toggle.sh（先 git pull / --update 拿到最新代码）"
+    if [[ "$ACTION" = "bt-proxy-status" ]]; then
+      bash "$BT_PROXY_TOGGLE" status --path "$BT_PROXY_PATH"
+      exit 0
+    fi
+    if [[ "$ACTION" = "bt-proxy-off" ]]; then
+      bash "$BT_PROXY_TOGGLE" disable --path "$BT_PROXY_PATH"
+      log "已关闭 transmission 反向代理：外界无法再通过 http://<公网IP>${BT_PROXY_PATH}/ 访问 9091"
+      exit 0
+    fi
+    IP_HINT="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    bash "$BT_PROXY_TOGGLE" enable --path "$BT_PROXY_PATH"
+    log "transmission 反向代理已开启：http://${IP_HINT:-<服务器IP>}${BT_PROXY_PATH}/web/  （外网可用时把 IP 换成你的公网IP/域名）"
+    warn "该地址等于把 BT 控制台放到公网，transmission 必须已经设置了 RPC 用户名/密码；不用时执行 sudo ./deploy.sh --bt-proxy-off 关闭"
+    exit 0 ;;
   update)
     log "更新代码并重新部署 ..."
     cd "$PROJECT_DIR"
@@ -803,6 +830,8 @@ if [[ "${OK:-0}" -eq 1 ]]; then
   log "项目属主     : ${REPO_OWNER}（如发现 git/npm 报权限错误，跑 deploy/scripts/fix-ownership.sh 归位）"
   log "日志/排查    : http://${IP:-<服务器IP>}:${PORT}/logs 与 /report（一键下载诊断报告发给开发者）"
   log "修复脚本页   : http://${IP:-<服务器IP>}:${PORT}/scripts（维护令牌 = 上面的安卓 Token；也可在 .env 里自设 MAINTENANCE_TOKEN）"
+  log "BT 反代开关  : 外网打不开 transmission 控制台时，可在「BT 种子下载」页一键开启反向代理，"
+  log "               或执行 sudo ./deploy.sh --bt-proxy  → http://<公网IP>${BT_PROXY_PATH}/web/"
   # 若本机 80 端口已有服务（多半是 nginx）而本服务端口未必对外开放，给出子路径反代建议
   if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :80" 2>/dev/null | grep -q .; then
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active && ! ufw status 2>/dev/null | grep -qE "(^|[[:space:]])${PORT}(/tcp)?([[:space:]]|$)"; then

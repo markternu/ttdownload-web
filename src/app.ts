@@ -98,6 +98,18 @@ export function createApp(): express.Express {
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
+    // body-parser 的解析类错误：请求体不对属于客户端问题，不该报 500
+    const parseType = (err as { type?: string } | null)?.type;
+    if (parseType === 'entity.parse.failed') {
+      logger.child('http').warn(`[MARK:HTTP_ERR] 请求体不是合法 JSON: ${message}`);
+      res.status(400).json({ error: { code: 'BAD_JSON', message: '请求体不是合法 JSON' } });
+      return;
+    }
+    if (parseType === 'entity.too.large') {
+      logger.child('http').warn(`[MARK:HTTP_ERR] 请求体过大: ${message}`);
+      res.status(413).json({ error: { code: 'PAYLOAD_TOO_LARGE', message: '请求体过大' } });
+      return;
+    }
     if (/只支持上传|File too large|Unexpected field/i.test(message)) {
       logger.child('http').warn(`[MARK:HTTP_ERR] 上传错误: ${message}`);
       res.status(400).json({ error: { code: 'UPLOAD_ERROR', message } });

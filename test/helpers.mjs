@@ -139,7 +139,7 @@ export async function startAria2Mock({ workDir }) {
 }
 
 /** mock transmission RPC（带 409 session 协商）；state.complete 控制完成态 */
-export async function startTransmissionMock({ downloadDir, torrentName = 'Demo', files } = {}) {
+export async function startTransmissionMock({ downloadDir, torrentName = 'Demo', files, sessionExtra } = {}) {
   let session = '';
   const state = {
     running: false,
@@ -166,7 +166,7 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
     const ok = (result, extra = {}) => ({ body: { result, arguments: extra } });
     switch (msg.method) {
       case 'session-get':
-        return ok('success', { version: '4.0.5-mock' });
+        return ok('success', { version: '4.0.5-mock', ...(sessionExtra ?? {}) });
       case 'torrent-add':
         return ok('success', { 'torrent-added': { id: 7, name: state.name, hashString: 'abc' } });
       case 'torrent-set':
@@ -210,4 +210,140 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
     }
   });
   return { ...mock, state };
+}
+
+/**
+ * 造一个假 nginx + 一套假配置目录（用于测试会改 nginx 配置的代码，不需要真装 nginx）
+ *
+ * 布局故意刁钻：443 的 server 块排在 80 前面，另有一个别人的 80 站点，
+ * 用来验证代码只会动「监听 80 且属于我们的」那个 server 块。
+ */
+export function makeFakeNginx() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ttdl-nginx-'));
+  const confDir = path.join(root, 'nginx');
+  const binDir = path.join(root, 'bin');
+  const sitesEnabled = path.join(confDir, 'sites-enabled');
+  fs.mkdirSync(sitesEnabled, { recursive: true });
+  fs.mkdirSync(path.join(confDir, 'conf.d'), { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+
+  const mainConf = path.join(confDir, 'nginx.conf');
+  const site443 = path.join(sitesEnabled, 'other-https');
+  const sitesAvailable = path.join(confDir, 'sites-available');
+  fs.mkdirSync(sitesAvailable, { recursive: true });
+  // 关键：Ubuntu/Debian 的 sites-enabled/* 是指向 sites-available/* 的**符号链接**，
+  // 这里刻意照搬，用来验证改配置时不会把符号链接替换成普通文件。
+  const site80Real = path.join(sitesAvailable, 'ttdownload');
+  const site80 = path.join(sitesEnabled, 'ttdownload');
+  const other80 = path.join(confDir, 'conf.d', 'zz-default.conf');
+
+  fs.writeFileSync(
+    site443,
+    `server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_certificate /etc/ssl/fake.pem;
+
+    location / { return 200 "https 别人的站点"; }
+}
+`,
+  );
+  fs.writeFileSync(
+    site80Real,
+    `server {
+    listen 80 default_server;
+    server_name _;
+
+    location /ttdownload/ {
+        proxy_pass http://127.0.0.1:8080;
+    }
+}
+`,
+  );
+  fs.symlinkSync(path.join('..', 'sites-available', 'ttdownload'), site80);
+  fs.writeFileSync(
+    other80,
+    `server {
+    listen 80;
+    server_name old.example.com;
+
+    location / { return 301 https://$host$request_uri; }
+}
+`,
+  );
+  fs.writeFileSync(
+    mainConf,
+    `events {}
+http {
+  include ${sitesEnabled}/*;
+  include ${confDir}/conf.d/*.conf;
+}
+`,
+  );
+
+  const reloadLog = path.join(root, 'reload.log');
+  const breakOnInclude = path.join(root, 'break-on-include');
+  const breakAlways = path.join(root, 'break-always');
+  const bin = path.join(binDir, 'nginx');
+  fs.writeFileSync(
+    bin,
+    `#!/bin/bash
+dump() {
+  echo "# configuration file ${mainConf}:"
+  cat "${mainConf}"
+  echo "# configuration file ${site443}:"
+  cat "${site443}"
+  echo "# configuration file ${site80}:"
+  cat "${site80}"
+  echo "# configuration file ${other80}:"
+  cat "${other80}"
+}
+for a in "$@"; do
+  case "$a" in
+    -v) echo "nginx version: nginx/1.24.0 (fake)"; exit 0 ;;
+    -t)
+      if [ -f "${breakAlways}" ]; then echo "nginx: [emerg] fake pre-existing error" >&2; exit 1; fi
+      if [ -f "${breakOnInclude}" ] && grep -rqsF "ttdownload-web managed" "${confDir}"; then
+        echo "nginx: [emerg] duplicate location" >&2; exit 1
+      fi
+      echo "nginx: configuration file test is successful"; exit 0 ;;
+    -T) dump; exit 0 ;;
+    reload) echo reload >> "${reloadLog}"; exit 0 ;;
+  esac
+done
+exit 0
+`,
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(path.join(binDir, 'systemctl'), `#!/bin/bash\necho "systemctl $@" >> "${reloadLog}"\nexit 0\n`, { mode: 0o755 });
+
+  return {
+    root,
+    confDir,
+    mainConf,
+    bin,
+    binDir,
+    site80,
+    site80Real,
+    /** site80 是否仍是符号链接（改配置后必须仍然是） */
+    site80IsSymlink: () => {
+      try {
+        return fs.lstatSync(site80).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    },
+    site443,
+    other80,
+    reloadLog,
+    breakOnInclude,
+    breakAlways,
+    /** 子路径对应的 snippet 路径 */
+    snippet: (tag = 'transmission') => path.join(confDir, 'snippets', `ttdownload-proxy-${tag}.conf`),
+    /** 可直接塞进 setupRuntime 的 env（让被测代码用这个假 nginx） */
+    env: { PATH: `${binDir}:${process.env.PATH}`, NGINX_BIN: bin, NGINX_CONF_DIR: confDir, NGINX_SERVICE: 'nginx' },
+    cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+    /** 受管 include 行计数（0 表示反代已彻底关闭） */
+    managedLines: () => fs.readFileSync(site80, 'utf8').split('\n').filter((l) => l.includes('ttdownload-web managed')).length,
+  };
 }

@@ -45,6 +45,7 @@ export const MARKERS: Record<string, string> = {
   CLEANUP: '消费者上报完成后的清理',
   FILE_DOWNLOAD: '成品文件被下载（区分安卓端 / 网页端）',
   AUTH: '鉴权：登录成功/失败、未授权访问被拒、鉴权开关状态',
+  NGINX_PROXY: 'nginx 子路径反向代理开关（transmission 9091 外网访问：开启/关闭/回滚）',
   BT_EVICT: 'BT 出清判定（10 小时门槛/停滞/极慢）',
   BT_CLEANUP: 'BT 目录清理',
   ANDROID: '安卓端接口调用（鉴权/清单/上报）',

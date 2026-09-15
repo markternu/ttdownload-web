@@ -4,6 +4,8 @@ import type {
   Aria2SubmitResponse,
   AuthStatus,
   BtEvictSummary,
+  BtProxyPreview,
+  BtProxyStatus,
   BtStatus,
   BtUploadResponse,
   CookiesStatus,
@@ -396,6 +398,20 @@ export const api = {
 
   /** BT 出清：立即执行一次 */
   btEvict: () => request<BtEvictSummary>('/api/bt/evict', { method: 'POST' }),
+
+  /** transmission 反向代理开关状态（GET /api/bt/proxy；含 nginx / transmission 诊断信息） */
+  btProxy: () => request<BtProxyStatus>('/api/bt/proxy'),
+
+  /** 反代配置预览（GET /api/bt/proxy/preview；只读，不修改任何文件） */
+  btProxyPreview: () => request<BtProxyPreview>('/api/bt/proxy/preview'),
+
+  /**
+   * 开关反代（POST /api/bt/proxy）。
+   * enabled=true 开启（transmission 未设 RPC 密码时后端返回 400，需 force=true）；
+   * enabled=false 关闭 → nginx 配置被彻底删除，外界再也访问不到 9091。
+   */
+  btProxyToggle: (body: { enabled: boolean; force?: boolean; subPath?: string }) =>
+    request<BtProxyStatus>('/api/bt/proxy', jsonBody(body)),
 
   /* ----------------------------- webvideo ----------------------------- */
 

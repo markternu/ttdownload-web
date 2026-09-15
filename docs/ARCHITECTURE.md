@@ -251,6 +251,22 @@ network/markers/logs（每个日志文件尾部 2MB）。环境变量与设置�
 - 报告落在 `${state}/reports/`，只保留最近 5 份
 - 服务根本起不来时：`sudo ./deploy.sh --collect` 离线打包日志（不依赖服务运行）
 
+### 6.2.4.1 transmission 反向代理开关（`src/services/btProxy.ts`）
+
+远程服务器只开 22/80/443 时，transmission 的 `127.0.0.1:9091` 外网访问不到。这个服务把
+「改 nginx 配置」这件危险的事固定成一条可审计的路径：
+
+- **职责分离**：Node 只做参数校验、`transmission session-get` 安全预检（没设 RPC 密码就拒绝暴露到公网）、
+  结果解析与 `[MARK:NGINX_PROXY]` 埋点；真正的配置改动全部交给 `deploy/scripts/nginx-proxy-toggle.sh`，
+  命令行也能跑同一份脚本（`deploy.sh --bt-proxy`）。
+- **只加不减**：只新增独立 snippet（`snippets/ttdownload-proxy-<子路径>.conf`）并在**监听 80 的 server 块**
+  里插一行 `include`（用 `nginx -T` 全量 dump 打分定位，避开 443 与别人的站点）；关闭时删掉那行 include
+  与 snippet —— 是**真的删除配置**，不是防火墙屏蔽。
+- **不怕改坏**：改动前备份到 `/etc/nginx/ttdownload-backup-<时间>/`，改完 `nginx -t`，
+  失败立即回滚并以 500 返回 nginx 原话；`proxy_pass` 结尾不带斜杠以保留 `/transmission` 前缀
+  （transmission WebUI 内部用绝对路径）。
+- **可移植**：脚本不用 `sed -i`（GNU/BSD 参数不兼容会让它静默不改文件），改配置一律 awk + 原子替换。
+
 ### 6.2.5 修复脚本通道（`src/services/scriptRunner.ts`）
 
 代码问题走 Git + `deploy.sh --update`；**环境问题**（缺包/权限/systemd/Node 版本）由开发者生成脚本、
@@ -290,6 +306,7 @@ network/markers/logs（每个日志文件尾部 2MB）。环境变量与设置�
 | `src/services/netCheck.ts` | 网络自检（DNS/HTTPS/yt-dlp/CDN/RPC）|
 | `src/services/report.ts` | 问题反馈报告打包（zip/JSON）、错误摘要、任务清单导出、git 版本 |
 | `src/services/scriptRunner.ts` | 修复脚本上传/执行（令牌、预览、独立单元、超时、留痕） |
+| `src/services/btProxy.ts` | transmission 9091 的 nginx 子路径反代开关（安全检查/状态汇总/日志埋点，实际改配置交给 `deploy/scripts/nginx-proxy-toggle.sh`） |
 | `src/modules/*` | transmission / aria2 / webvideo 三个生产者 + 完成检测 |
 | `src/services/archive.ts` | 归档（打包/命名/VLT 标记） |
 | `src/services/crypto.ts` | AES-256-CBC 加密、去后缀、发布 |

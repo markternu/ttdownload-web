@@ -308,6 +308,71 @@ export interface BtStatus {
   version?: string
 }
 
+/** transmission 自身会话信息（GET /api/bt/proxy 的 transmission 字段） */
+export interface BtProxyTransmissionInfo {
+  /** RPC 是否连得上 */
+  reachable: boolean
+  /** transmission 版本，连不上时为 null */
+  version: string | null
+  /** RPC 监听地址（默认只监听本机回环地址） */
+  rpcHost: string
+  /** RPC 端口（通常是 9091） */
+  rpcPort: number
+  /** RPC 用户名（密码后端绝不外传，只用于提示用户 WebUI 登录时填什么） */
+  rpcUser: string
+  /** 是否要求用户名密码：false = 谁能连上谁就能控制，暴露到公网极危险；null = 未知 */
+  authRequired: boolean | null
+  /** 是否启用 RPC 白名单；null = 未知 */
+  whitelistEnabled: boolean | null
+  /** BT 监听端口；null = 未知 */
+  peerPort: number | null
+}
+
+/**
+ * transmission 反向代理（远程访问 9091）开关状态。
+ * GET /api/bt/proxy 与 POST /api/bt/proxy 返回同一结构。
+ */
+export interface BtProxyStatus {
+  /** 开关是否可用（脚本存在 & nginx 可用） */
+  available: boolean
+  /** 当前是否已开启 */
+  enabled: boolean
+  /** 子路径，默认 /transmission */
+  subPath: string
+  /** 反代目标，形如 主机:端口（默认指向 transmission 的 RPC 端口） */
+  target: string
+  /** 开启后给用户直接访问的地址，形如 http(s)://<域名>/<子路径>/web/；取不到时为 null */
+  url: string | null
+  /** RPC 地址，形如 http(s)://<域名>/<子路径>/rpc；取不到时为 null */
+  rpcUrl: string | null
+  /** 生成的 nginx 配置文件（snippet）路径 */
+  snippet: string
+  /** 被插入 include 的 nginx 配置文件路径 */
+  serverFile: string
+  /** 形如 "nginx version: nginx/1.24.0" */
+  nginxVersion: string
+  /** 不能自动配置时的原因（'' 表示正常） */
+  reason: string
+  /** 反代开关脚本路径 */
+  scriptPath: string
+  /** 脚本是否存在于服务器上 */
+  scriptFound: boolean
+  /** 当前 nginx 里所有已生效的子路径，如 ["/bt","/transmission"] */
+  enabledSubPaths: string[]
+  /** transmission 会话信息 */
+  transmission: BtProxyTransmissionInfo
+  /** 后端已经写好的中文警告（原样展示，不要改写） */
+  warnings: string[]
+}
+
+/** nginx 反代配置预览（GET /api/bt/proxy/preview，不修改任何文件） */
+export interface BtProxyPreview {
+  /** 将要写入的 nginx 配置全文 */
+  config: string
+  /** 要插入 server 块的那一行 include */
+  include: string
+}
+
 export interface SeedListResponse {
   items: SeedItem[]
 }

@@ -266,3 +266,44 @@ test('gen_password 在 set -e + pipefail 下不会因 SIGPIPE 中断部署', () 
   assert.match(pw, /^[A-Za-z0-9]{16}$/, `应生成 16 位字母数字密码，实际 ${pw}`);
   assert.match(out, /LEN=16/);
 });
+
+test('BT 反代开关子命令齐备：--bt-proxy / --bt-proxy-off / --bt-proxy-status / --bt-proxy-path', () => {
+  for (const sub of ['--bt-proxy', '--bt-proxy-off', '--bt-proxy-status', '--bt-proxy-path']) {
+    assert.ok(deploySrc.includes(sub), `deploy.sh 应支持 ${sub}`);
+  }
+  assert.match(deploySrc, /nginx-proxy-toggle\.sh/, '应调用 nginx-proxy-toggle.sh');
+  assert.match(deploySrc, /BT_PROXY_PATH="\$\{BT_PROXY_PATH:-\/transmission\}"/, '默认子路径应为 /transmission（transmission WebUI 自带前缀）');
+  assert.match(deploySrc, /bash "\$BT_PROXY_TOGGLE" enable/, '--bt-proxy 应调用 enable');
+  assert.match(deploySrc, /bash "\$BT_PROXY_TOGGLE" disable/, '--bt-proxy-off 应调用 disable');
+  assert.match(deploySrc, /bash "\$BT_PROXY_TOGGLE" status/, '--bt-proxy-status 应调用 status');
+  assert.match(deploySrc, /--no-bt-proxy\)/, '应提供 --no-bt-proxy 别名');
+  // 关闭时的语义必须说清楚：是真的删掉配置，而不是靠防火墙
+  assert.match(deploySrc, /外界无法再通过/, '应说明关闭后外界访问不到');
+});
+
+test('nginx-proxy-toggle.sh：可执行、危险操作有护栏（备份 / nginx -t / 回滚 / 不依赖 GNU sed）', () => {
+  const file = 'deploy/scripts/nginx-proxy-toggle.sh';
+  const text = fs.readFileSync(path.join(projectRoot, file), 'utf8');
+  const mode = fs.statSync(path.join(projectRoot, file)).mode;
+  assert.ok(mode & 0o111, '脚本应可执行');
+
+  // 改配置前备份、改完检查、失败回滚 —— 这是「不能把用户 nginx 搞挂」的底线
+  assert.match(text, /ttdownload-backup-/, '应备份原配置');
+  assert.match(text, /nginx_ok\(\)/, '应有 nginx -t 检查');
+  assert.match(text, /已回滚/, '失败时应回滚');
+  assert.match(text, /未做任何改动/, '预检失败时不应动手');
+  // 只插一个 include，绝不去重写整个 nginx.conf
+  assert.match(text, /include \$\{SNIPPET\};/, '应以 include 片段方式接入');
+  assert.match(text, /proxy_pass http:\/\/\$\{TARGET\};/, 'proxy_pass 不能带尾斜杠（要保留 /transmission 前缀）');
+  // preview 必须只读
+  assert.match(text, /^preview\(\)/m, '应有 preview 只读模式');
+  // 可移植性：BSD/macOS 的 sed -i 与 GNU 参数不兼容，会静默不改文件（实机踩过）
+  const codeOnly = text
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .join('\n');
+  assert.equal(/sed\s+-i/.test(codeOnly), false, '不能用 sed -i（GNU/BSD 不兼容）');
+  assert.match(text, /write_file_atomic/, '应使用可移植的原子写入');
+  // 调用方（Node 服务）靠这一行解析结果
+  assert.match(text, /TTDL_NGINX_PROXY_RESULT=/, '应输出机器可解析的结果行');
+});

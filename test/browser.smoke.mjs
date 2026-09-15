@@ -226,6 +226,38 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
+  test('BT 页面：transmission 反向代理（远程访问 9091）开关卡片', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/bt`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=transmission 反向代理（远程访问 9091）', { timeout: 15000 });
+
+    // 开关必须是真正的 switch 语义（无障碍 + 状态可读）
+    const sw = page.getByRole('switch', { name: /反向代理开关/ }).first();
+    assert.ok(await sw.isVisible(), '应有反向代理开关');
+    assert.equal(await sw.getAttribute('aria-checked'), 'false', '测试环境里默认应是关闭');
+
+    // 关闭态必须讲清「真的是删掉配置」而不是防火墙屏蔽
+    assert.ok(
+      (await page.locator('text=/彻底删除/').count()) > 0,
+      '关闭态应说明配置会被彻底删除',
+    );
+    assert.ok((await page.locator('text=/外界再也访问不到 9091/').count()) > 0, '应说明关闭后外界访问不到');
+
+    // 状态徽章：要么显示 nginx 版本，要么显示「未检测到 nginx」（取决于跑测试的机器装没装 nginx）
+    const nginxBadge = page.locator('text=/nginx\/|未检测到 nginx/');
+    assert.ok((await nginxBadge.count()) > 0, '应显示 nginx 状态');
+
+    // 「预览配置」按钮点了不能把页面搞崩（无 nginx 时会给出中文错误提示）
+    await page.getByRole('button', { name: /预览配置/ }).first().click();
+    await page.waitForTimeout(1500);
+    assert.ok(
+      (await page.locator('text=/将要写入的 nginx 配置全文|未安装 nginx|预览失败/').count()) > 0,
+      '预览应给出配置或明确的中文错误',
+    );
+    await page.close();
+  });
+
   test('设置页：公开视频（yt-dlp）cookies 卡片可访问', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     const page = await newPage();

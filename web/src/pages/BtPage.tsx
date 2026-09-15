@@ -1,5 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertTriangle, FileArchive, Magnet, RefreshCw, ShieldAlert, Trash2, UploadCloud } from 'lucide-react'
+import {
+  AlertTriangle,
+  Code2,
+  Copy,
+  ExternalLink,
+  FileArchive,
+  Globe,
+  Loader2,
+  Magnet,
+  RefreshCw,
+  ShieldAlert,
+  Trash2,
+  UploadCloud,
+  XCircle,
+} from 'lucide-react'
 import {
   Badge,
   Button,
@@ -13,8 +27,61 @@ import {
 import type { Column } from '../components/ui'
 import { useToast } from '../context/ToastContext'
 import { api, MODULE_LABELS } from '../lib/api'
+import { cn } from '../lib/cn'
 import { seedStatusMeta, formatBytes, humanizeError } from '../lib/format'
-import type { BtEvictSummary, BtStatus, SeedItem } from '../types'
+import type { BtEvictSummary, BtProxyPreview, BtProxyStatus, BtStatus, SeedItem } from '../types'
+
+/**
+ * 反向代理开关（按钮 + role="switch"）。
+ * 开 = 绿色，关 = 灰色；切换中显示 loading 并禁用，避免重复提交。
+ */
+function ProxySwitch({
+  checked,
+  loading = false,
+  disabled = false,
+  label,
+  onChange,
+}: {
+  checked: boolean
+  loading?: boolean
+  disabled?: boolean
+  label: string
+  onChange: (next: boolean) => void
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled || loading}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-slate-900',
+        'disabled:cursor-not-allowed disabled:opacity-60',
+        checked ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600',
+      )}
+    >
+      {loading ? (
+        <Loader2
+          className={cn(
+            'absolute top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-white',
+            checked ? 'right-1.5' : 'left-1.5',
+          )}
+          aria-hidden
+        />
+      ) : (
+        <span
+          className={cn(
+            'inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform',
+            checked ? 'translate-x-5' : 'translate-x-0.5',
+          )}
+        />
+      )}
+    </button>
+  )
+}
 
 export default function BtPage() {
   const toast = useToast()
@@ -32,10 +99,23 @@ export default function BtPage() {
   const [evicting, setEvicting] = useState(false)
   const [previewing, setPreviewing] = useState(false)
 
+  /** transmission 反向代理（远程访问 9091） */
+  const [btProxy, setBtProxy] = useState<BtProxyStatus | null>(null)
+  const [proxyToggling, setProxyToggling] = useState(false)
+  const [proxyPreview, setProxyPreview] = useState<BtProxyPreview | null>(null)
+  const [proxyPreviewing, setProxyPreviewing] = useState(false)
+  /** 「我已了解风险，仍要开启」复选框（transmission 未设 RPC 密码时才需要） */
+  const [proxyForce, setProxyForce] = useState(false)
+  const [proxyError, setProxyError] = useState<string | null>(null)
+
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
-      const [seedsRes, statusRes] = await Promise.allSettled([api.btSeeds(), api.btStatus()])
+      const [seedsRes, statusRes, proxyRes] = await Promise.allSettled([
+        api.btSeeds(),
+        api.btStatus(),
+        api.btProxy(),
+      ])
       if (seedsRes.status === 'fulfilled') {
         setSeeds(seedsRes.value.items ?? [])
         setError(null)
@@ -43,6 +123,7 @@ export default function BtPage() {
         setError((seedsRes.reason as Error).message)
       }
       if (statusRes.status === 'fulfilled') setStatus(statusRes.value)
+      if (proxyRes.status === 'fulfilled') setBtProxy(proxyRes.value)
     } finally {
       if (!silent) setLoading(false)
     }
@@ -234,6 +315,107 @@ export default function BtPage() {
     }
   }
 
+  /* -------------------- transmission 反向代理（远程访问 9091） -------------------- */
+
+  /** transmission 连得上且没有设 RPC 密码 → 开启需要用户显式确认风险 */
+  const proxyNeedsForce = !!btProxy?.transmission.reachable && btProxy?.transmission.authRequired === false
+
+  const errText = (err: unknown) =>
+    err instanceof Error && err.message ? err.message : String(err)
+
+  const toggleProxy = async (next: boolean) => {
+    if (proxyToggling) return
+    if (next && proxyNeedsForce && !proxyForce) {
+      toast.warning(
+        '需要先确认风险',
+        '当前 transmission 没有设置 RPC 密码，开启后任何人都能控制你的 BT。请先勾选「我已了解风险，仍要开启」再开启',
+      )
+      return
+    }
+    setProxyToggling(true)
+    setProxyError(null)
+    try {
+      const res = await api.btProxyToggle({
+        enabled: next,
+        force: next && proxyNeedsForce ? true : undefined,
+      })
+      setBtProxy(res)
+      setProxyPreview(null)
+      setProxyForce(false)
+      if (next) {
+        toast.success('已开启反向代理', res.url ? `外网可直接访问 ${res.url}` : 'nginx 配置已写入并 reload')
+      } else {
+        toast.success(
+          '已关闭反向代理',
+          `已从 nginx 中彻底删除 ${res.subPath} 的反代配置，外界无法再访问 ${res.target}`,
+        )
+      }
+      void load(true)
+    } catch (err) {
+      // 后端会在 error.message 里说明原因（未设密码 / nginx -t 失败已回滚），必须原样展示
+      const message = errText(err)
+      setProxyError(message)
+      toast.error(next ? '开启失败' : '关闭失败', message)
+    } finally {
+      setProxyToggling(false)
+    }
+  }
+
+  const copyProxyUrl = async () => {
+    const text = btProxy?.url
+    if (!text) {
+      toast.warning('暂无访问地址', '请先开启反向代理，并确认是通过域名/IP 访问本页面')
+      return
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        // 非安全上下文（http）下没有 clipboard API → select + execCommand 兜底
+        const area = document.createElement('textarea')
+        area.value = text
+        area.setAttribute('readonly', '')
+        area.style.position = 'fixed'
+        area.style.top = '-1000px'
+        area.style.opacity = '0'
+        document.body.appendChild(area)
+        area.select()
+        let ok = false
+        try {
+          ok = document.execCommand('copy')
+        } finally {
+          document.body.removeChild(area)
+        }
+        if (!ok) throw new Error('当前浏览器不允许自动复制')
+      }
+      toast.success('已复制', text)
+    } catch (err) {
+      toast.error('复制失败', `请手动复制：${text}（${errText(err)}）`)
+    }
+  }
+
+  const openProxyUrl = () => {
+    const url = btProxy?.url
+    if (!url) {
+      toast.warning('暂无访问地址', '请先开启反向代理，并确认是通过域名/IP 访问本页面')
+      return
+    }
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+
+  const previewProxy = async () => {
+    setProxyPreviewing(true)
+    try {
+      const res = await api.btProxyPreview()
+      setProxyPreview(res)
+      toast.info('配置预览已生成', '预览只读取脚本输出，不会修改服务器上的任何文件')
+    } catch (err) {
+      toast.error('预览失败', errText(err))
+    } finally {
+      setProxyPreviewing(false)
+    }
+  }
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -255,6 +437,232 @@ export default function BtPage() {
           </Button>
         </div>
       </div>
+
+      {/* transmission 反向代理（远程访问 9091）—— 放在最上面：远程打不开 transmission 多半就是它 */}
+      <Card>
+        <CardHeader
+          title={
+            <span className="inline-flex items-center gap-2">
+              <Globe className="h-4 w-4" /> transmission 反向代理（远程访问 9091）
+            </span>
+          }
+          subtitle={`远程服务器通常只开放 22/80/443，transmission 的 WebUI/RPC 只在 ${
+            btProxy?.target ?? '本机 9091 端口'
+          } 上，外网直接访问不到；开启后在 nginx 里新增一段配置，把 ${
+            btProxy?.subPath ?? '/transmission'
+          }/ 反代到它，即可用域名直接打开`}
+          action={
+            <span className="flex items-center gap-2">
+              <span
+                className={cn(
+                  'text-xs font-medium',
+                  btProxy?.enabled
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-slate-500 dark:text-slate-400',
+                )}
+              >
+                {btProxy?.enabled ? '已开启' : '已关闭'}
+              </span>
+              <ProxySwitch
+                checked={!!btProxy?.enabled}
+                loading={proxyToggling}
+                disabled={!btProxy || (!btProxy.available && !btProxy.enabled)}
+                label="transmission 反向代理开关"
+                onChange={(next) => void toggleProxy(next)}
+              />
+            </span>
+          }
+        />
+
+        <div className="space-y-3">
+          {/* 状态徽章 */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone="neutral">
+              {btProxy?.nginxVersion ? btProxy.nginxVersion : '未检测到 nginx'}
+            </Badge>
+            <Badge
+              tone={btProxy?.transmission.reachable ? 'success' : 'danger'}
+              dot
+              pulse={!!btProxy?.transmission.reachable}
+            >
+              transmission {btProxy?.transmission.reachable ? '可达' : '不可达'}
+            </Badge>
+            <Badge tone="neutral">目标 {btProxy?.target ?? '—'}</Badge>
+            <Badge tone={btProxy?.enabled ? 'success' : 'neutral'}>
+              {btProxy?.enabled ? '反代已生效' : '反代未开启'}
+            </Badge>
+            {btProxy?.transmission.version ? (
+              <Badge tone="neutral">v{btProxy.transmission.version}</Badge>
+            ) : null}
+            {btProxy?.enabledSubPaths.length ? (
+              <Badge tone="info">已生效子路径 {btProxy.enabledSubPaths.join(' ')}</Badge>
+            ) : null}
+          </div>
+
+          {/* 不能自动配置的原因（红色小字） */}
+          {btProxy?.reason ? (
+            <p className="flex items-start gap-1.5 text-xs text-red-600 dark:text-red-400">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 break-words">{btProxy.reason}</span>
+            </p>
+          ) : null}
+
+          {/* 脚本缺失 */}
+          {btProxy && !btProxy.scriptFound ? (
+            <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+              服务器上找不到反代脚本
+              <code className="mx-1 rounded bg-amber-100 px-1 font-mono text-[11px] dark:bg-amber-500/20">
+                {btProxy.scriptPath}
+              </code>
+              ，请先在服务器上执行
+              <code className="mx-1 rounded bg-amber-100 px-1 font-mono text-[11px] dark:bg-amber-500/20">
+                sudo ./deploy.sh --update
+              </code>
+              同步最新代码后再试。
+            </p>
+          ) : null}
+
+          {/* 后端写入的警告，原样展示 */}
+          {btProxy?.warnings.map((warning, index) => (
+            <p
+              key={`${index}-${warning}`}
+              className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
+            >
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 break-words">{warning}</span>
+            </p>
+          ))}
+
+          {/* 无 RPC 密码：红色警示 + 风险确认复选框 */}
+          {proxyNeedsForce ? (
+            <div className="space-y-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 dark:border-red-900/60 dark:bg-red-500/10">
+              <p className="flex items-start gap-1.5 text-xs font-medium text-red-700 dark:text-red-300">
+                <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 break-words">
+                  危险：transmission 没有设置 RPC 密码（rpc-authentication-required=false）。开启反代后，任何能访问到该地址的人都能控制你的 BT（删除任务、修改下载目录、查看内容）。请先在 transmission 里设置用户名/密码，再开启。
+                </span>
+              </p>
+              <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-red-700 dark:text-red-300">
+                <input
+                  type="checkbox"
+                  checked={proxyForce}
+                  onChange={(event) => setProxyForce(event.target.checked)}
+                  className="h-4 w-4 cursor-pointer rounded border-red-300 text-red-600 focus:ring-red-500 dark:border-red-700"
+                />
+                我已了解风险，仍要开启
+              </label>
+            </div>
+          ) : null}
+
+          {/* 开启 / 关闭 两种状态的说明 */}
+          {btProxy?.enabled ? (
+            <div className="space-y-2 rounded-xl border border-emerald-200 bg-emerald-50/70 px-3 py-3 dark:border-emerald-900/60 dark:bg-emerald-500/10">
+              <p className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                外网访问地址（点「打开」直接进 transmission WebUI）
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <code
+                  className="min-w-0 flex-1 truncate rounded-lg bg-white px-2.5 py-2 font-mono text-sm text-slate-800 dark:bg-slate-900 dark:text-slate-100"
+                  title={btProxy.url ?? ''}
+                >
+                  {btProxy.url ?? '（未取到访问地址，请确认是通过域名/IP 访问本页面）'}
+                </code>
+                <Button size="sm" variant="outline" disabled={!btProxy.url} onClick={() => void copyProxyUrl()}>
+                  <Copy className="h-3.5 w-3.5" />
+                  复制
+                </Button>
+                <Button size="sm" variant="primary" disabled={!btProxy.url} onClick={openProxyUrl}>
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  打开
+                </Button>
+              </div>
+              <p className="break-words text-[11px] leading-relaxed text-emerald-700/90 dark:text-emerald-300/90">
+                transmission WebUI 会要求登录
+                {btProxy.transmission.rpcUser ? (
+                  <>
+                    ，用户名是
+                    <code className="mx-1 rounded bg-white/70 px-1 font-mono dark:bg-slate-900">
+                      {btProxy.transmission.rpcUser}
+                    </code>
+                  </>
+                ) : null}
+                ；密码是部署脚本（
+                <code className="rounded bg-white/70 px-1 font-mono dark:bg-slate-900">deploy.sh</code> /{' '}
+                <code className="rounded bg-white/70 px-1 font-mono dark:bg-slate-900">ubuntutr.sh</code>
+                ）安装时输出/设置的那个 RPC 密码。
+                {btProxy.rpcUrl ? (
+                  <>
+                    {' '}
+                    RPC 地址：
+                    <code className="mx-0.5 rounded bg-white/70 px-1 font-mono dark:bg-slate-900">
+                      {btProxy.rpcUrl}
+                    </code>
+                  </>
+                ) : null}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1.5 rounded-xl bg-slate-50 px-3 py-2.5 text-xs leading-relaxed text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
+              <p>
+                开启后会在 nginx 里新增一段配置，把{' '}
+                <code className="rounded bg-slate-200 px-1 font-mono dark:bg-slate-700">
+                  {btProxy?.subPath ?? '/transmission'}/
+                </code>{' '}
+                反向代理到{' '}
+                <code className="rounded bg-slate-200 px-1 font-mono dark:bg-slate-700">
+                  {btProxy?.target ?? '—'}
+                </code>
+                ，于是外网可以直接打开 transmission WebUI（9091 本身仍然只监听本机）。
+              </p>
+              <p>
+                关闭会把这段配置<b>彻底删除</b>：不是用防火墙拦住，而是 nginx 配置里真的没有它了，外界再也访问不到 9091。
+              </p>
+            </div>
+          )}
+
+          {/* 后端返回的失败原因（toast 之外再留在页面上） */}
+          {proxyError ? (
+            <p className="flex items-start gap-1.5 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-500/10 dark:text-red-300">
+              <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 whitespace-pre-wrap break-words">
+                上一次操作失败：{proxyError}
+              </span>
+            </p>
+          ) : null}
+
+          {/* 预览配置 */}
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                loading={proxyPreviewing}
+                onClick={() => void previewProxy()}
+              >
+                <Code2 className="h-3.5 w-3.5" />
+                预览配置
+              </Button>
+              <span className="text-[11px] text-slate-400">
+                预览只打印将要写入的配置，不会修改服务器上的任何文件。
+              </span>
+            </div>
+            {proxyPreview ? (
+              <div className="space-y-2">
+                <p className="text-xs text-slate-500 dark:text-slate-400">将要写入的 nginx 配置全文：</p>
+                <pre className="max-h-72 overflow-auto rounded-xl bg-slate-900 p-3 font-mono text-[11px] leading-relaxed text-slate-100 dark:bg-slate-950 dark:text-slate-200">
+                  {proxyPreview.config || '（脚本没有输出配置内容）'}
+                </pre>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  插入到 {btProxy?.serverFile || 'nginx 主配置'} 的那一行：
+                </p>
+                <pre className="overflow-x-auto rounded-xl bg-slate-900 p-3 font-mono text-[11px] leading-relaxed text-slate-100 dark:bg-slate-950 dark:text-slate-200">
+                  {proxyPreview.include || '（无）'}
+                </pre>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </Card>
 
       {/* BT 出清机制 */}
       <Card>

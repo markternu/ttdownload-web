@@ -8,6 +8,7 @@ import { kickScheduler } from '../core/scheduler';
 import { logger } from '../core/logger';
 import { enqueueSeed, registerPendingSeeds, scanZipUploads, transmissionClient } from '../modules/transmission';
 import { runBtEvict } from '../services/btEvict';
+import { disableBtProxy, enableBtProxy, getBtProxyStatus, originFromRequest, previewBtProxy } from '../services/btProxy';
 import { asyncHandler, badRequest, notFound } from '../utils/http';
 
 export const btRouter = Router();
@@ -141,3 +142,42 @@ btRouter.get('/tasks', (_req, res) => {
   const { items, total } = tasksRepo.list({ modules: ['transmission'], pageSize: 100 });
   res.json({ items, total });
 });
+
+// ---------------------------------------------------------------------------
+//  transmission 反向代理开关（把 127.0.0.1:9091 通过 nginx 子路径暴露到外网）
+//  远程服务器通常只开 22/80/443，不开这个开关，外面的浏览器永远打不开 9091。
+// ---------------------------------------------------------------------------
+
+/** 查看开关状态（nginx 当前是否有我们的 location + transmission 会话信息） */
+btRouter.get(
+  '/proxy',
+  asyncHandler(async (req, res) => {
+    const status = await getBtProxyStatus(originFromRequest(req));
+    res.json(status);
+  }),
+);
+
+/** 开关：{ enabled: true|false, force?: boolean, subPath?, target? } */
+btRouter.post(
+  '/proxy',
+  asyncHandler(async (req, res) => {
+    const body = (req.body ?? {}) as { enabled?: unknown; force?: unknown; subPath?: unknown; target?: unknown };
+    const subPath = typeof body.subPath === 'string' && body.subPath.trim() ? body.subPath.trim() : undefined;
+    const target = typeof body.target === 'string' && body.target.trim() ? body.target.trim() : undefined;
+    if (typeof body.enabled !== 'boolean') throw badRequest('请求体需要 { enabled: true|false }');
+    const status = body.enabled
+      ? await enableBtProxy({ subPath, target, force: body.force === true })
+      : await disableBtProxy({ subPath, target });
+    res.json({ ...status, url: status.url ?? null });
+  }),
+);
+
+/** 预览将要写入的 nginx 配置（不改任何文件，方便用户/我核对） */
+btRouter.get(
+  '/proxy/preview',
+  asyncHandler(async (req, res) => {
+    const subPath = typeof req.query.subPath === 'string' ? req.query.subPath : undefined;
+    const target = typeof req.query.target === 'string' ? req.query.target : undefined;
+    res.json(previewBtProxy({ subPath, target }));
+  }),
+);
