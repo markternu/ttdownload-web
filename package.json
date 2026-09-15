@@ -2,7 +2,7 @@
   "name": "ttdownload-web",
   "version": "1.0.0",
   "private": true,
-  "description": "统一下载管理器 Web 应用：transmission / aria2 / 公开视频URL 三大下载模块 + 统一等待队列 + 加密发布 + 安卓通信 API",
+  "description": "\u7edf\u4e00\u4e0b\u8f7d\u7ba1\u7406\u5668 Web \u5e94\u7528\uff1atransmission / aria2 / \u516c\u5f00\u89c6\u9891URL \u4e09\u5927\u4e0b\u8f7d\u6a21\u5757 + \u7edf\u4e00\u7b49\u5f85\u961f\u5217 + \u52a0\u5bc6\u53d1\u5e03 + \u5b89\u5353\u901a\u4fe1 API",
   "license": "MIT",
   "engines": {
     "node": ">=18.17"
@@ -25,6 +25,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
+    "playwright": "^1.63.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -33,7 +34,6 @@
     "@types/express": "^4.17.21",
     "@types/multer": "^1.4.12",
     "@types/node": "^20.14.10",
-    "playwright": "^1.63.0",
     "tsx": "^4.16.2",
     "typescript": "^5.5.3"
   }

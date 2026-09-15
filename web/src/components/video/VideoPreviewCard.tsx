@@ -2,13 +2,13 @@ import { useMemo, useState } from 'react'
 import { AlertCircle, Clock, Download, HardDrive, Sparkles, User } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { formatBytes, formatDuration } from '../../lib/format'
+import { estimateBytes, parseResolutionHeight, platformTone } from '../../lib/constants'
 import {
-  FORMAT_OPTIONS,
-  QUALITY_OPTIONS,
-  estimateBytes,
-  parseResolutionHeight,
-  platformTone,
-} from '../../lib/constants'
+  formatChoices,
+  pickDefaultFormat,
+  pickDefaultQuality,
+  qualityChoices,
+} from '../../lib/quality'
 import type { FormatOption, ParseResult } from '../../types'
 import { Badge, Button, Card, Select, Thumbnail } from '../ui'
 
@@ -16,58 +16,6 @@ export interface VideoPreviewCardProps {
   result: ParseResult
   onAdd: (payload: { formatId: string | null; quality: string; format: string }) => void
   adding?: boolean
-}
-
-interface QualityChoice {
-  value: string
-  label: string
-}
-
-/** 由解析结果的 formats 推导可选质量（保留契约里的 resolution 字符串） */
-function qualityChoices(formats: FormatOption[]): QualityChoice[] {
-  const heights = new Set<number>()
-  let hasAudio = false
-  for (const format of formats) {
-    const height = parseResolutionHeight(format.resolution)
-    if (height === 0) hasAudio = true
-    else heights.add(height)
-  }
-
-  const standard: QualityChoice[] = QUALITY_OPTIONS.filter((option) => {
-    if (option.value === 'audio') return hasAudio
-    return heights.size === 0 || heights.has(option.height)
-  }).map((option) => ({ value: option.value, label: option.label }))
-
-  if (standard.length) return standard
-
-  // formats 里出现了非标准分辨率时，按实际值降级展示
-  const sorted = Array.from(heights).sort((a, b) => b - a)
-  const custom: QualityChoice[] = sorted.map((height) => ({
-    value: `${height}p`,
-    label: `${height}P`,
-  }))
-  if (hasAudio) custom.push({ value: 'audio', label: '仅音频' })
-  return custom.length ? custom : QUALITY_OPTIONS.map((o) => ({ value: o.value, label: o.label }))
-}
-
-function formatChoices(formats: FormatOption[]): { value: string; label: string }[] {
-  const exts = new Set(formats.map((format) => (format.ext || '').toLowerCase()).filter(Boolean))
-  const standard = FORMAT_OPTIONS.filter((option) => exts.has(option.value))
-  if (standard.length) return standard
-  const dynamic = Array.from(exts).map((ext) => ({ value: ext, label: ext.toUpperCase() }))
-  return dynamic.length ? dynamic : FORMAT_OPTIONS
-}
-
-function pickDefaultQuality(formats: FormatOption[], preferred: string): string {
-  const choices = qualityChoices(formats)
-  if (choices.some((choice) => choice.value === preferred)) return preferred
-  return choices[0]?.value ?? '1080p'
-}
-
-function pickDefaultFormat(formats: FormatOption[], preferred: string): string {
-  const choices = formatChoices(formats)
-  if (choices.some((choice) => choice.value === preferred)) return preferred
-  return choices[0]?.value ?? 'mp4'
 }
 
 function matchFormat(

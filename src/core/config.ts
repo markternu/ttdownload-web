@@ -82,6 +82,9 @@ export const config = {
   /** transmission 的 incomplete 目录（出清时需要一并删除里面的任务文件夹） */
   transmissionIncompleteDir: str(process.env.TRANSMISSION_INCOMPLETE_DIR, '/var/lib/transmission/incomplete'),
 
+  /** 自动获取访客 cookies（无头浏览器；抖音这类站点必需，默认开启） */
+  cookieHarvestEnabled: str(process.env.COOKIE_HARVEST_ENABLED, '1') !== '0',
+
   /** BT 出清机制默认值（可在 Web 设置页修改） */
   btEvict: {
     enabled: str(process.env.BT_EVICT_ENABLED, '1') !== '0',

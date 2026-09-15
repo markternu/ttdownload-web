@@ -460,3 +460,50 @@ test('抖音/哔哩哔哩等非 YouTube 平台不会带上 youtube 专用参数'
     .map((a) => a.label);
   assert.ok(yt.includes('跳过网页抓取（player API 直连）'), 'YouTube 应有跳过网页抓取档');
 });
+
+/* ------------------------------------------------------------------ */
+/* 自动获取访客 cookies（抖音这类站点）—— 自愈链路                        */
+/* ------------------------------------------------------------------ */
+
+test('★抖音「需要新鲜 cookies」时：自动抓 cookies 并带上 referer 重试（不是让用户干等）', async () => {
+  const cookieHarvest = await import('../dist/services/cookieHarvest.js');
+  const DY_ERROR = 'ERROR: [Douyin] 7680875970777135534: Fresh cookies (not necessarily logged in) are needed';
+
+  // 没有真浏览器也能测：注入一个「假浏览器」，返回抖音需要的签名 cookie
+  process.env.CHROMIUM_PATH = '/bin/sh';
+  process.env.COOKIE_HARVEST_SITES = 'douyin';
+  let harvestCalls = 0;
+  cookieHarvest.__setHarvesterLauncher(async () => {
+    harvestCalls += 1;
+    return [
+      { domain: '.douyin.com', includeSubdomains: true, path: '/', secure: true, expires: 1900000000, name: '__ac_signature', value: 'sig-1', httpOnly: false },
+      { domain: '.douyin.com', includeSubdomains: true, path: '/', secure: true, expires: 1900000000, name: 'ttwid', value: 'ttwid-1', httpOnly: true },
+    ];
+  });
+
+  resetLadder({ failTimes: 999 });
+  process.env.LADDER_DOWNLOAD_ERROR = DY_ERROR;
+  process.env.YTDLP_RATE_LIMIT_BACKOFF_MS = '20';
+  process.env.YTDLP_ATTEMPT_GAP_MS = '20';
+  try {
+    const { result } = await runWebvideoTask({ url: 'https://v.douyin.com/wxkLrzmtN6M/' });
+    assert.ok(result.error, '一直失败时应报错');
+    assert.ok(harvestCalls >= 1, `应触发自动获取 cookies，实际调用 ${harvestCalls} 次`);
+
+    // 关键：重试时必须带上自动抓到的 cookies 文件 + 抖音必需的 referer
+    const args = ladderAllCalls().join('\n');
+    assert.match(args, /--cookies \S*cookies-harvested\/douyin\.txt/, '应把自动获取的 cookies 传给 yt-dlp');
+    assert.match(args, /--referer https:\/\/www\.douyin\.com\//, '抖音必须带 referer（实测不带必失败）');
+
+    // 不能再出现「YouTube 判定为机器人/限流，请等 10~30 分钟」这种跑偏的结论
+    assert.doesNotMatch(result.error, /判定为机器人|等待 10~30 分钟再重试/, `错误结论不应是限流：${result.error}`);
+    assert.match(result.error, /抖音|cookies/, `应说明是抖音的 cookies 问题：${result.error}`);
+  } finally {
+    delete process.env.LADDER_DOWNLOAD_ERROR;
+    delete process.env.YTDLP_RATE_LIMIT_BACKOFF_MS;
+    delete process.env.YTDLP_ATTEMPT_GAP_MS;
+    delete process.env.CHROMIUM_PATH;
+    delete process.env.COOKIE_HARVEST_SITES;
+    cookieHarvest.__setHarvesterLauncher(null);
+  }
+});

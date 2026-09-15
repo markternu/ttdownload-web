@@ -2,6 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../core/config';
+import {
+  COOKIE_MARKER,
+  cookiesForUrl,
+  harvestNow,
+  harvestStatus,
+  profileFor,
+  SITE_PROFILES,
+} from '../services/cookieHarvest';
 import { logger, taskLog } from '../core/logger';
 import { tailText } from '../core/procLog';
 import { toolStatus } from '../core/disk';
@@ -46,6 +54,7 @@ interface YtDlpFormat {
   format_id?: string;
   ext?: string;
   resolution?: string;
+  width?: number;
   height?: number;
   vcodec?: string;
   acodec?: string;
@@ -85,9 +94,23 @@ function normalizeFormat(f: YtDlpFormat): FormatOption | null {
   const acodec = f.acodec ?? 'none';
   const hasVideo = vcodec !== 'none' && !!vcodec;
   const hasAudio = acodec !== 'none' && !!acodec;
-  let resolution = f.resolution ?? '';
-  if (!resolution || resolution === 'audio only') {
-    resolution = hasVideo ? `${f.height ?? '?'}p` : 'audio';
+  // 质量标签统一成 "1080p" 这种写法，取**短边**（YouTube/TikTok 都这么标：1080p = 短边 1080）。
+  // 坑（用户实际踩到）：yt-dlp 同时知道宽高时的 resolution 是 "1920x1080"，
+  // 前端若按「第一个数字」取高度会得到宽度 1920 → 与 1080P/720P 等选项全对不上 →
+  // 质量下拉框只剩「仅音频」。所以这里直接按数值算，不把字符串丢给前端去猜。
+  let resolution: string;
+  if (hasVideo) {
+    const w = typeof f.width === 'number' && f.width > 0 ? f.width : 0;
+    const h = typeof f.height === 'number' && f.height > 0 ? f.height : 0;
+    const shortSide = w && h ? Math.min(w, h) : h || w;
+    if (shortSide) resolution = `${shortSide}p`;
+    else {
+      // 连宽高都没有：从 "1080p60" / "1920x1080" 里兜底取最后一个 3~4 位数
+      const m = (f.resolution ?? '').match(/\d{3,4}/g);
+      resolution = m && m.length ? `${Number.parseInt(m[m.length - 1], 10)}p` : (f.resolution || '?');
+    }
+  } else {
+    resolution = 'audio';
   }
   const filesize = f.filesize ?? f.filesize_approx ?? null;
   const sizeText = filesize && filesize > 0 ? ` · ${(filesize / 1024 / 1024).toFixed(0)} MB` : '';
@@ -176,7 +199,7 @@ export async function parseVideo(
           stderr: tailText(stderr, 1500),
           stdout: tailText(stdout, 500),
         });
-        reject(new Error(humanizeYtDlpError(stderr || stdout)));
+        reject(new Error(humanizeYtDlpError(stderr || stdout, url)));
         return;
       }
       scoped.mark('YTDLP_PARSE', `解析成功 code=0（${ms}ms）: ${url}`, {
@@ -214,9 +237,21 @@ export async function parseVideo(
 }
 
 /** yt-dlp 错误信息人性化（中文）—— 不预设「不绕过登录」，只说明该怎么办 */
-export function humanizeYtDlpError(raw: string): string {
+export function humanizeYtDlpError(raw: string, url = ''): string {
   const s = raw.toLowerCase();
   const has = (...keys: string[]): boolean => keys.some((k) => s.includes(k));
+  const site = url ? profileFor(url) : null;
+
+  // ① 需要「新鲜访客 cookies」：抖音/TikTok 这类站点要浏览器 JS 挑战生成的签名 cookie，
+  //    不需要登录，而且我们**会自动获取**（人工导出根本跟不上它的过期速度）。
+  if (isCookieRequiredError(raw)) {
+    if (site?.id === 'douyin' || site?.id === 'tiktok') {
+      return `${site.name}需要「新鲜的访客 cookies」（不需要登录）：程序会自动用内置无头浏览器获取并重试；` +
+        `若仍失败，可在「设置 → 公开视频（yt-dlp）」上传一份 ${site.id === 'douyin' ? 'douyin.com' : 'tiktok.com'} 的 cookies.txt 兜底`;
+    }
+    return '该平台需要 cookies（可能只是访客 cookies，不需要登录）。程序会自动尝试用无头浏览器获取；' +
+      '若仍失败，请在「设置 → 公开视频（yt-dlp）」上传该站点的 cookies.txt';
+  }
 
   // 频道会员专享（如 YouTube「高级VIP会员」）
   if (
@@ -233,8 +268,14 @@ export function humanizeYtDlpError(raw: string): string {
   if (has('the page needs to be reloaded', 'page needs to be reloaded')) {
     return 'YouTube 返回「The page needs to be reloaded.」：这是 yt-dlp 的已知问题（多与版本/瞬时风控有关，不是你的网络）。程序会自动换客户端/重试；若持续出现，请把 yt-dlp 升级到最新版（可用网页「修复脚本」页跑 deploy/scripts/fix-ytdlp.sh），或改用「跳过网页抓取」方式';
   }
-  if (has('sign in', 'login required', 'please log in', 'not a bot', 'this video requires login', 'use --cookies', 'cookies')) {
-    return '该平台要求登录或人机校验：请在「设置 → 公开视频（yt-dlp）」上传 cookies.txt（或填「从浏览器读取 cookies」）后重试';
+  if (has('not a bot', 'sign in to confirm')) {
+    return site?.id === 'youtube'
+      ? 'YouTube 判定这台服务器的出口 IP「像机器人」（这是 IP 信誉问题，不是你的账号或 cookies 坏了；公开视频本来就不需要 cookies）。' +
+        '请等 10~30 分钟再试，或换出口 IP（设置里加 --proxy）；服务器上已有登录 cookies 时会自动带上'
+      : '该平台要求先通过人机校验（多与出口 IP 信誉有关）：稍后重试，或在设置里配置代理换出口 IP';
+  }
+  if (has('login required', 'please log in', 'this video requires login', 'use --cookies', 'cookies')) {
+    return '该内容需要登录后才能访问：请在「设置 → 公开视频（yt-dlp）」上传该网站的 cookies.txt（或填「从浏览器读取 cookies」）后重试';
   }
   // 私有视频
   if (has('private video', 'this video is private')) {
@@ -271,6 +312,13 @@ export interface CookiesStatus {
   warnings: string[];
   /** 只是提示性说明（不影响可用性，例如多账号注意事项） */
   notes: string[];
+  /**
+   * 这份 cookies.txt 覆盖了哪些站点（按域名），以及各站点是不是「能自动获取、不需要人工导出」。
+   * 用户最容易误解的就是「我传了 Google 的 cookies，为什么抖音还是不行」—— cookies 是按站点隔离的。
+   */
+  sites: { domain: string; count: number; auto: boolean; note: string }[];
+  /** 自动获取访客 cookies 的总体情况 */
+  harvest: ReturnType<typeof harvestStatus> | null;
   stats: {
     total: number;
     byDomain: Record<string, number>;
@@ -402,6 +450,38 @@ export function parseOptionsFromSettings(settings?: {
   };
 }
 
+/**
+ * 把 cookies 文件里出现的域名整理成「站点说明」：
+ * 让用户一眼看到「这份 cookies 是给谁的」以及「哪些站点其实不用人工导出」。
+ */
+function describeCookieSites(byDomain: Record<string, number>): CookiesStatus['sites'] {
+  const harvest = harvestStatus();
+  return Object.entries(byDomain)
+    .sort((a, b) => b[1] - a[1])
+    .map(([domain, count]) => {
+      const profile = SITE_PROFILES.find((p) => {
+        const host = domain.replace(/^\./, '');
+        return hostMatchesHost(host, p.id);
+      });
+      const auto = !!profile && harvest.harvestSites.includes(profile.id);
+      return {
+        domain,
+        count,
+        auto,
+        note: auto
+          ? `${profile?.name ?? domain} 可以自动获取访客 cookies，不必人工导出（这份只是备用）`
+          : profile?.loginOnlyNote ?? '需要登录态的内容才用得上这份 cookies',
+      };
+    });
+}
+
+/** 域名是否属于某个站点配置（按 profile 的 harvestUrl 主机名判断） */
+function hostMatchesHost(host: string, siteId: string): boolean {
+  const p = SITE_PROFILES.find((x) => x.id === siteId);
+  if (!p) return false;
+  return p.test(`https://${host}/`);
+}
+
 /** 查询 cookies 状态（给 /api/webvideo/cookies 用） */export async function cookiesStatus(): Promise<CookiesStatus> {
   const { getSettings } = await import('../services/settings');
   const s = getSettings();
@@ -433,6 +513,19 @@ export function parseOptionsFromSettings(settings?: {
           hasYoutubeDomain: false,
         },
       };
+  const sites = describeCookieSites(inspected.stats.byDomain);
+  const notes = [...inspected.notes];
+  // 关键澄清：cookies 是按站点隔离的；能用自动化拿到的站点不需要人工导出
+  if (sites.length) {
+    const autoSites = sites.filter((x) => x.auto).map((x) => x.domain);
+    const otherSites = sites.filter((x) => !x.auto).map((x) => x.domain);
+    notes.push(
+      `这份 cookies 覆盖：${sites.map((x) => `${x.domain}(${x.count})`).join('、')}。` +
+        `cookies 是**按站点隔离**的 —— 它只对上面这些站点生效；` +
+        (autoSites.length ? `${autoSites.join('、')} 这类站点由服务器自动获取，不需要人工导出；` : '') +
+        (otherSites.length ? `${otherSites.join('、')} 的登录内容才需要你手工导出这一份。` : ''),
+    );
+  }
   return {
     cookiesFile: file,
     defaultPath: config.webvideo.defaultCookiesFile,
@@ -442,7 +535,9 @@ export function parseOptionsFromSettings(settings?: {
     fromBrowser: String(s.webvideoCookiesFromBrowser ?? ''),
     valid: inspected.valid,
     warnings: inspected.warnings,
-    notes: inspected.notes,
+    notes,
+    sites,
+    harvest: harvestStatus(),
     stats: inspected.stats,
   };
 }
@@ -465,6 +560,8 @@ export interface AttemptContext {
   /** ''=不启用 */
   cookiesFromBrowser: string;
   isYouTube: boolean;
+  /** 站点专用额外参数（Referer/UA 等；抖音必需，实测不带 referer 就一定失败） */
+  siteExtraArgs?: string[];
 }
 
 /**
@@ -506,7 +603,9 @@ export function buildDownloadAttempts(ctx: AttemptContext): DownloadAttempt[] {
     : ctx.cookiesFromBrowser
       ? ['--cookies-from-browser', ctx.cookiesFromBrowser]
       : [];
-  const withCookies = (args: string[]): string[] => [...cookieArgs, ...args];
+  // 站点专用参数（如抖音的 --referer）必须**每一次**尝试都带上，否则带对了 cookie 也会被拒
+  const siteArgs = ctx.siteExtraArgs ?? [];
+  const withCookies = (args: string[]): string[] => [...cookieArgs, ...siteArgs, ...args];
 
   const best = ['-f', 'bv*+ba/b'];
   const singleFile = ['-f', 'b[ext=mp4]/b/bv*+ba'];
@@ -561,8 +660,34 @@ export function buildDownloadAttempts(ctx: AttemptContext): DownloadAttempt[] {
 /* 退避策略（机器人校验/限流）                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 「需要新鲜 cookies」类错误（**不是**限流）。
+ *
+ * 抖音/TikTok 的网页接口需要浏览器 JS 挑战生成的 __ac_signature/ttwid，yt-dlp 报的是
+ * `Fresh cookies (not necessarily logged in) are needed` —— 这句话非常容易被误判成
+ * 「被风控/要登录」，于是我们之前会停手并让用户等 10~30 分钟（完全搞错方向）。
+ * 正确做法：自动用无头浏览器抓一次访客 cookies 再重试。
+ */
+export function isCookieRequiredError(raw: string): boolean {
+  const s = raw.toLowerCase();
+  // 先排除「限流/机器人校验」：YouTube 那句 `Sign in to confirm you're not a bot ... Use --cookies`
+  // 里也含 "use --cookies"，若不做排除会被误判成 cookie 问题（那就不会退避，反而越打越封）。
+  if (/sign in to confirm|not a bot|too many requests|http error 429|rate limit/.test(s)) return false;
+  return (
+    s.includes('fresh cookies') ||
+    s.includes('use --cookies') ||
+    s.includes('cookies for the authentication') ||
+    s.includes('cookies are needed') ||
+    s.includes('needs cookies') ||
+    // 中文文案（humanizeYtDlpError 之后可能已经是这句）
+    raw.includes('需要新鲜访客 cookies')
+  );
+}
+
 /** 机器人校验/限流类错误：短时间连打只会让 IP 被封得更久 */
 export function isRateLimitError(raw: string): boolean {
+  // 需要 cookies 的问题不能按限流处理（那样会「等 30 分钟」而不是去抓 cookie）
+  if (isCookieRequiredError(raw)) return false;
   const s = raw.toLowerCase();
   return (
     // 原始英文（yt-dlp 输出）
@@ -573,8 +698,8 @@ export function isRateLimitError(raw: string): boolean {
     s.includes('try again later') ||
     s.includes('rate limit') ||
     // 已经过 humanizeYtDlpError 的中文文案（计数时拿到的可能是中文）
-    raw.includes('人机校验') ||
-    raw.includes('机器人') ||
+    raw.includes('机器人校验') ||
+    raw.includes('判定为机器人') ||
     raw.includes('限流')
   );
 }
@@ -593,7 +718,14 @@ const envMs = (name: string, def: number): number => {
 
 interface AttemptFailure {
   label: string;
+  /** 已本地化的中文说明（给用户看） */
   message: string;
+  /**
+   * yt-dlp 的**原始**输出（给程序判断用）。
+   * 教训：之前拿本地化后的中文去判断「是不是被限流」，改文案就会把判断改坏
+   * （中文里少了「人机校验」四个字，限流检测就失效、把整条阶梯白跑一遍并挨更多风控）。
+   */
+  raw: string;
 }
 
 interface LaunchContext {
@@ -605,11 +737,17 @@ interface RunningJob {
   child: ChildProcess | null;
   /** 本次任务的完整策略阶梯 */
   attempts: DownloadAttempt[];
+  /** 任务 URL（错误建议按站点区分时用） */
+  url?: string;
   attemptIndex: number;
   attemptStartedAt: number;
   attemptErrors: AttemptFailure[];
   /** 每个方式已原地重试次数（瞬时错误用） */
   attemptRetries?: Record<number, number>;
+  /** 重建策略阶梯所需的信息（cookie 失效时用新 cookie 重来一轮） */
+  attemptCtx?: AttemptContext;
+  /** 是否已经因为「cookie 失效」重来过一轮（只自愈一次，避免死循环） */
+  reharvested?: boolean;
   stdout: string;
   stderr: string;
   startedAt: number;
@@ -625,15 +763,18 @@ const jobs = new Map<number, RunningJob>();
 function buildFinalError(job: RunningJob): string {
   const last = job.attemptErrors[job.attemptErrors.length - 1];
   const base = last?.message ?? '下载失败（未知原因）';
-  const rateLimited = job.attemptErrors.filter((e) => /机器人|not a bot|人机校验|限流/i.test(e.message)).length;
+  const rateLimited = job.attemptErrors.filter((e) => isRateLimitError(e.raw || e.message)).length;
   const suffix =
     job.attemptErrors.length <= 1
       ? ''
       : `（已自动尝试 ${job.attemptErrors.length} 种方式：${job.attemptErrors.map((e) => e.label).join('、')}）`;
+  const site = profileFor(job.url ?? '');
   const advice =
     rateLimited >= Math.max(2, Math.ceil(job.attemptErrors.length / 2))
-      ? '。多数失败都是「YouTube 判定为机器人/限流」：请等待 10~30 分钟再重试（短时间内反复重试会让该 IP 被限流更久），' +
-        '并确认已安装 JS 运行时（deno，见首页网络自检的「yt-dlp JS 运行时」一项）；如有代理，可在设置里加 --proxy 换出口 IP'
+      ? site?.id === 'youtube'
+        ? '。多数失败都是「YouTube 判定为机器人/限流」：请等待 10~30 分钟再重试（短时间内反复重试会让该 IP 被限流更久），' +
+          '并确认已安装 JS 运行时（deno，见首页网络自检的「yt-dlp JS 运行时」一项）；如有代理，可在设置里加 --proxy 换出口 IP'
+        : '。看起来是出口 IP 被该平台限流：请等待 10~30 分钟再试，或在设置里配置代理换出口 IP'
       : '';
   return `${base}${suffix}${advice}`;
 }
@@ -688,9 +829,40 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
       job.exitCode = 0;
       return;
     }
-    const message = humanizeYtDlpError(job.stderr || job.stdout);
+    const message = humanizeYtDlpError(job.stderr || job.stdout, ctx.url);
     const failedLabel = job.attempts[job.attemptIndex].label;
     const rawErr = `${job.stderr}\n${job.stdout}`.toLowerCase();
+
+    // ★ 自愈：站点说「cookie 失效/需要新鲜 cookie」时，重新抓一次访客 cookies 再重来一轮。
+    //   这就是「不用人工天天导出 cookies」的关键一步（抖音的签名 cookie 几小时就过期）。
+    if (isCookieRequiredError(`${job.stderr}\n${job.stdout}`) && !job.reharvested && job.attemptCtx) {
+      const profile = profileFor(ctx.url);
+      if (profile) {
+        job.reharvested = true;
+        scoped.mark('YTDLP_ATTEMPT', `${profile.name} 提示 cookie 失效/需要新鲜 cookies —— 自动重新获取后重试`);
+        void (async () => {
+          try {
+            const meta = await harvestNow(profile.id);
+            if (!meta?.file) throw new Error('没有拿到新的 cookies');
+            job.attemptCtx = { ...job.attemptCtx!, cookiesFile: meta.file, cookiesFromBrowser: '' };
+            job.attempts = buildDownloadAttempts(job.attemptCtx);
+            job.attemptIndex = 0;
+            job.attemptErrors = [];
+            job.attemptRetries = {};
+            job.stderr = '';
+            job.stdout = '';
+            job.exitCode = null;
+            jobs.set(taskId, job);
+            scoped.mark('YTDLP_ATTEMPT', `已用新获取的 ${profile.name} cookies 重新开始（${meta.cookieCount} 条）`);
+            launchAttempt(taskId, job, ctx);
+          } catch (e) {
+            scoped.error(`[MARK:${COOKIE_MARKER}] 自动重新获取 cookies 失败：${(e as Error).message}`);
+            job.exitCode = exit;
+          }
+        })();
+        return;
+      }
+    }
     // 瞬时性错误（YouTube 风控抖一下/页面需要刷新）：先原地重试，不急着换方式
     const transient =
       rawErr.includes('page needs to be reloaded') ||
@@ -715,17 +887,18 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
       }, delay);
       return;
     }
-    job.attemptErrors.push({ label: failedLabel, message });
+    job.attemptErrors.push({ label: failedLabel, message, raw: `${job.stderr}\n${job.stdout}` });
     scoped.warn(
       `[MARK:YTDLP_EXIT] 方式「${failedLabel}」失败 code=${exit}（${ms}ms）：${message}`,
       { stderr: tailText(job.stderr, 2000), stdout: tailText(job.stdout, 1000), args },
     );
     const next = job.attemptIndex + 1;
     // 连续两种方式都被判为机器人/限流：继续换方式只会加剧风控，直接停手并给建议
-    const rateLimitHits = job.attemptErrors.filter((e) => isRateLimitError(e.message)).length;
+    // （注意：这里**只**统计真正的限流；需要 cookies 的问题走上面的自愈分支，不能算限流）
+    const rateLimitHits = job.attemptErrors.filter((e) => isRateLimitError(e.raw || e.message)).length;
     if (next < job.attempts.length && rateLimitHits >= envMs('YTDLP_RATE_LIMIT_MAX_ATTEMPTS', 2)) {
       scoped.error(
-        `[MARK:TASK_FAIL] 连续 ${rateLimitHits} 种方式被 YouTube 判定为机器人/限流，停止继续尝试（避免加剧风控，请等待 10~30 分钟后重试）`,
+        `[MARK:TASK_FAIL] 连续 ${rateLimitHits} 种方式被判定为机器人/限流，停止继续尝试（避免加剧风控，请等待 10~30 分钟后重试）`,
       );
       job.exitCode = exit;
       return;
@@ -735,7 +908,7 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
       // 机器人校验/限流：换下一种方式前也留出间隔，否则连打只会让 IP 被封得更久
       const gap = rateLimited ? envMs('YTDLP_ATTEMPT_GAP_MS', 15_000) : 0;
       if (gap > 0) {
-        scoped.warn(`[MARK:YTDLP_ATTEMPT] 疑似被 YouTube 限流，等待 ${gap / 1000}s 后再换下一种方式（避免加剧风控）`);
+        scoped.warn(`[MARK:YTDLP_ATTEMPT] 疑似被限流，等待 ${gap / 1000}s 后再换下一种方式（避免加剧风控）`);
         setTimeout(() => {
           if (!job.cancelled && job.exitCode === null) launchAttempt(taskId, job, ctx);
         }, gap);
@@ -896,20 +1069,34 @@ export const webvideoModule: ModuleAdapter = {
     const extraArgs = parseExtraArgs(String(settings.webvideoExtraArgs ?? ''));
     if (extraArgs.length) commonArgs.push(...extraArgs);
 
-    const cookiesFile = resolveCookiesFile(settings);
+    // 解析「这次该用哪套 cookies / 站点额外参数」：
+    // 用户上传的 cookies（保留登录态）+ 服务端无头浏览器自动获取的访客 cookies（抖音这类必需）
+    const userCookies = resolveCookiesFile(settings);
+    const resolved = await cookiesForUrl(url, userCookies);
+    taskLog(task.id).mark('YTDLP_ATTEMPT', `凭据准备：${resolved.note}`, {
+      cookiesFile: resolved.cookiesFile,
+      harvested: resolved.harvested,
+      site: resolved.siteName,
+      siteArgs: resolved.extraArgs,
+    });
+    const cookiesFile = resolved.cookiesFile;
     const cookiesFromBrowser = cookiesFile ? '' : String(settings.webvideoCookiesFromBrowser ?? '').trim();
     const platform = task.platform || detectPlatform(url);
-    const attempts = buildDownloadAttempts({
+    const attemptCtx: AttemptContext = {
       formatId,
       cookiesFile,
       cookiesFromBrowser,
       isYouTube: platform === 'YouTube',
-    });
+      siteExtraArgs: resolved.extraArgs,
+    };
+    const attempts = buildDownloadAttempts(attemptCtx);
 
     const startedAt = Date.now();
     const job: RunningJob = {
       child: null,
       attempts,
+      url,
+      attemptCtx,
       attemptIndex: 0,
       attemptStartedAt: startedAt,
       attemptErrors: [],

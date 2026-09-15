@@ -69,12 +69,31 @@ export function qualityHeight(value: string): number {
   return Number.isFinite(parsed) ? parsed : 1080
 }
 
-/** 从 "1080p60" / "1080P" / "audio" 中解析高度 */
+/**
+ * 从各种分辨率写法里解析出「高度」：
+ *   "1920x1080" → 1080（注意：yt-dlp 同时知道宽高时给的就是这种 WxH，取第一个数字会得到宽度 1920，
+ *                       那样会和 1080P/720P 等选项全都对不上，下拉框里就只剩「仅音频」）
+ *   "1080x1920" → 1080（竖屏取短边，和平台叫法一致）
+ *   "1080p60" / "1080P" / "1080" → 1080
+ *   "audio" / "audio only" → 0
+ */
 export function parseResolutionHeight(resolution: string): number {
-  const lower = (resolution || '').toLowerCase()
-  if (lower.includes('audio')) return 0
-  const match = lower.match(/(\d{3,4})/)
-  return match ? Number.parseInt(match[1], 10) : 0
+  const lower = (resolution || '').toLowerCase().trim()
+  if (!lower || lower.includes('audio')) return 0
+
+  // WxH：宽在前、高在后（yt-dlp 的 format_resolution 就是 '%dx%d'）。
+  // 这里取**短边**：横屏 "1920x1080" → 1080；竖屏 "1080x1920" → 1080。
+  // （平台也都这么标：1080p 指短边 1080。取宽度或取高度都会在竖屏上出错。）
+  const wxh = lower.match(/(\d{2,5})\s*[x×*]\s*(\d{2,5})/)
+  if (wxh) return Math.min(Number.parseInt(wxh[1], 10), Number.parseInt(wxh[2], 10))
+
+  // "1080p" / "1080p60" / "1080" / "720P60"
+  const p = lower.match(/(\d{3,4})\s*p/)
+  if (p) return Number.parseInt(p[1], 10)
+
+  // 只有一个数字：按高度处理（yt-dlp 单独给高度时是 "1080p"，这里兜底）
+  const any = lower.match(/(\d{3,4})/)
+  return any ? Number.parseInt(any[1], 10) : 0
 }
 
 /** 按质量+格式挑选最合适的 yt-dlp format id */

@@ -374,6 +374,38 @@ ensure_ytdlp_ejs() {
   pip3 show yt-dlp-ejs >/dev/null 2>&1
 }
 
+# ---------------------------------------------------------------------------
+#  确保有「能自动抓 cookies 的无头浏览器」
+#  为什么要它：抖音/TikTok 这类站点的网页接口需要浏览器 JS 挑战生成的签名 cookie
+#  （__ac_signature/ttwid 等），而且几小时就过期 —— 人工导出根本跟不上，
+#  所以由服务端无头浏览器自动获取。这里保证服务器上有一个可用的 chromium。
+#  失败不致命：只有抖音/TikTok 这类站点受影响，会在日志/设置页里明确提示。
+# ---------------------------------------------------------------------------
+ensure_cookie_browser() {
+  local found=""
+  for b in chromium chromium-browser google-chrome google-chrome-stable; do
+    if command -v "$b" >/dev/null 2>&1; then found="$(command -v "$b")"; break; fi
+  done
+  if [[ -n "$found" ]]; then
+    log "无头浏览器已就绪：${found}（用于自动获取抖音/TikTok 等站点的访客 cookies）"
+    return 0
+  fi
+
+  log "未检测到 chromium，尝试安装（用于自动获取需要 JS 挑战的站点 cookies）..."
+  if apt-get install -y chromium >/dev/null 2>&1 && command -v chromium >/dev/null 2>&1; then
+    log "已安装 chromium：$(command -v chromium)"
+    return 0
+  fi
+  if apt-get install -y chromium-browser >/dev/null 2>&1 && command -v chromium-browser >/dev/null 2>&1; then
+    log "已安装 chromium-browser：$(command -v chromium-browser)"
+    return 0
+  fi
+
+  warn "没装上 chromium：抖音/TikTok 这类需要「新鲜访客 cookies」的站点可能下载失败"
+  warn "  可稍后手工执行：sudo apt install -y chromium   或   sudo bash deploy/scripts/fix-cookies-browser.sh"
+  return 0
+}
+
 ensure_ytdlp_stack() {
   # yt-dlp 本体：pip[default] → apt → 官方二进制
   if ! command -v yt-dlp >/dev/null 2>&1; then
@@ -535,6 +567,7 @@ case "$ACTION" in
     fi
     # 老部署升级时自愈：补 yt-dlp-ejs / JS 运行时（缺了 YouTube 一定失败）
     if [[ $SKIP_APT -eq 0 ]]; then ensure_ytdlp_stack; fi
+    if [[ $SKIP_APT -eq 0 ]]; then ensure_cookie_browser; fi
     # 老部署升级时补齐「全站鉴权」账号密码（缺了就生成并打印，否则等于没有鉴权）
     if [[ -f .env ]]; then
       if ! grep -q '^WEB_AUTH_USER=' .env; then echo "WEB_AUTH_USER=${WEB_AUTH_USER:-admin}" >> .env; log "已补齐 WEB_AUTH_USER"; fi
@@ -629,6 +662,7 @@ if [[ $SKIP_APT -eq 0 ]]; then
 
   # yt-dlp 全家桶（本体 + ejs + JS 运行时），多重兜底
   ensure_ytdlp_stack
+  ensure_cookie_browser
 else
   warn "按参数要求跳过 apt 安装"
 fi
@@ -703,6 +737,8 @@ WEB_SESSION_SECRET=${WEB_SESSION_SECRET_VALUE}
 LOG_LEVEL=debug
 SCRIPT_UPLOAD_ENABLED=0
 SCRIPT_RUN_TIMEOUT_SEC=600
+# 自动获取访客 cookies（无头浏览器抓抖音/TikTok 等站点；0=关闭）
+COOKIE_HARVEST_ENABLED=1
 LOG_MAX_MB=20
 LOG_KEEP_FILES=5
 ARIA2_RPC_HOST=127.0.0.1
@@ -742,6 +778,7 @@ else
     "LOG_MAX_MB=20" \
     "LOG_KEEP_FILES=5" \
     "SCRIPT_UPLOAD_ENABLED=0" \
+    "COOKIE_HARVEST_ENABLED=1" \
     "SCRIPT_RUN_TIMEOUT_SEC=600" \
     "WEB_AUTH_USER=${WEB_AUTH_USER:-admin}" \
     "WEB_SESSION_HOURS=168" \
@@ -830,6 +867,7 @@ if [[ "${OK:-0}" -eq 1 ]]; then
   log "项目属主     : ${REPO_OWNER}（如发现 git/npm 报权限错误，跑 deploy/scripts/fix-ownership.sh 归位）"
   log "日志/排查    : http://${IP:-<服务器IP>}:${PORT}/logs 与 /report（一键下载诊断报告发给开发者）"
   log "修复脚本页   : http://${IP:-<服务器IP>}:${PORT}/scripts（维护令牌 = 上面的安卓 Token；也可在 .env 里自设 MAINTENANCE_TOKEN）"
+  log "自动 cookies : 抖音/TikTok 这类站点由服务器上的无头浏览器自动获取访客 cookies，无需人工导出"
   log "BT 反代开关  : 外网打不开 transmission 控制台时，可在「BT 种子下载」页一键开启反向代理，"
   log "               或执行 sudo ./deploy.sh --bt-proxy  → http://<公网IP>${BT_PROXY_PATH}/web/"
   # 若本机 80 端口已有服务（多半是 nginx）而本服务端口未必对外开放，给出子路径反代建议

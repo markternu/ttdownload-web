@@ -27,6 +27,7 @@ export function defaultSettings(): Settings {
     webvideoExtraArgs: config.webvideo.extraArgs,
     autoDeleteAfterReport: true,
     scriptUploadEnabled: config.scriptUploadEnabled,
+    cookieHarvestEnabled: config.cookieHarvestEnabled,
     scriptRunTimeoutSec: config.scriptRunTimeoutSec,
     clearLogsAfterReport: false,
     btEvict: { ...config.btEvict },
