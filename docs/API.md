@@ -453,15 +453,21 @@ interface ScriptItem {
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/android/files` | `{ items: [{ id, name, title, module, sizeBytes, url, createdAt }], total, totalBytes }`；只返回**尚未被上报删除**的文件 |
+| GET | `/api/android/files` | `{ items: [{ id, name, title, module, sizeBytes, available, url, createdAt }], total, totalBytes }`；只返回**尚未被上报删除**的文件（所以这里 `available` 恒为 `true`） |
 | GET | `/api/android/download/:id` | 文件流下载，支持 `Range`（断点续传）；`?token=` 可用 |
 | POST | `/api/android/done` | `{ ids: number[] }` → `{ deleted: number, freedBytes: number, skipped: number, errors: [] }` |
 | GET | `/api/android/status` | `{ ok:true, freeBytes, reserveBytes, publishedCount, publishedBytes, waitingTasks, downloadingTasks, version }` |
+| GET | `/api/android/speedtest/data?mb=N` | **局域网测速用**：服务端凭空吐 N MB 伪随机数据（1~500，默认 50），**完全不读磁盘**，带 `Content-Length`。慢=网络慢，与 aria2/硬盘无关 |
+| GET | `/api/android/speedtest?token=…&mb=N` | 手机浏览器直接打开的测速页：跑三轮把 MB/s 用大字显示，并按 `<8 / 8~15 / 15~40 / 40+` 给出结论 |
 
 安卓端约定：
 1. 轮询 `/api/android/files` 得到待下载清单（URL 为 `downloadUrl`，可直接交给 aria2）；
 2. 下载完成后调用 `/api/android/done` 上报 id；
 3. 失败重试、去重（已创建清单）、SD 卡搬移等由 App 本地负责。
+
+> 下载速度慢时的定位顺序：先跑 `/api/android/speedtest`（浏览器打开即可）。
+> 服务端自身能力参考值（树莓派 4B，千兆网口）：纯内存吐流 ≈400 MB/s，SD 卡读 ≈43 MB/s。
+> 若测速页只能跑到 8~11 MB/s，说明瓶颈在 wifi（典型 2.4GHz），换 5GHz 或网线才有用。
 
 ---
 
