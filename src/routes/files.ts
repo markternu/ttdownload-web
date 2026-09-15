@@ -12,7 +12,17 @@ export const filesRouter = Router();
 
 function toApi(row: NonNullable<ReturnType<typeof filesRepo.get>>): PublishedFile {
   const createdMs = Date.parse(row.created_at);
+  // 安卓端上报完成后服务器会删掉成品文件，但**数据库记录会留着**（作为历史）。
+  // 于是「已发布文件」页会列出一堆磁盘上已经不存在的文件 —— 点下载只会 404。
+  // 这里明确告诉前端：文件还在不在，前端据此把下载按钮置灰并标注。
+  let available = false;
+  try {
+    available = fs.existsSync(row.path) && fs.statSync(row.path).isFile();
+  } catch {
+    available = false;
+  }
   return {
+    available,
     id: row.id,
     name: row.name,
     title: row.title,

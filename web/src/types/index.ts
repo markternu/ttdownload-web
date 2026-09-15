@@ -60,6 +60,8 @@ export interface Task {
 }
 
 export interface PublishedFile {
+  /** 磁盘上文件是否还在（安卓下载完成后会被删除，记录仍保留）—— false 时不可下载 */
+  available: boolean
   id: number
   name: string // 发布文件名（无后缀密文，如 oqq12）
   title: string // 人类可读标题

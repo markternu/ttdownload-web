@@ -521,3 +521,36 @@ test('任务状态操作：不可暂停/不可继续时给 409 + 中文原因（
   });
   assert.equal(missing.status, 404, '不存在的任务应为 404');
 });
+
+test('已发布文件：磁盘文件被删后必须标记 available=false（前端据此置灰下载按钮）', async () => {
+  const fs = await import('node:fs');
+  const { filesRepo } = await import('../dist/core/db.js');
+  const { config } = await import('../dist/core/config.js');
+
+  // 造一个"已发布但磁盘文件已被删除"的记录（安卓下载完成后就是这个状态）
+  const id = filesRepo.add({
+    taskId: null,
+    name: 'gone1',
+    title: '已被安卓取走并删除的文件.mp4',
+    module: 'webvideo',
+    sizeBytes: 1234,
+    path: `${config.dirs.consumer}/gone1`,
+  });
+  filesRepo.trackDownload(id, 'android');
+
+  const res = await get('/api/files', { headers: { 'X-Auth-Token': token } });
+  assert.equal(res.status, 200);
+  const item = (res.json?.items ?? []).find((f) => f.id === id);
+  assert.ok(item, '应能查到这条记录（记录保留作历史）');
+  assert.equal(item.available, false, '磁盘上没有文件时必须 available=false');
+  assert.ok(item.androidDownloads >= 1, '应记录安卓下载次数');
+
+  // 文件真的存在时 available 必须是 true
+  fs.writeFileSync(`${config.dirs.consumer}/gone1`, 'x');
+  const res2 = await get('/api/files', { headers: { 'X-Auth-Token': token } });
+  const item2 = (res2.json?.items ?? []).find((f) => f.id === id);
+  assert.equal(item2.available, true, '文件存在时 available=true');
+
+  fs.rmSync(`${config.dirs.consumer}/gone1`, { force: true });
+  filesRepo.remove(id);
+});

@@ -61,6 +61,12 @@ export interface Task {
 }
 
 export interface PublishedFile {
+  /**
+   * 磁盘上这个成品文件是否还在。
+   * 安卓端上报下载完成后服务器会删除文件，但数据库记录保留作为历史 ——
+   * 此时 available=false，前端必须把下载按钮置灰（否则点了只会 404）。
+   */
+  available: boolean;
   /** 安卓端下载地址（需要 X-Auth-Token；App 自己用这个） */
   androidDownloadUrl?: string;
   /** 安卓端下载次数 / 最后时间（用于"是否已被取走但未上报"） */

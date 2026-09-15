@@ -107,16 +107,36 @@ export default function FilesPage() {
     {
       key: 'downloaded',
       header: '下载状态',
-      render: (file) => (
-        <div className="space-y-1">
-          <Badge tone={file.downloaded ? 'success' : 'warning'} dot>
-            {file.downloaded ? '已被下载' : '待下载'}
-          </Badge>
-          {file.downloadedAt ? (
-            <p className="text-[11px] text-slate-400">{formatDateTime(file.downloadedAt)}</p>
-          ) : null}
-        </div>
-      ),
+      render: (file) => {
+        const times = (file.androidDownloads ?? 0) + (file.webDownloads ?? 0)
+        return (
+          <div className="space-y-1">
+            {!file.available ? (
+              <Badge tone="neutral" dot>
+                已下载 · 服务器已删除
+              </Badge>
+            ) : file.downloaded ? (
+              <Badge tone="success" dot>
+                已被下载
+              </Badge>
+            ) : (
+              <Badge tone="warning" dot>
+                待下载
+              </Badge>
+            )}
+            {times > 0 ? (
+              <p className="text-[11px] text-slate-400">
+                已下载 {times} 次
+                {file.androidDownloads ? ` · 安卓 ${file.androidDownloads}` : ''}
+                {file.webDownloads ? ` · 网页 ${file.webDownloads}` : ''}
+              </p>
+            ) : null}
+            {file.downloadedAt ? (
+              <p className="text-[11px] text-slate-400">{formatDateTime(file.downloadedAt)}</p>
+            ) : null}
+          </div>
+        )
+      },
     },
     {
       key: 'actions',
@@ -125,15 +145,25 @@ export default function FilesPage() {
       className: 'text-right',
       render: (file) => (
         <div className="flex flex-wrap items-center justify-end gap-1.5">
-          <a
-            href={api.fileDownloadUrl(file.id, file.name)}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-slate-200 px-3 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-          >
-            <Download className="h-3.5 w-3.5" />
-            下载
-          </a>
+          {file.available ? (
+            <a
+              href={api.fileDownloadUrl(file.id, file.name)}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-slate-200 px-3 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <Download className="h-3.5 w-3.5" />
+              下载
+            </a>
+          ) : (
+            <span
+              title="安卓端已下载完成，服务器上的文件已被删除（数据库记录保留作为历史），无法再下载"
+              className="inline-flex h-8 cursor-not-allowed items-center gap-1.5 rounded-xl border border-dashed border-slate-200 px-3 text-xs font-medium text-slate-400 dark:border-slate-700 dark:text-slate-500"
+            >
+              <Download className="h-3.5 w-3.5" />
+              已下载，不可下载
+            </span>
+          )}
           <Button
             size="sm"
             variant="ghost"

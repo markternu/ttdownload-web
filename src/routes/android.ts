@@ -41,6 +41,8 @@ androidRouter.use(requireToken);
 
 function toAndroidFile(row: NonNullable<ReturnType<typeof filesRepo.get>>): Omit<PublishedFile, 'downloaded' | 'downloadedAt'> & { url: string } {
   return {
+    // 这个接口只返回"磁盘上还在"的文件（下面已过滤），所以对安卓端来说永远是 true
+    available: true,
     id: row.id,
     name: row.name,
     title: row.title,
