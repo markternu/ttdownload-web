@@ -21,9 +21,10 @@ import { cn } from '../lib/cn'
 import { formatBytes, formatDateTime, humanizeError, statusMeta } from '../lib/format'
 import { useAppData } from '../context/AppDataContext'
 import { useToast } from '../context/ToastContext'
-import type { CheckStatus, NetworkCheck, NetworkReport, ParseResult } from '../types'
+import type { CheckStatus, NetworkCheck, NetworkReport } from '../types'
 import { Badge, Button, Card, CardHeader, EmptyState, StatCard, Thumbnail } from '../components/ui'
-import { UrlInput, validateUrl } from '../components/video/UrlInput'
+import { UrlInput } from '../components/video/UrlInput'
+import { resetParse, setParseUrl, startParse, useParseState } from '../lib/parseStore'
 import { VideoPreviewCard } from '../components/video/VideoPreviewCard'
 
 /** 网络自检分组顺序与中文标题 */
@@ -55,12 +56,19 @@ export default function HomePage() {
   const toast = useToast()
   const { stats, system, refreshStats } = useAppData()
 
-  const [url, setUrl] = useState('')
-  const [parsing, setParsing] = useState(false)
+  // 「解析视频」的状态放在组件外（parseStore）：切到别的页面再回来，地址/结果/进度都还在。
+  // 以前是 useState，卸载就丢 —— 用户切去看一眼「任务」再回来，解析结果就没了。
+  const { url, parsing, result, error: parseError, startedAt } = useParseState()
   const [adding, setAdding] = useState(false)
-  const [parseError, setParseError] = useState<string | null>(null)
-  const [result, setResult] = useState<ParseResult | null>(null)
   const [platforms, setPlatforms] = useState<string[]>(FALLBACK_PLATFORMS)
+  const [now, setNow] = useState(() => Date.now())
+
+  // 解析中时每秒刷新一次"已等待 N 秒"，让用户知道它没卡死
+  useEffect(() => {
+    if (!parsing) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [parsing])
 
   // 网络自检（不阻塞首屏渲染，失败只显示一行红字）
   const [network, setNetwork] = useState<NetworkReport | null>(null)
@@ -105,29 +113,17 @@ export default function HomePage() {
 
   const handleParse = useCallback(
     async (target: string) => {
-      const check = validateUrl(target)
-      if (!check.ok) {
-        setParseError(check.message)
-        return
-      }
-      setParsing(true)
-      setParseError(null)
-      setResult(null)
       try {
-        const data = await api.webvideoParse(check.url)
-        setResult(data)
+        const data = await startParse(target)
+        if (!data) return
         if (data.degraded) {
-          toast.warning('解析受限，仍可下载', data.parseError ?? '下载时会自动尝试多种方式')
+          toast.warning('解析失败', data.parseError ?? '没拿到可用格式，直接下载多半会失败')
         } else {
           toast.success('解析成功', data.title)
         }
       } catch (err) {
-        const code = (err as { code?: string }).code ?? ''
-        const message = humanizeError(code, (err as Error).message)
-        setParseError(message)
+        const message = humanizeError((err as { code?: string }).code ?? '', (err as Error).message)
         toast.error('解析失败', message)
-      } finally {
-        setParsing(false)
       }
     },
     [toast],
@@ -153,8 +149,7 @@ export default function HomePage() {
           title: result.title,
         })
         toast.success('已加入下载队列', `${result.title} · ${quality.toUpperCase()} · ${format.toUpperCase()}`)
-        setResult(null)
-        setUrl('')
+        resetParse()
         void refreshStats()
         if (res?.task?.id) navigate('/tasks')
       } catch (err) {
@@ -186,10 +181,21 @@ export default function HomePage() {
         </p>
       </section>
 
+      {/* 解析中且切回来时，明确告诉用户它还在跑（不是卡死） */}
+      {parsing && startedAt ? (
+        <div className="mx-auto flex max-w-2xl items-center justify-center gap-2 rounded-xl bg-brand-50 px-3 py-2 text-xs text-brand-700 dark:bg-brand-500/10 dark:text-brand-300">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>
+            正在解析，已等待 {Math.max(0, Math.round((now - startedAt) / 1000))} 秒 ——
+            你可以先去别的页面，解析不会中断，回来自动显示结果
+          </span>
+        </div>
+      ) : null}
+
       {/* URL 输入区 */}
       <UrlInput
         value={url}
-        onChange={setUrl}
+        onChange={setParseUrl}
         onParse={(target) => void handleParse(target)}
         loading={parsing}
         error={parseError}

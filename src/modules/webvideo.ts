@@ -127,6 +127,22 @@ function normalizeFormat(f: YtDlpFormat): FormatOption | null {
   };
 }
 
+/**
+ * 解析时要用的「player client」参数。
+ *
+ * ⚠️ 这是实测踩出来的大坑：**同一个视频、同一份 cookies**，
+ *     · yt-dlp 默认客户端 → 只返回 5 个格式，**最高 360p**（用户看到"只能下 360p"就是这个原因）
+ *     · `player_client=web_safari` → 155 个格式，**1080p/720p 都有**
+ *    下载用的策略阶梯里本来就有 web_safari 那一档，但**解析**走的是默认参数，
+ *    于是"预览里只有 360p"——明明浏览器里能看 1080p。
+ *    （ios/android_vr/tv 在这台机器上直接报错，所以按 web_safari 优先。）
+ */
+export function parseClientArgs(url: string): string[] {
+  const platform = detectPlatform(url);
+  if (platform !== 'YouTube') return [];
+  return ['--extractor-args', YOUTUBE_TRY_CLIENTS];
+}
+
 export interface ParseOptions {
   /** 上传/指定的 cookies 文件（存在才带） */
   cookiesFile?: string | null;
@@ -153,6 +169,7 @@ export async function parseVideo(
     : opts.cookiesFromBrowser
       ? ['--cookies-from-browser', opts.cookiesFromBrowser]
       : [];
+  const clientArgs = parseClientArgs(url);
   const args = [
     '-J',
     '--no-warnings',
@@ -160,6 +177,7 @@ export async function parseVideo(
     '--socket-timeout',
     '20',
     ...cookiesArgs,
+    ...clientArgs,
     ...(opts.extraArgs ?? []),
     url,
   ];
@@ -169,6 +187,7 @@ export async function parseVideo(
     bin: ytdlpBin,
     args,
     cookies: opts.cookiesFile ? opts.cookiesFile : opts.cookiesFromBrowser ? `browser:${opts.cookiesFromBrowser}` : '(无)',
+    client: clientArgs.length ? YOUTUBE_TRY_CLIENTS : '(默认)',
   });
   const info = await new Promise<YtDlpInfo>((resolve, reject) => {
     const child = spawn(ytdlpBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });

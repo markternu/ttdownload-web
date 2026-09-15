@@ -29,6 +29,8 @@ if (!hasBuild) {
     `#!/bin/bash
 if [ "$1" = "--version" ]; then echo "2024.01.01"; exit 0; fi
 if [ "$1" = "-J" ]; then
+  # BROWSER_PARSE_DELAY: 人为拖慢解析，用来复现"解析中途切走页面"
+  if [ -n "$BROWSER_PARSE_DELAY" ]; then sleep "$BROWSER_PARSE_DELAY"; fi
   if [ -n "$BROWSER_PARSE_FAIL" ]; then
     echo "$BROWSER_PARSE_FAIL" >&2
     exit 1
@@ -479,6 +481,54 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     const chromiumBlocks = await page.locator('text=/chromium/').count();
     assert.ok(chromiumBlocks > 0, '应说明浏览器依赖情况');
     await page.close();
+  });
+
+  test('★回归：解析中途点侧边栏去「任务」再回「首页」，解析不能丢（原来会变成空首页）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    process.env.BROWSER_PARSE_DELAY = '6'; // 让解析慢 6 秒，好切走
+    try {
+      const page = await newPage();
+      await page.goto(base, { waitUntil: 'networkidle' });
+      await page.getByPlaceholder('粘贴视频链接').first().fill('https://www.youtube.com/watch?v=abc123');
+      await page.getByRole('button', { name: /解析视频/ }).first().click();
+
+      // 趁"解析中"点侧边栏去任务页（SPA 切页，不会中断请求）
+      await page.waitForTimeout(500);
+      await page.getByRole('link', { name: '任务' }).first().click();
+      await page.waitForSelector('text=任务', { timeout: 15000 });
+
+      // 切回首页：地址必须还在，解析要么还在转、要么已经出结果
+      await page.getByRole('link', { name: '首页' }).first().click();
+      await page.waitForTimeout(400);
+      assert.equal(
+        await page.getByPlaceholder('粘贴视频链接').first().inputValue(),
+        'https://www.youtube.com/watch?v=abc123',
+        '切回来地址不能丢（原来会清空成空首页）',
+      );
+
+      // 注意：不能用 text=浏览器测试视频 来等 —— 首页的「最近任务」里也可能有同名任务（前面的用例建的），
+      // 会提前匹配到。直接等结果卡片上的按钮最可靠。
+      const addBtn = page.getByRole('button', { name: /加入下载队列/ }).first();
+      try {
+        await addBtn.waitFor({ state: 'visible', timeout: 25000 });
+      } catch {
+        const bodyText = (await page.locator('body').innerText()).replace(/\s+/g, ' ').slice(0, 300);
+        assert.fail(`切回来应能看到解析结果（加入下载队列 按钮）；页面文本=${bodyText}`);
+      }
+      assert.ok(await addBtn.isVisible(), '切回来应能看到解析结果并能加入队列');
+
+      // 整页刷新：地址仍要保留（请求会被浏览器中断，所以只要求地址在 + 有明确提示）
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(500);
+      assert.equal(
+        await page.getByPlaceholder('粘贴视频链接').first().inputValue(),
+        'https://www.youtube.com/watch?v=abc123',
+        '刷新后地址也要保留',
+      );
+      await page.close();
+    } finally {
+      delete process.env.BROWSER_PARSE_DELAY;
+    }
   });
 
   test('页面无 JS 报错', async (t) => {

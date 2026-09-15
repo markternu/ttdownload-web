@@ -53,6 +53,7 @@ fs.writeFileSync(
   fakeBin,
   `#!/bin/bash
 if [ "$1" = "--version" ]; then echo "2026.08.19"; exit 0; fi
+echo "ARGS: $*" >> "${path.join(root, 'parse-calls.log')}"
 case "$FIXTURE" in
   vertical) cat <<'J'
 ${JSON.stringify(VERTICAL_JSON)}
@@ -72,7 +73,7 @@ exit 0
   { mode: 0o755 },
 );
 
-const { parseVideo } = await import('../dist/modules/webvideo.js');
+const { parseVideo, parseClientArgs } = await import('../dist/modules/webvideo.js');
 
 test('resolution 契约：WxH 必须被归一成 "1080p"/"720p"（不能把 1920x1080 透传给前端）', async () => {
   delete process.env.FIXTURE;
@@ -111,4 +112,37 @@ test('纯音频内容：只报 audio，不谎报分辨率', async () => {
   assert.deepEqual(r.formats.map((f) => f.resolution), ['audio']);
   assert.equal(r.defaultFormatId, 'a');
   delete process.env.FIXTURE;
+});
+
+
+test('★解析必须用 web_safari 客户端（否则 YouTube 只给 360p —— 用户实际踩到）', async () => {
+  const calls = path.join(root, 'parse-calls.log');
+  const readCalls = () =>
+    fs.readFileSync(calls, 'utf8').split('\n').filter((l) => l.includes('-J'));
+
+  fs.writeFileSync(calls, '');
+  await parseVideo('https://www.youtube.com/watch?v=jz1Ga7GG0Uk', fakeBin, 20000);
+  const ytCalls = readCalls();
+  assert.ok(ytCalls.length >= 1, '应有解析调用');
+  assert.match(
+    ytCalls[ytCalls.length - 1],
+    /--extractor-args youtube:player_client=web_safari/,
+    'YouTube 解析必须带 player_client=web_safari（默认客户端只返回 360p）',
+  );
+
+  // 非 YouTube 站点不能带 youtube 专用参数
+  fs.writeFileSync(calls, '');
+  await parseVideo('https://v.douyin.com/abc/', fakeBin, 20000);
+  const dyCalls = readCalls();
+  assert.ok(dyCalls.length >= 1);
+  assert.doesNotMatch(dyCalls[dyCalls.length - 1], /player_client=web_safari/, '别的平台不该带 YouTube 客户端参数');
+});
+
+test('parseClientArgs：只给 YouTube 加，且 web_safari 排在最前', () => {
+  const yt = parseClientArgs('https://www.youtube.com/watch?v=x');
+  assert.equal(yt.length, 2);
+  assert.equal(yt[0], '--extractor-args');
+  assert.match(yt[1], /^youtube:player_client=web_safari/);
+  assert.deepEqual(parseClientArgs('https://www.bilibili.com/video/BV1x'), []);
+  assert.deepEqual(parseClientArgs('https://v.douyin.com/x/'), []);
 });
