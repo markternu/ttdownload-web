@@ -253,11 +253,11 @@ test('nginx 装了但没在运行 → 明确警告（否则用户以为开了却
       r.json.warnings.some((w) => /nginx 服务当前没有在运行/.test(w)),
       `应警告 nginx 没在运行，实际 warnings=${JSON.stringify(r.json.warnings)}`,
     );
-    // 开启仍然会写配置（这是脚本的既定行为：配置对了就行），但警告一直在
+    // 开启时会**自动把 nginx 启动起来**（不能出现"开关已开但地址打不开"）
     const on = await api('/api/bt/proxy', { method: 'POST', body: JSON.stringify({ enabled: true }) });
     assert.equal(on.json.enabled, true);
-    assert.equal(on.json.nginxRunning, false);
-    assert.ok(on.json.warnings.some((w) => /没有在运行/.test(w)));
+    assert.equal(on.json.nginxRunning, true, '开启时应自动启动 nginx');
+    assert.equal(fs.existsSync(nginx.nginxStopped), false, 'stopped 标记应被清除（服务已启动）');
     await api('/api/bt/proxy', { method: 'POST', body: JSON.stringify({ enabled: false }) });
   } finally {
     fs.rmSync(nginx.nginxStopped, { force: true });
@@ -265,4 +265,22 @@ test('nginx 装了但没在运行 → 明确警告（否则用户以为开了却
   const back = await api('/api/bt/proxy');
   assert.equal(back.json.nginxRunning, true, '恢复正常后应报告 nginx 在运行');
   assert.deepEqual(back.json.warnings, []);
+});
+
+test('★「配置写了」不等于「能访问」：接口必须带实测结论 verified/verifyDetail', async () => {
+  // 测试环境里 127.0.0.1:80 上没有反代（假 nginx 只改配置不起服务），
+  // 所以开启后 verified 必须是 false 并给出说明 —— 而不是只报 enabled=true。
+  const on = await api('/api/bt/proxy', { method: 'POST', body: JSON.stringify({ enabled: true }) });
+  assert.equal(on.status, 200);
+  assert.equal(on.json.enabled, true);
+  assert.equal(on.json.verified, false, `假 nginx 起不了真实反代，实测必须为 false（实际 ${JSON.stringify(on.json.verifyDetail)}）`);
+  assert.match(String(on.json.verifyDetail), /连不上|HTTP/, '要说明为什么访问不通');
+  assert.ok(
+    (on.json.warnings ?? []).some((w) => /实测访问失败/.test(w)),
+    `实测失败必须进 warnings，实际 ${JSON.stringify(on.json.warnings)}`,
+  );
+
+  const off = await api('/api/bt/proxy', { method: 'POST', body: JSON.stringify({ enabled: false }) });
+  assert.equal(off.json.enabled, false);
+  assert.equal(off.json.verified, null, '关闭后不该有实测结论');
 });

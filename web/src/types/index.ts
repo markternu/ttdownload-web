@@ -411,6 +411,13 @@ export interface BtProxyStatus {
   nginxVersion: string
   /** nginx 服务是否在运行：false = 配置写对了但外网照样打不开（需先 systemctl start nginx）；null = 判断不了 */
   nginxRunning: boolean | null
+  /**
+   * 实测结论：反代地址是否真的能访问到 transmission（true=已到达 / false=没转发成功 / null=未开启）。
+   * 「配置写进去了」不等于「能访问」—— 这一项才是开关是否真的生效的标准。
+   */
+  verified: boolean | null
+  /** 实测说明（例如「HTTP 401（… 已到达 transmission）」或「连不上 …」） */
+  verifyDetail: string
   /** 不能自动配置时的原因（'' 表示正常） */
   reason: string
   /** 反代开关脚本路径 */

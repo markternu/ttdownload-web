@@ -1,19 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  AlertTriangle,
-  Code2,
-  Copy,
-  ExternalLink,
-  FileArchive,
-  Globe,
-  Loader2,
-  Magnet,
-  RefreshCw,
-  ShieldAlert,
-  Trash2,
-  UploadCloud,
-  XCircle,
-} from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Code2, Copy, ExternalLink, FileArchive, Globe, Loader2, Magnet, RefreshCw, ShieldAlert, Trash2, UploadCloud, XCircle } from 'lucide-react'
 import {
   Badge,
   Button,
@@ -493,9 +479,23 @@ export default function BtPage() {
               transmission {btProxy?.transmission.reachable ? '可达' : '不可达'}
             </Badge>
             <Badge tone="neutral">目标 {btProxy?.target ?? '—'}</Badge>
-            <Badge tone={btProxy?.enabled ? 'success' : 'neutral'}>
-              {btProxy?.enabled ? '反代已生效' : '反代未开启'}
-            </Badge>
+            {btProxy?.enabled ? (
+              btProxy.verified === true ? (
+                <Badge tone="success" dot>
+                  已实测可访问
+                </Badge>
+              ) : btProxy.verified === false ? (
+                <Badge tone="danger" dot>
+                  已开启但访问不通
+                </Badge>
+              ) : (
+                <Badge tone="warning" dot>
+                  已开启（未实测）
+                </Badge>
+              )
+            ) : (
+              <Badge tone="neutral">反代未开启</Badge>
+            )}
             {btProxy?.transmission.version ? (
               <Badge tone="neutral">v{btProxy.transmission.version}</Badge>
             ) : null}
@@ -594,6 +594,23 @@ export default function BtPage() {
                   <span className="min-w-0 break-words">
                     这个地址是按 nginx 默认端口（80/443）推断的：{btProxy.urlHint}
                   </span>
+                </p>
+              ) : null}
+              {btProxy.verifyDetail ? (
+                <p
+                  className={cn(
+                    'flex items-start gap-1.5 rounded-lg px-2 py-1.5 text-[11px]',
+                    btProxy.verified === false
+                      ? 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300'
+                      : 'bg-emerald-50/70 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
+                  )}
+                >
+                  {btProxy.verified === false ? (
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  ) : (
+                    <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  )}
+                  <span className="min-w-0 break-words">实测：{btProxy.verifyDetail}</span>
                 </p>
               ) : null}
               <p className="break-words text-[11px] leading-relaxed text-emerald-700/90 dark:text-emerald-300/90">

@@ -183,6 +183,54 @@ nginx_running() {
 }
 nginx_test_output() { "$NGINX_BIN" -t -c "$MAIN_CONF" 2>&1 || true; }
 
+# nginx 没在运行时尝试把它启动起来（配置写得再对，服务没跑也白搭）
+# 返回 0=在运行（或成功启动），1=启动失败
+ensure_nginx_running() {
+  [ "$(nginx_running)" = "true" ] && return 0
+  log "nginx 当前没有在运行，尝试启动 ${NGINX_SERVICE} ..."
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl start "$NGINX_SERVICE" >/dev/null 2>&1 || true
+  else
+    "$NGINX_BIN" -c "$MAIN_CONF" >/dev/null 2>&1 || true
+  fi
+  local i=0
+  while [ "$i" -lt 12 ]; do
+    if [ "$(nginx_running)" = "true" ]; then
+      log "nginx 已启动"
+      return 0
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# 实测「反代地址到底通不通」—— 这是"开启成功"的唯一标准。
+# transmission 的 RPC 在未带会话 id 时会返回 409、要求认证时返回 401，都说明**已经转发到了**；
+# 404 / 502 / 000 才是没转发成功。
+VERIFY_DETAIL=""
+verify_proxy() {
+  local base="${VERIFY_BASE_URL:-http://127.0.0.1}"
+  local url="${base}${SUB_PATH}/rpc"
+  local code
+  code="$(curl -s -o /dev/null -m 6 -w '%{http_code}' "$url" 2>/dev/null || true)"
+  [ -n "$code" ] || code=000
+  case "$code" in
+    200|204|401|403|409)
+      VERIFY_DETAIL="HTTP ${code}（${url} 已到达 transmission）"
+      return 0
+      ;;
+    000)
+      VERIFY_DETAIL="连不上 ${url}（nginx 未运行，或没监听对应端口）"
+      return 1
+      ;;
+    *)
+      VERIFY_DETAIL="HTTP ${code}（${url} 没有正确转发到 transmission）"
+      return 1
+      ;;
+  esac
+}
+
 reload_nginx() {
   [ "$DO_RELOAD" = 1 ] || { log "按要求跳过 reload"; return 0; }
   if command -v systemctl >/dev/null 2>&1 && systemctl reload "$NGINX_SERVICE" 2>/dev/null; then
@@ -250,8 +298,14 @@ status_json() {
   if command -v "$NGINX_BIN" >/dev/null 2>&1; then
     running="$(nginx_running)"
   fi
-  printf '{"enabled":%s,"subPath":"%s","target":"%s","snippet":"%s","serverFile":"%s","nginxVersion":"%s","nginxRunning":%s,"reason":"%s"}' \
-    "$enabled" "$SUB_PATH" "$TARGET" "$SNIPPET" "${server_file//\"/}" "${version//\"/}" "$running" "${reason//\"/}"
+  # 「已开启」必须配一个实测结论：配置写了 ≠ 真的能访问
+  local verified="null" vdetail=""
+  if [ "$enabled" = true ]; then
+    if verify_proxy; then verified=true; else verified=false; fi
+    vdetail="$VERIFY_DETAIL"
+  fi
+  printf '{"enabled":%s,"subPath":"%s","target":"%s","snippet":"%s","serverFile":"%s","nginxVersion":"%s","nginxRunning":%s,"verified":%s,"verifyDetail":"%s","reason":"%s"}' \
+    "$enabled" "$SUB_PATH" "$TARGET" "$SNIPPET" "${server_file//\"/}" "${version//\"/}" "$running" "$verified" "${vdetail//\"/}" "${reason//\"/}"
 }
 
 snippet_body() {
@@ -353,8 +407,23 @@ enable() {
   log "已在 ${server_file}:${srv_line} 插入 include"
 
   if nginx_ok; then
+    # 关键：nginx 没在跑的话，先把服务拉起来；拉不起来就回滚并明确报错，
+    # 绝不能出现「开关显示已开启，但地址根本打不开」这种假成功（线上同样会踩）。
+    if ! ensure_nginx_running; then
+      warn "nginx 没有在运行，尝试启动也失败了："
+      systemctl status "$NGINX_SERVICE" --no-pager -l 2>&1 | head -8 | sed 's/^/    /' >&2 || true
+      cp -a "${backup_dir}/$(basename "$server_real")" "$server_real" 2>/dev/null || true
+      rm -f "$SNIPPET"
+      nginx_ok && reload_nginx
+      die "nginx 未运行且无法启动，已回滚（反代未生效；请先修好 nginx 再开启）"
+    fi
     reload_nginx
-    log "✅ 已开启：http://<你的域名>${SUB_PATH}/web/  →  http://${TARGET}"
+    if verify_proxy; then
+      log "✅ 已开启并实测可访问：${VERIFY_DETAIL}"
+    else
+      warn "配置已写入，但实测访问失败：${VERIFY_DETAIL}"
+      warn "  请检查 transmission 是否在跑、以及 nginx 是否正常监听"
+    fi
   else
     warn "nginx -t 失败，正在回滚："
     nginx_test_output | sed 's/^/    /' >&2
@@ -392,7 +461,9 @@ EOF
       nginx_test_output | sed 's/^/    /' >&2
     fi
   fi
-  [ "$removed" = 1 ] && log "✅ 已关闭：外界无法再访问 ${SUB_PATH}/"
+  if [ "$removed" = 1 ]; then
+    log "✅ 已关闭：外界无法再访问 ${SUB_PATH}/"
+  fi
   printf 'TTDL_NGINX_PROXY_RESULT=%s\n' "$(status_json)"
 }
 

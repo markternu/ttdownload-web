@@ -278,3 +278,77 @@ test('status 报告 nginx 是否在运行（装了但没跑必须能看出来）
   assert.equal(parseResult(sb.run(['status'])).nginxRunning, true);
   fs.rmSync(sb.root, { recursive: true, force: true });
 });
+
+test('★nginx 没在运行时会自动启动它（不能出现"开关已开但地址打不开"的假成功）', () => {
+  const sb = makeSandbox();
+  fs.writeFileSync(sb.nginxStopped, '1'); // 模拟 nginx 处于 stopped
+  // 用一个本地 HTTP 服务冒充 transmission（返回 401 = 已到达），走 VERIFY_BASE_URL
+  const r = parseResult(sb.run(['enable'], { VERIFY_BASE_URL: 'http://127.0.0.1:1' })); // 故意连不上
+  assert.equal(r.enabled, true, '配置应写入成功');
+  assert.equal(r.nginxRunning, true, '应把 nginx 启动起来（假 systemctl start 会清掉 stopped 标记）');
+  assert.equal(fs.existsSync(sb.nginxStopped), false, 'nginx 应已从 stopped 变为 running');
+  assert.equal(r.verified, false, '连不上时实测结论必须是 false');
+  assert.match(String(r.verifyDetail), /连不上|HTTP/, '要给出实测说明');
+  fs.rmSync(sb.root, { recursive: true, force: true });
+});
+
+test('★nginx 启动失败时必须回滚并报错（而不是假装开启成功）', () => {
+  const sb = makeSandbox();
+  fs.writeFileSync(sb.nginxStopped, '1');
+  fs.writeFileSync(sb.nginxCannotStart, '1'); // 启动一定失败
+  const before = fs.readFileSync(sb.site80, 'utf8');
+  let err;
+  try {
+    sb.run(['enable']);
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err, 'nginx 起不来时应报错');
+  assert.match(String(err.stderr), /已回滚|无法启动/, '应说明已回滚');
+  assert.equal(fs.readFileSync(sb.site80, 'utf8'), before, '配置文件必须恢复原样');
+  assert.equal(fs.existsSync(sb.snippet()), false, 'snippet 应被删除');
+  assert.equal(parseResult(sb.run(['status'])).enabled, false, '状态应回到未开启');
+  fs.rmSync(sb.root, { recursive: true, force: true });
+});
+
+test('★status 必须给出「实测能不能访问」（enabled=true 才判；关了就是 null）', async () => {
+  const sb = makeSandbox();
+  // 注意：不能用同进程的 http 服务 —— 脚本是用 execFileSync 同步跑的，会阻塞事件循环，
+  // 同进程的服务永远不回包。所以起一个**独立子进程**当假 transmission。
+  const port = 18080 + Math.floor(Math.random() * 500);
+  const { spawn } = await import('node:child_process');
+  const srv = spawn(
+    process.execPath,
+    ['-e', `require('http').createServer((q,s)=>s.writeHead(409).end('x')).listen(${port},'127.0.0.1')`],
+    { stdio: 'ignore' },
+  );
+  // 等它就绪
+  const net = await import('node:net');
+  for (let i = 0; i < 50; i += 1) {
+    const ok = await new Promise((r) => {
+      const c = net.connect(port, '127.0.0.1');
+      c.once('connect', () => {
+        c.destroy();
+        r(true);
+      });
+      c.once('error', () => r(false));
+    });
+    if (ok) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const env = { VERIFY_BASE_URL: `http://127.0.0.1:${port}` };
+  try {
+    assert.equal(parseResult(sb.run(['status'], env)).verified, null, '没开启时不该有实测结论');
+    const on = parseResult(sb.run(['enable'], env));
+    assert.equal(on.enabled, true);
+    assert.equal(on.verified, true, `应实测通过，实际 ${on.verifyDetail}`);
+    assert.match(String(on.verifyDetail), /已到达 transmission/);
+    assert.equal(parseResult(sb.run(['status'], env)).verified, true, 'status 也要带实测结论');
+    const off = parseResult(sb.run(['disable'], env));
+    assert.equal(off.enabled, false);
+    assert.equal(off.verified, null, '关闭后不该再有实测结论');
+  } finally {
+    srv.kill('SIGKILL');
+    fs.rmSync(sb.root, { recursive: true, force: true });
+  }
+});

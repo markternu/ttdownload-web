@@ -39,6 +39,9 @@ export interface BtProxyScriptResult {
   serverFile: string;
   nginxVersion: string;
   nginxRunning?: boolean | string;
+  /** 实测：这个反代地址到底通不通（true=已到达 transmission） */
+  verified?: boolean | string | null;
+  verifyDetail?: string;
   reason: string;
 }
 
@@ -74,6 +77,13 @@ export interface BtProxyStatus {
   nginxVersion: string;
   /** nginx 服务是否在运行：false = 配置写对了但外网照样打不开；null = 无法判断 */
   nginxRunning: boolean | null;
+  /**
+   * 实测结论：反代地址是否真的能访问到 transmission。
+   * true=已到达（transmission 回 401/409 等）；false=没转发成功；null=未开启/无法判断。
+   * 「配置写进去了」不等于「能访问」——这一项才是开关的真正标准。
+   */
+  verified: boolean | null;
+  verifyDetail: string;
   /** 不可用/需人工处理的原因（'' 表示一切正常） */
   reason: string;
   scriptPath: string;
@@ -360,6 +370,13 @@ export async function getBtProxyStatus(opts: BtProxyStatusOptions | string = {})
   else if (script?.reason) warnings.push(script.reason);
 
   const nginxRunning = script?.nginxRunning === true ? true : script?.nginxRunning === false ? false : null;
+  if (script?.verified === false) {
+    warnings.push(
+      `反代配置已写入，但**实测访问失败**：${script.verifyDetail || '未知原因'}。` +
+        `开关虽然显示已开启，但地址现在打不开 —— 请检查 nginx 是否在运行、transmission 是否在 9091 上`,
+    );
+  }
+
   if (nginxRunning === false) {
     warnings.push(
       `nginx 服务当前没有在运行（systemctl status ${process.env.NGINX_SERVICE || 'nginx'}）—— 反代配置即使写进去了，外网也打不开，请先启动 nginx`,
@@ -396,6 +413,8 @@ export async function getBtProxyStatus(opts: BtProxyStatusOptions | string = {})
     serverFile: script?.serverFile ?? '',
     nginxVersion: script?.nginxVersion ?? '',
     nginxRunning,
+    verified: script?.verified === true ? true : script?.verified === false ? false : null,
+    verifyDetail: script?.verifyDetail ?? '',
     reason: script?.reason ?? scriptError,
     scriptPath,
     scriptFound,

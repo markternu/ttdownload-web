@@ -316,13 +316,23 @@ exit 0
     { mode: 0o755 },
   );
   const nginxStopped = path.join(root, 'nginx-stopped');
+  const nginxCannotStart = path.join(root, 'nginx-cannot-start');
   fs.writeFileSync(
     path.join(binDir, 'systemctl'),
     `#!/bin/bash
-if [ "\${1:-}" = "is-active" ]; then
-  [ -f "${nginxStopped}" ] && exit 3
-  exit 0
-fi
+case "\${1:-}" in
+  is-active)
+    [ -f "${nginxStopped}" ] && exit 3
+    exit 0
+    ;;
+  start)
+    echo "systemctl $@" >> "${reloadLog}"
+    # 模拟「启动失败」：标记存在则起不来
+    [ -f "${nginxCannotStart}" ] && exit 1
+    rm -f "${nginxStopped}"
+    exit 0
+    ;;
+esac
 # 只记录真正的 reload：is-active 是查询，不该被当成「动过 nginx」
 echo "systemctl $@" >> "${reloadLog}"
 exit 0
@@ -353,6 +363,8 @@ exit 0
     breakAlways,
     /** 标记文件：存在则假 systemctl 认为 nginx 没在运行 */
     nginxStopped,
+    /** 标记文件：存在则假 systemctl start 失败 */
+    nginxCannotStart,
     /** 子路径对应的 snippet 路径 */
     snippet: (tag = 'transmission') => path.join(confDir, 'snippets', `ttdownload-proxy-${tag}.conf`),
     /** 可直接塞进 setupRuntime 的 env（让被测代码用这个假 nginx） */
