@@ -618,6 +618,35 @@ export interface ResolvedCookies {
   note: string;
 }
 
+/**
+ * yt-dlp 用的「工作副本」。
+ *
+ * ⚠️ 实测踩到的坑：**yt-dlp 会把 `--cookies` 指向的文件回写**（每次运行 mtime 都变）。
+ *    我们以前直接把**用户上传的原件**交给它，结果 YouTube 一旦下发"会话失效"的响应，
+ *    yt-dlp 就把「SID 被清掉」之后的状态写回用户文件 —— 用户的登录态就这么被工具悄悄毁了，
+ *    而且文件没有 .bak、日志里也没有上传记录，完全看不出来（用户会以为"登录态也失败"）。
+ *    所以：**永远只把副本交给 yt-dlp**，原件保持原样（那是用户唯一的凭据备份）。
+ */
+export function workingCopyOf(source: string): string {
+  const dir = path.join(config.dirs.state, 'cookies-work');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const base = path.basename(source).replace(/[^\w.-]/g, '_') || 'cookies.txt';
+  const out = path.join(dir, base);
+  try {
+    const src = fs.statSync(source);
+    const dst = fs.existsSync(out) ? fs.statSync(out) : null;
+    // 源文件更新了（用户重新上传）或副本丢了/大小不符 → 重新拷贝
+    if (!dst || dst.mtimeMs < src.mtimeMs || dst.size !== src.size) {
+      fs.copyFileSync(source, out);
+      fs.chmodSync(out, 0o600);
+    }
+  } catch (e) {
+    scoped.warn(`[MARK:${COOKIE_MARKER}] 建立 cookies 工作副本失败，退回原件：${(e as Error).message}`);
+    return source;
+  }
+  return out;
+}
+
 /** 合并后的临时文件路径（每个站点一份，避免每次请求都新建） */
 function mergedFileFor(profile: CookieSiteProfile | null, userFile: string | null, harvested: string | null): string {
   const tag = profile?.id ?? 'generic';
@@ -644,6 +673,12 @@ export async function cookiesForUrl(
     harvested: false,
     note: userCookiesFile ? '使用上传的 cookies.txt' : '未使用 cookies',
   };
+
+  // ★ 无论如何都不能把用户原件交给 yt-dlp（它会回写）：统一换成工作副本
+  if (base.cookiesFile) {
+    base.cookiesFile = workingCopyOf(base.cookiesFile);
+    base.note = `${base.note}（已用工作副本，保护上传的原件）`;
+  }
 
   const wantHarvest =
     !!profile &&

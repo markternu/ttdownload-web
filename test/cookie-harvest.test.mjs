@@ -154,8 +154,14 @@ test('cookiesForUrl：没开自动抓取的站点（如小红书）原样使用�
   const userFile = path.join(root, 'state', 'user-cookies.txt');
   const r = await cookies.cookiesForUrl('https://www.xiaohongshu.com/explore/1', userFile);
   assert.equal(calls, 0, '未开启自动抓取的站点不应启动浏览器');
-  assert.equal(r.cookiesFile, userFile);
   assert.equal(r.harvested, false);
+  // 关键：交出去的必须是**副本**，不能是用户原件（yt-dlp 会回写它）
+  assert.notEqual(r.cookiesFile, userFile, '绝不能把用户上传的原件交给 yt-dlp');
+  assert.equal(
+    fs.readFileSync(r.cookiesFile, 'utf8'),
+    fs.readFileSync(userFile, 'utf8'),
+    '副本内容要与原件一致',
+  );
 });
 
 test('harvestStatus：给出站点、开关与浏览器可用性', () => {
@@ -345,4 +351,30 @@ test('★B站 412 的错误提示必须指向「出口 IP 归属」，而不是�
   assert.match(msg, /出口 IP|机房|海外/, '要指出是出口 IP 归属问题');
   assert.match(msg, /bilibili\.com|b23\.tv/, '要指出哪些域名要走直连');
   assert.doesNotMatch(msg, /上传 cookies\.txt（或填/, '不能又让用户去导 cookies（那是错的方向）');
+});
+
+test('★回归：yt-dlp 会回写 cookies 文件 —— 所以只能给它副本，用户原件必须毫发无损', async () => {
+  const dir = path.join(root, 'state');
+  const userFile = path.join(dir, 'user-original.txt');
+  const original = [
+    '# Netscape HTTP Cookie File',
+    '.youtube.com\tTRUE\t/\tTRUE\t1900000000\tSID\tMY_LOGIN_SID',
+    '.youtube.com\tTRUE\t/\tTRUE\t1900000000\tLOGIN_INFO\tMY_LOGIN_INFO',
+    '',
+  ].join('\n');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(userFile, original);
+
+  const r = await cookies.cookiesForUrl('https://www.youtube.com/watch?v=x', userFile);
+  assert.ok(r.cookiesFile, '应给出 cookies 文件');
+  assert.notEqual(r.cookiesFile, userFile, 'YouTube 不走自动抓取，更要给副本');
+
+  // 模拟 yt-dlp 回写：把副本清空/改坏（真实场景是 YouTube 下发会话失效，yt-dlp 把结果写回）
+  fs.writeFileSync(r.cookiesFile, '# Netscape HTTP Cookie File\n', { mode: 0o600 });
+  assert.equal(fs.readFileSync(userFile, 'utf8'), original, '用户原件必须一个字节都没变');
+
+  // 副本丢了/被改小 → 下次自动重新拷贝
+  const again = await cookies.cookiesForUrl('https://www.youtube.com/watch?v=x', userFile);
+  assert.equal(fs.readFileSync(again.cookiesFile, 'utf8'), original, '下一次应重新从原件拷贝');
+  assert.equal(fs.readFileSync(userFile, 'utf8'), original, '原件依然不能被动');
 });
