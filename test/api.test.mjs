@@ -277,6 +277,39 @@ test('安卓接口：鉴权 / 清单 / 下载(Range) / 上报删除', async () =
   assert.equal(filesAfter.json.total, 0);
 });
 
+test('局域网测速端点：不读硬盘吐满 N MB / 需 token / 页面可用', async () => {
+  // 无 token -> 401（测速口不能被公网随便刷流量）
+  const noTok = await fetch(`${base}/api/android/speedtest/data?mb=1`);
+  assert.equal(noTok.status, 401);
+  const noTokPage = await fetch(`${base}/api/android/speedtest?mb=1`);
+  assert.equal(noTokPage.status, 401);
+
+  // 吐满指定字节数，且带 Content-Length（浏览器才能算速率）
+  const r = await fetch(`${base}/api/android/speedtest/data?mb=2`, { headers: { 'X-Auth-Token': token } });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'application/octet-stream');
+  assert.equal(r.headers.get('content-length'), String(2 * 1024 * 1024));
+  const body = Buffer.from(await r.arrayBuffer());
+  assert.equal(body.length, 2 * 1024 * 1024);
+  // 伪随机（不是全 0），走压缩代理也不会被压小
+  assert.ok(body.subarray(0, 1024).some((b) => b !== 0), '内容不应全为 0');
+
+  // 上限保护：mb 再大也不能被拿来打服务端（只验头部，然后立刻中断，别真拉 500MB）
+  const ac = new AbortController();
+  const big = await fetch(`${base}/api/android/speedtest/data?mb=99999`, { headers: { 'X-Auth-Token': token }, signal: ac.signal });
+  assert.equal(big.headers.get('content-length'), String(500 * 1024 * 1024));
+  ac.abort();
+  await new Promise((r) => setTimeout(r, 50)); // 让服务端走到 close 分支，确认不会挂住
+
+  // 手机浏览器直接打开的测速页
+  const page = await fetch(`${base}/api/android/speedtest?mb=10&token=${token}`);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get('content-type') ?? '', /text\/html/);
+  const html = await page.text();
+  assert.match(html, /局域网测速/);
+  assert.match(html, /speedtest\/data/);
+});
+
 test('管理端文件列表 / 删除记录与删除文件区分', async () => {
   const src = tmpFile(root, 'admin/keep.mp4', 'K'.repeat(1024));
   const task = tasksRepo.create({ module: 'aria2', title: '管理端测试.mp4', platform: 'URL', url: 'http://example.com/keep.mp4' });
