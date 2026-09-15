@@ -140,7 +140,7 @@ function normalizeFormat(f: YtDlpFormat): FormatOption | null {
 export function parseClientArgs(url: string): string[] {
   const platform = detectPlatform(url);
   if (platform !== 'YouTube') return [];
-  return ['--extractor-args', YOUTUBE_TRY_CLIENTS];
+  return ['--extractor-args', YOUTUBE_PARSE_CLIENTS];
 }
 
 export interface ParseOptions {
@@ -187,7 +187,7 @@ export async function parseVideo(
     bin: ytdlpBin,
     args,
     cookies: opts.cookiesFile ? opts.cookiesFile : opts.cookiesFromBrowser ? `browser:${opts.cookiesFromBrowser}` : '(无)',
-    client: clientArgs.length ? YOUTUBE_TRY_CLIENTS : '(默认)',
+    client: clientArgs.length ? YOUTUBE_PARSE_CLIENTS : '(默认)',
   });
   const info = await new Promise<YtDlpInfo>((resolve, reject) => {
     const child = spawn(ytdlpBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -601,6 +601,12 @@ export interface AttemptContext {
  * mweb 基本必失败，已移出列表。
  */
 export const YOUTUBE_TRY_CLIENTS = 'youtube:player_client=web_safari,default,tv,android_vr,web_embedded';
+/**
+ * 解析专用：只要实测能一次给全高清格式的两个客户端。
+ * （trial 过 tv / android_vr / mweb，实测在这台机器上分别报 "The page needs to be reloaded" /
+ *  "Requested format is not available"，放进解析里只会添乱；下载那边有重试阶梯，可以照旧全带上。）
+ */
+export const YOUTUBE_PARSE_CLIENTS = 'youtube:player_client=web_safari,default';
 /** 只走网页内嵌播放器（对部分受限视频可绕过 web 端校验） */
 export const YOUTUBE_EMBEDDED_CLIENT = 'youtube:player_client=web_embedded,tv_embedded';
 /**

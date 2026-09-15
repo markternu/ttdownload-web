@@ -126,7 +126,7 @@ test('★解析必须用 web_safari 客户端（否则 YouTube 只给 360p —�
   assert.ok(ytCalls.length >= 1, '应有解析调用');
   assert.match(
     ytCalls[ytCalls.length - 1],
-    /--extractor-args youtube:player_client=web_safari/,
+    /--extractor-args youtube:player_client=web_safari,default/,
     'YouTube 解析必须带 player_client=web_safari（默认客户端只返回 360p）',
   );
 
@@ -142,7 +142,7 @@ test('parseClientArgs：只给 YouTube 加，且 web_safari 排在最前', () =>
   const yt = parseClientArgs('https://www.youtube.com/watch?v=x');
   assert.equal(yt.length, 2);
   assert.equal(yt[0], '--extractor-args');
-  assert.match(yt[1], /^youtube:player_client=web_safari/);
+  assert.match(yt[1], /^youtube:player_client=web_safari,default$/);
   assert.deepEqual(parseClientArgs('https://www.bilibili.com/video/BV1x'), []);
   assert.deepEqual(parseClientArgs('https://v.douyin.com/x/'), []);
 });
