@@ -38,6 +38,7 @@ export interface BtProxyScriptResult {
   snippet: string;
   serverFile: string;
   nginxVersion: string;
+  nginxRunning?: boolean | string;
   reason: string;
 }
 
@@ -71,6 +72,8 @@ export interface BtProxyStatus {
   snippet: string;
   serverFile: string;
   nginxVersion: string;
+  /** nginx 服务是否在运行：false = 配置写对了但外网照样打不开；null = 无法判断 */
+  nginxRunning: boolean | null;
   /** 不可用/需人工处理的原因（'' 表示一切正常） */
   reason: string;
   scriptPath: string;
@@ -103,7 +106,12 @@ function parseResult(stdout: string): BtProxyScriptResult | null {
   if (!m) return null;
   try {
     return JSON.parse(m[1]) as BtProxyScriptResult;
-  } catch {
+  } catch (e) {
+    // 结果行不是合法 JSON 时绝不能静默返回 null：那样调用方会拿到一份「全是空值」的状态，
+    // 页面看起来一切正常却什么都不知道（踩过：脚本输出了裸字符串 unknown）。
+    scoped.error(
+      `[MARK:${BT_PROXY_MARKER}] 脚本结果行不是合法 JSON（${(e as Error).message}）：${m[1].slice(0, 400)}`,
+    );
     return null;
   }
 }
@@ -351,6 +359,13 @@ export async function getBtProxyStatus(opts: BtProxyStatusOptions | string = {})
   else if (scriptError) warnings.push(scriptError);
   else if (script?.reason) warnings.push(script.reason);
 
+  const nginxRunning = script?.nginxRunning === true ? true : script?.nginxRunning === false ? false : null;
+  if (nginxRunning === false) {
+    warnings.push(
+      `nginx 服务当前没有在运行（systemctl status ${process.env.NGINX_SERVICE || 'nginx'}）—— 反代配置即使写进去了，外网也打不开，请先启动 nginx`,
+    );
+  }
+
   if (!transmission.reachable) {
     warnings.push('当前连不上 transmission RPC（先确认 BT 服务已在跑），开启反代后也可能打不开 WebUI');
   } else if (transmission.authRequired === false) {
@@ -380,6 +395,7 @@ export async function getBtProxyStatus(opts: BtProxyStatusOptions | string = {})
     snippet: script?.snippet ?? '',
     serverFile: script?.serverFile ?? '',
     nginxVersion: script?.nginxVersion ?? '',
+    nginxRunning,
     reason: script?.reason ?? scriptError,
     scriptPath,
     scriptFound,

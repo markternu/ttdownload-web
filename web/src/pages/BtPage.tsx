@@ -480,6 +480,11 @@ export default function BtPage() {
             <Badge tone="neutral">
               {btProxy?.nginxVersion ? btProxy.nginxVersion : '未检测到 nginx'}
             </Badge>
+            {btProxy?.nginxRunning === false ? (
+              <Badge tone="danger" dot>
+                nginx 未运行
+              </Badge>
+            ) : null}
             <Badge
               tone={btProxy?.transmission.reachable ? 'success' : 'danger'}
               dot

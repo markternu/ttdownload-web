@@ -30,9 +30,8 @@ const mock = await startTransmissionMock({ downloadDir, sessionExtra: { 'rpc-aut
 process.env.TRANSMISSION_RPC_HOST = '127.0.0.1';
 process.env.TRANSMISSION_RPC_PORT = String(mock.port);
 process.env.BT_PROXY_SCRIPT = SCRIPT;
-process.env.NGINX_BIN = nginx.bin;
-process.env.NGINX_CONF_DIR = nginx.confDir;
-process.env.NGINX_SERVICE = 'nginx';
+// 用完整的假 nginx 环境（含 PATH 里的假 systemctl），否则在 macOS 上会误判 nginx 没在运行
+Object.assign(process.env, nginx.env);
 
 const { createApp } = await import('../dist/app.js');
 const server = http.createServer(createApp());
@@ -242,4 +241,28 @@ test('无凭据探测 WebUI 是否要密码（transmission 4.1 的 session-get �
   } finally {
     if (srv.listening) await new Promise((r) => srv.close(r));
   }
+});
+
+test('nginx 装了但没在运行 → 明确警告（否则用户以为开了却打不开）', async () => {
+  fs.writeFileSync(nginx.nginxStopped, '1'); // 让假 systemctl 认为 nginx 没跑
+  try {
+    const r = await api('/api/bt/proxy');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.nginxRunning, false);
+    assert.ok(
+      r.json.warnings.some((w) => /nginx 服务当前没有在运行/.test(w)),
+      `应警告 nginx 没在运行，实际 warnings=${JSON.stringify(r.json.warnings)}`,
+    );
+    // 开启仍然会写配置（这是脚本的既定行为：配置对了就行），但警告一直在
+    const on = await api('/api/bt/proxy', { method: 'POST', body: JSON.stringify({ enabled: true }) });
+    assert.equal(on.json.enabled, true);
+    assert.equal(on.json.nginxRunning, false);
+    assert.ok(on.json.warnings.some((w) => /没有在运行/.test(w)));
+    await api('/api/bt/proxy', { method: 'POST', body: JSON.stringify({ enabled: false }) });
+  } finally {
+    fs.rmSync(nginx.nginxStopped, { force: true });
+  }
+  const back = await api('/api/bt/proxy');
+  assert.equal(back.json.nginxRunning, true, '恢复正常后应报告 nginx 在运行');
+  assert.deepEqual(back.json.warnings, []);
 });

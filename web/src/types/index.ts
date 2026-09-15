@@ -364,6 +364,8 @@ export interface BtProxyStatus {
   serverFile: string
   /** 形如 "nginx version: nginx/1.24.0" */
   nginxVersion: string
+  /** nginx 服务是否在运行：false = 配置写对了但外网照样打不开（需先 systemctl start nginx）；null = 判断不了 */
+  nginxRunning: boolean | null
   /** 不能自动配置时的原因（'' 表示正常） */
   reason: string
   /** 反代开关脚本路径 */

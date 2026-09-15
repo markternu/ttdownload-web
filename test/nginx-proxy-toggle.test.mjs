@@ -268,3 +268,13 @@ test('符号链接：sites-enabled 是软链时，改的是真实文件且软链
   assert.equal(fs.statSync(realFile).mode & 0o777, modeBefore);
   fs.rmSync(sb.root, { recursive: true, force: true });
 });
+
+test('status 报告 nginx 是否在运行（装了但没跑必须能看出来）', () => {
+  const sb = makeSandbox();
+  assert.equal(parseResult(sb.run(['status'])).nginxRunning, true, '默认假 systemctl 认为在运行');
+  fs.writeFileSync(sb.nginxStopped, '1');
+  assert.equal(parseResult(sb.run(['status'])).nginxRunning, false, '服务停了要报 false');
+  fs.rmSync(sb.nginxStopped, { force: true });
+  assert.equal(parseResult(sb.run(['status'])).nginxRunning, true);
+  fs.rmSync(sb.root, { recursive: true, force: true });
+});

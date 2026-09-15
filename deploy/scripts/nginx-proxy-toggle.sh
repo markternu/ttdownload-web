@@ -165,6 +165,22 @@ AWK
 )"
 
 nginx_ok() { "$NGINX_BIN" -t -c "$MAIN_CONF" >/dev/null 2>&1; }
+
+# nginx 服务是否在运行？配置写对了但服务没跑，外网照样打不开（必须让用户看见）
+# 返回 **合法 JSON 字面量**：true / false / null（null = 判断不了）。
+# 注意：绝不能返回 unknown 这种裸字符串 —— 那会让整个结果行不是合法 JSON，
+# 调用方解析失败后会拿到一份「全是空值」的状态（这个坑踩过）。
+nginx_running() {
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet "$NGINX_SERVICE" 2>/dev/null; then printf 'true'; else printf 'false'; fi
+    return 0
+  fi
+  if command -v pgrep >/dev/null 2>&1; then
+    if pgrep -x nginx >/dev/null 2>&1; then printf 'true'; else printf 'false'; fi
+    return 0
+  fi
+  printf 'null'
+}
 nginx_test_output() { "$NGINX_BIN" -t -c "$MAIN_CONF" 2>&1 || true; }
 
 reload_nginx() {
@@ -230,8 +246,12 @@ status_json() {
     server_file="$(find_server_file || true)"
     [ -n "$server_file" ] || reason="没找到监听 80 端口的 server 块（需手工把 include 加进去）"
   fi
-  printf '{"enabled":%s,"subPath":"%s","target":"%s","snippet":"%s","serverFile":"%s","nginxVersion":"%s","reason":"%s"}' \
-    "$enabled" "$SUB_PATH" "$TARGET" "$SNIPPET" "${server_file//\"/}" "${version//\"/}" "${reason//\"/}"
+  local running="null"
+  if command -v "$NGINX_BIN" >/dev/null 2>&1; then
+    running="$(nginx_running)"
+  fi
+  printf '{"enabled":%s,"subPath":"%s","target":"%s","snippet":"%s","serverFile":"%s","nginxVersion":"%s","nginxRunning":%s,"reason":"%s"}' \
+    "$enabled" "$SUB_PATH" "$TARGET" "$SNIPPET" "${server_file//\"/}" "${version//\"/}" "$running" "${reason//\"/}"
 }
 
 snippet_body() {
