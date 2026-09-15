@@ -50,6 +50,8 @@ export interface BtProxyTransmissionInfo {
   rpcUser: string;
   /** 是否要求用户名密码（false = 谁能连上谁就能控制，公网暴露非常危险） */
   authRequired: boolean | null;
+  /** authRequired 是怎么来的：session-get（transmission 自己报的）/ probe（无凭据探测 401）/ unknown */
+  authRequiredSource: 'session-get' | 'probe' | 'unknown';
   whitelistEnabled: boolean | null;
   peerPort: number | null;
 }
@@ -63,6 +65,9 @@ export interface BtProxyStatus {
   /** 开启后外网访问地址（形如 http://1.2.3.4/transmission/web/） */
   url: string | null;
   rpcUrl: string | null;
+  /** url 是怎么来的（guessed = 从应用端口直连，按 nginx 默认端口推断，可能不准） */
+  urlSource: 'public_base_url' | 'forwarded' | 'guessed' | 'none';
+  urlHint: string;
   snippet: string;
   serverFile: string;
   nginxVersion: string;
@@ -181,6 +186,7 @@ async function transmissionInfo(): Promise<BtProxyTransmissionInfo> {
     rpcPort: config.transmissionRpc.port,
     rpcUser: config.transmissionRpc.user,
     authRequired: null,
+    authRequiredSource: 'unknown',
     whitelistEnabled: null,
     peerPort: null,
   };
@@ -193,36 +199,112 @@ async function transmissionInfo(): Promise<BtProxyTransmissionInfo> {
     }>('session-get', {}, 5000);
     info.reachable = true;
     info.version = s?.version ?? 'unknown';
-    info.authRequired = s?.['rpc-authentication-required'] ?? null;
     info.whitelistEnabled = s?.['rpc-whitelist-enabled'] ?? null;
     info.peerPort = s?.['peer-port'] ?? null;
+    if (typeof s?.['rpc-authentication-required'] === 'boolean') {
+      info.authRequired = s['rpc-authentication-required'];
+      info.authRequiredSource = 'session-get';
+    }
   } catch (e) {
     scoped.debug(`[MARK:${BT_PROXY_MARKER}] 读取 transmission 会话信息失败：${(e as Error).message}`);
+  }
+  // transmission 某些版本（实测 4.1.0-beta）的 session-get **不返回** rpc-authentication-required，
+  // 那就直接问真正重要的问题：不带任何凭据去访问 WebUI，会不会被拦？
+  //   401 + WWW-Authenticate → 需要密码（安全）；200 → 谁都能进（危险）
+  if (info.reachable && info.authRequired === null) {
+    info.authRequired = await probeAuthRequired(info.rpcHost, info.rpcPort);
+    info.authRequiredSource = info.authRequired === null ? 'unknown' : 'probe';
   }
   return info;
 }
 
-/** 从请求头推断外网访问地址（反向代理下用 x-forwarded-*） */
+/** 无凭据探测 transmission WebUI 是否要求登录（401 = 需要密码） */
+export async function probeAuthRequired(host: string, port: number, timeoutMs = 4000): Promise<boolean | null> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://${host}:${port}/transmission/web/`, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: ac.signal,
+    });
+    if (res.status === 401 || res.status === 403) return true;
+    if (res.status === 200) return false;
+    return null;
+  } catch (e) {
+    scoped.debug(`[MARK:${BT_PROXY_MARKER}] 无凭据探测 WebUI 失败：${(e as Error).message}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface ProxyOrigin {
+  /** 外网基地址（形如 http://1.2.3.4 或 https://example.com），用于拼出可直接点开的链接 */
+  base: string;
+  /** 这个地址有多可信：public_base_url（最准）/ forwarded（经过反代，准）/ guessed（按 nginx 默认端口猜的） */
+  source: 'public_base_url' | 'forwarded' | 'guessed';
+  /** 给用户看的说明（guessed 时要提示可能不准） */
+  hint: string;
+}
+
+/**
+ * 推断「用户从外网访问 nginx」的基地址。
+ *
+ * 坑：反向代理挂在 nginx 的 80/443 上，而我们这个服务可能在 8080 —— 请求的 Host 里带的
+ * 是**应用自己的端口**，直接拿来拼 `http://IP:8080/transmission/web/` 是错的（8080 上没有这个路径）。
+ * 所以：① PUBLIC_BASE_URL 优先；② 经过反代时用 X-Forwarded-*；③ 直连应用端口时只取主机名、
+ * 丢掉应用自己的端口（nginx 默认 80），并在 UI 上注明是推断值。
+ */
 export function originFromRequest(req: {
   protocol?: string;
   headers?: Record<string, unknown>;
   get?: (name: string) => string | undefined;
-}): string {
+  /** 本服务实际监听的端口（Express 的 req.socket.localPort），用来判断请求是不是直连应用端口 */
+  socket?: { localPort?: number };
+}): ProxyOrigin {
   const envBase = String(process.env.PUBLIC_BASE_URL ?? '').trim();
-  if (envBase) return envBase.replace(/\/+$/, '');
+  if (envBase) {
+    return { base: envBase.replace(/\/+$/, ''), source: 'public_base_url', hint: '来自 PUBLIC_BASE_URL 配置' };
+  }
   const header = (name: string): string => {
     if (typeof req.get === 'function') return String(req.get(name) ?? '');
     const v = req.headers?.[name.toLowerCase()];
     return Array.isArray(v) ? String(v[0] ?? '') : String(v ?? '');
   };
   const proto = (header('x-forwarded-proto').split(',')[0] || req.protocol || 'http').trim();
-  const host = (header('x-forwarded-host').split(',')[0] || header('host')).trim();
-  return `${proto}://${host}`;
+  const host = (header('host')).trim();
+  const fwdHost = header('x-forwarded-host').split(',')[0].trim();
+
+  if (fwdHost) {
+    // 经过反代：X-Forwarded-Host 才是用户看到的域名（可能带自定端口），原样用
+    return { base: `${proto}://${fwdHost}`, source: 'forwarded', hint: '按反向代理传来的 X-Forwarded-Host 推断' };
+  }
+
+  // 直连：Host 里若是应用自己的端口，说明用户是从 8080 进来的，反代地址要走 nginx 的默认端口
+  let hostname = host;
+  const m = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(host);
+  if (m) {
+    const port = Number(m[2]);
+    const appPort = req.socket?.localPort ?? config.port;
+    if (port === appPort) hostname = m[1];
+  }
+  const guessed = hostname !== host;
+  return {
+    base: `${proto}://${hostname}`,
+    source: guessed ? 'guessed' : 'forwarded',
+    hint: guessed
+      ? `你是直接从应用端口 ${req.socket?.localPort ?? config.port} 访问的，这里按 nginx 默认端口（80/443）推断；如果反代挂在别的端口，请在 .env 里设 PUBLIC_BASE_URL`
+      : '按请求的 Host 推断',
+  };
 }
 
 export interface BtProxyStatusOptions {
   /** 外网访问地址前缀（形如 http://1.2.3.4），用于拼出可直接点开的链接 */
   origin?: string;
+  /** origin 的可信度说明（由 originFromRequest 给出） */
+  originHint?: string;
+  originSource?: 'public_base_url' | 'forwarded' | 'guessed';
   /** 查看哪个子路径的状态（默认取 BT_PROXY_SUBPATH） */
   subPath?: string;
   target?: string;
@@ -288,6 +370,13 @@ export async function getBtProxyStatus(opts: BtProxyStatusOptions | string = {})
     target,
     url,
     rpcUrl,
+    urlSource: o.origin ? (o.originSource ?? 'forwarded') : 'none',
+    urlHint: o.origin
+      ? o.originSource === 'guessed'
+        ? o.originHint ||
+          `地址是按 nginx 默认端口（80/443）推断的；如果反代挂在别的端口，请在 .env 里设 PUBLIC_BASE_URL`
+        : o.originHint || '按请求地址推断'
+      : '拿不到请求地址（请用域名/IP 打开本页面）',
     snippet: script?.snippet ?? '',
     serverFile: script?.serverFile ?? '',
     nginxVersion: script?.nginxVersion ?? '',
@@ -301,7 +390,9 @@ export async function getBtProxyStatus(opts: BtProxyStatusOptions | string = {})
 }
 
 /** 开启：先做安全检查（transmission 必须有密码），再交给脚本改 nginx */
-export async function enableBtProxy(opts: ToggleOptions & { force?: boolean } = {}): Promise<BtProxyStatus> {
+export async function enableBtProxy(
+  opts: ToggleOptions & BtProxyStatusOptions & { force?: boolean } = {},
+): Promise<BtProxyStatus> {
   const info = await transmissionInfo();
   if (info.reachable && info.authRequired === false && !opts.force) {
     scoped.warn(`[MARK:${BT_PROXY_MARKER}] 拒绝开启：transmission 未要求密码，暴露到公网不安全`);
@@ -315,12 +406,12 @@ export async function enableBtProxy(opts: ToggleOptions & { force?: boolean } = 
   if (!result?.enabled) {
     throw new HttpError(500, 'BT_PROXY_NOT_ENABLED', `脚本执行完毕但状态仍为未开启：${result?.reason || '未知原因'}`);
   }
-  return getBtProxyStatus({ subPath: opts.subPath, target: opts.target });
+  return getBtProxyStatus(opts);
 }
 
-export async function disableBtProxy(opts: ToggleOptions = {}): Promise<BtProxyStatus> {
+export async function disableBtProxy(opts: ToggleOptions & BtProxyStatusOptions = {}): Promise<BtProxyStatus> {
   runToggleScript('disable', opts);
-  return getBtProxyStatus({ subPath: opts.subPath, target: opts.target });
+  return getBtProxyStatus(opts);
 }
 
 export function previewBtProxy(opts: ToggleOptions = {}): { config: string; include: string } {

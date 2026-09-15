@@ -72,8 +72,9 @@ test('GET /api/bt/proxy：初始状态（未开启、能定位到我们的 80 se
   assert.match(r.json.nginxVersion, /nginx\/1\.24/);
   assert.equal(r.json.transmission.reachable, true);
   assert.equal(r.json.transmission.authRequired, true);
-  // 外网访问地址基于请求 Host 推导
-  assert.match(r.json.url, /^http:\/\/127\.0\.0\.1:\d+\/transmission\/web\/$/);
+  // 外网访问地址基于请求 Host 推导；直连应用端口时要丢掉应用端口（反代在 nginx 的 80 上）
+  assert.equal(r.json.url, 'http://127.0.0.1/transmission/web/');
+  assert.equal(r.json.urlSource, 'guessed');
   assert.deepEqual(r.json.warnings, []);
 });
 
@@ -167,4 +168,78 @@ test('非法 subPath / target → 400（不把脚本的 500 抛给用户）', as
     assert.match(String(r.json?.error?.code), /BAD_(SUBPATH|TARGET)/);
   }
   assert.equal(nginx.managedLines(), 0, '被拒绝时不能改配置');
+});
+
+test('url 推断：直连应用端口（8080）时不能把 8080 当成反代地址，要丢掉应用端口并标注是推断值', async () => {
+  const r = await api('/api/bt/proxy');
+  assert.equal(r.status, 200);
+  // 测试里我们就是直连 http://127.0.0.1:<appPort> 访问的
+  assert.ok(r.json.url, '应给出访问地址');
+  assert.equal(
+    r.json.url,
+    `http://127.0.0.1${r.json.subPath}/web/`,
+    '反代挂在 nginx 的 80 上，不能把应用的随机端口拼进去',
+  );
+  assert.equal(r.json.urlSource, 'guessed', '直连时地址是按 nginx 默认端口推断的');
+  assert.match(r.json.urlHint, /PUBLIC_BASE_URL|推断/, '应提示用户如何纠正');
+});
+
+test('url 推断：经过反向代理（X-Forwarded-Host）时用用户看到的域名', async () => {
+  const r = await api('/api/bt/proxy', {
+    headers: { 'X-Forwarded-Host': 'dl.example.com', 'X-Forwarded-Proto': 'https' },
+  });
+  assert.equal(r.json.url, `https://dl.example.com${r.json.subPath}/web/`);
+  assert.equal(r.json.urlSource, 'forwarded');
+});
+
+test('url 推断：PUBLIC_BASE_URL 优先级最高', async () => {
+  process.env.PUBLIC_BASE_URL = 'https://pub.example.com:8443/';
+  try {
+    const r = await api('/api/bt/proxy', {
+      headers: { 'X-Forwarded-Host': 'ignored.example.com', 'X-Forwarded-Proto': 'http' },
+    });
+    assert.equal(r.json.url, `https://pub.example.com:8443${r.json.subPath}/web/`, '应去掉结尾斜杠并优先用配置值');
+    assert.equal(r.json.urlSource, 'public_base_url');
+  } finally {
+    delete process.env.PUBLIC_BASE_URL;
+  }
+});
+
+test('开关响应里直接带 url（页面不用等下一轮轮询）', async () => {
+  const on = await api('/api/bt/proxy', { method: 'POST', body: JSON.stringify({ enabled: true }) });
+  assert.equal(on.status, 200);
+  assert.equal(on.json.enabled, true);
+  assert.ok(on.json.url, '开启响应必须直接给出访问地址');
+  assert.match(on.json.url, /\/transmission\/web\/$/);
+
+  const off = await api('/api/bt/proxy', { method: 'POST', body: JSON.stringify({ enabled: false }) });
+  assert.equal(off.json.enabled, false);
+  assert.equal(off.json.urlSource === 'none' || !!off.json.url, true);
+});
+
+test('无凭据探测 WebUI 是否要密码（transmission 4.1 的 session-get 不返回该字段时的兜底）', async () => {
+  const http = await import('node:http');
+  // 造一个「要密码」的假 WebUI：不带 Authorization 一律 401（transmission 的真实行为）
+  const srv = http.createServer((req, res) => {
+    if (!req.headers.authorization) {
+      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Transmission"' }).end('401: Unauthorized');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html' }).end('<html>webui</html>');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  const { probeAuthRequired } = await import('../dist/services/btProxy.js');
+  try {
+    assert.equal(await probeAuthRequired('127.0.0.1', port), true, '401 → 需要密码');
+    // 换一个「不要密码」的服务：200
+    srv.removeAllListeners('request');
+    srv.on('request', (_req, res) => res.writeHead(200).end('ok'));
+    assert.equal(await probeAuthRequired('127.0.0.1', port), false, '200 → 不需要密码');
+    // 连不上 → 未知（不能瞎猜成“安全”或“不安全”）
+    await new Promise((r) => srv.close(r));
+    assert.equal(await probeAuthRequired('127.0.0.1', port), null, '连不上 → 未知');
+  } finally {
+    if (srv.listening) await new Promise((r) => srv.close(r));
+  }
 });

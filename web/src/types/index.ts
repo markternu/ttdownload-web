@@ -322,6 +322,12 @@ export interface BtProxyTransmissionInfo {
   rpcUser: string
   /** 是否要求用户名密码：false = 谁能连上谁就能控制，暴露到公网极危险；null = 未知 */
   authRequired: boolean | null
+  /**
+   * authRequired 是怎么来的：
+   * session-get = transmission 自己报的；probe = 后端不带凭据访问 WebUI 探测（401 即需要密码）；
+   * unknown = 两种都没拿到，无法判断
+   */
+  authRequiredSource: 'session-get' | 'probe' | 'unknown'
   /** 是否启用 RPC 白名单；null = 未知 */
   whitelistEnabled: boolean | null
   /** BT 监听端口；null = 未知 */
@@ -345,6 +351,13 @@ export interface BtProxyStatus {
   url: string | null
   /** RPC 地址，形如 http(s)://<域名>/<子路径>/rpc；取不到时为 null */
   rpcUrl: string | null
+  /**
+   * url 的可信度：public_base_url（.env 显式配置，最准）/ forwarded（经过反向代理，准）/
+   * guessed（你是直连应用端口访问的，按 nginx 默认端口推断，可能不准）/ none（拿不到地址）
+   */
+  urlSource: 'public_base_url' | 'forwarded' | 'guessed' | 'none'
+  /** urlSource 的中文说明（guessed 时前端应提示可能不准） */
+  urlHint: string
   /** 生成的 nginx 配置文件（snippet）路径 */
   snippet: string
   /** 被插入 include 的 nginx 配置文件路径 */

@@ -533,6 +533,13 @@ export default function BtPage() {
             </p>
           ))}
 
+          {/* 密码要求是「探测」出来的：说明后端是真去敲了 WebUI 的门，而不是只听 transmission 自报 */}
+          {btProxy?.transmission.reachable && btProxy.transmission.authRequiredSource === 'probe' ? (
+            <p className="text-[11px] text-slate-400">
+              已实测：不带账号访问 transmission WebUI 会被要求登录（401）→ 可以安全地只暴露这一条反代路径。
+            </p>
+          ) : null}
+
           {/* 无 RPC 密码：红色警示 + 风险确认复选框 */}
           {proxyNeedsForce ? (
             <div className="space-y-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 dark:border-red-900/60 dark:bg-red-500/10">
@@ -576,6 +583,14 @@ export default function BtPage() {
                   打开
                 </Button>
               </div>
+              {btProxy.urlSource === 'guessed' ? (
+                <p className="flex items-start gap-1.5 rounded-lg bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 break-words">
+                    这个地址是按 nginx 默认端口（80/443）推断的：{btProxy.urlHint}
+                  </span>
+                </p>
+              ) : null}
               <p className="break-words text-[11px] leading-relaxed text-emerald-700/90 dark:text-emerald-300/90">
                 transmission WebUI 会要求登录
                 {btProxy.transmission.rpcUser ? (

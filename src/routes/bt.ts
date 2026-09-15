@@ -152,8 +152,8 @@ btRouter.get('/tasks', (_req, res) => {
 btRouter.get(
   '/proxy',
   asyncHandler(async (req, res) => {
-    const status = await getBtProxyStatus(originFromRequest(req));
-    res.json(status);
+    const origin = originFromRequest(req);
+    res.json(await getBtProxyStatus({ origin: origin.base, originSource: origin.source, originHint: origin.hint }));
   }),
 );
 
@@ -165,9 +165,12 @@ btRouter.post(
     const subPath = typeof body.subPath === 'string' && body.subPath.trim() ? body.subPath.trim() : undefined;
     const target = typeof body.target === 'string' && body.target.trim() ? body.target.trim() : undefined;
     if (typeof body.enabled !== 'boolean') throw badRequest('请求体需要 { enabled: true|false }');
+    const origin = originFromRequest(req);
+    const common = { subPath, target, origin: origin.base, originSource: origin.source, originHint: origin.hint };
     const status = body.enabled
-      ? await enableBtProxy({ subPath, target, force: body.force === true })
-      : await disableBtProxy({ subPath, target });
+      ? await enableBtProxy({ ...common, force: body.force === true })
+      : await disableBtProxy(common);
+    // 开关响应里必须直接带上访问地址：否则页面要等下一轮轮询（15s）才显示出来
     res.json({ ...status, url: status.url ?? null });
   }),
 );
