@@ -49,8 +49,70 @@ export interface CookieSiteProfile {
   requireCookies: boolean;
   /** 交给 yt-dlp 的额外参数（Referer / UA 等，实测必需） */
   extraArgs: string[];
+  /**
+   * 不用浏览器就能拿到 cookie 的途径（优先于无头浏览器：1 秒出结果，也不容易触发风控）。
+   * 抖音实测：向 bytedance 的 ttwid 注册接口 POST 一次即可拿到可用的 ttwid。
+   */
+  httpProvider?: () => Promise<ParsedCookie[]>;
   /** 只认登录 cookies 的内容（说明用，不参与自动化） */
   loginOnlyNote?: string;
+}
+
+/**
+ * 纯 HTTP 拿「字节系」访客 cookie（抖音/TikTok 用）。
+ *
+ * 抖音网页接口要的是 `ttwid`（其余 __ac_signature 等是浏览器挑战产物，但实测**只带 ttwid
+ * + Referer + 桌面 UA 就能正常解析/下载**）。ttwid 可以直接向官方的注册接口 POST 一次拿到，
+ * 不需要浏览器、不需要登录、1 秒出结果 —— 比开无头浏览器稳得多，也不会招来风控。
+ *
+ * 返回的 cookie 同时挂到 .douyin.com / .tiktok.com 与 .bytedance.com（原始域）。
+ */
+export async function fetchTtwidCookies(target: 'douyin' | 'tiktok', timeoutMs = 15000): Promise<ParsedCookie[]> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch('https://ttwid.bytedance.com/ttwid/union/register/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': DESKTOP_UA },
+      body: JSON.stringify({
+        region: 'cn',
+        aid: 1768,
+        needFid: false,
+        service: 'www.ixigua.com',
+        migrate_info: { ticket: '', source: 'node' },
+        cbUrlProtocol: 'https',
+        union: true,
+      }),
+      signal: ac.signal,
+    });
+    const raw = typeof res.headers.getSetCookie === 'function'
+      ? res.headers.getSetCookie()
+      : [res.headers.get('set-cookie') ?? ''];
+    const ttwid = raw
+      .map((line) => /(?:^|;\s*)ttwid=([^;]+)/.exec(line)?.[1] ?? '')
+      .find((v) => !!v);
+    if (!ttwid) throw new Error(`注册接口没有返回 ttwid（HTTP ${res.status}）`);
+
+    const expires = Math.floor(Date.now() / 1000) + 86400 * 300;
+    // 带前导点 = 包含子域（浏览器对 Domain=bytedance.com 也是这样处理的）
+    const domains = ['.bytedance.com', `.${target === 'douyin' ? 'douyin.com' : 'tiktok.com'}`];
+    const cookies: ParsedCookie[] = [];
+    for (const domain of domains) {
+      cookies.push({
+        domain,
+        includeSubdomains: domain.startsWith('.'),
+        path: '/',
+        secure: true,
+        expires,
+        name: 'ttwid',
+        value: ttwid,
+        httpOnly: true,
+      });
+    }
+    return cookies;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** 取 URL 的 host（失败返回 ''） */
@@ -79,6 +141,7 @@ export const SITE_PROFILES: CookieSiteProfile[] = [
     waitMs: 8000,
     requireCookies: true,
     extraArgs: ['--referer', 'https://www.douyin.com/', '--user-agent', DESKTOP_UA],
+    httpProvider: () => fetchTtwidCookies('douyin'),
     loginOnlyNote: '抖音不需要登录 cookies；若自动获取后仍失败，再上传 douyin.com 的 cookies.txt 兜底',
   },
   {
@@ -89,6 +152,7 @@ export const SITE_PROFILES: CookieSiteProfile[] = [
     waitMs: 6000,
     requireCookies: false,
     extraArgs: ['--referer', 'https://www.tiktok.com/'],
+    httpProvider: () => fetchTtwidCookies('tiktok'),
   },
   {
     id: 'bilibili',
@@ -169,6 +233,8 @@ export interface HarvestMeta {
   cookieCount: number;
   cookieNames: string[];
   ua: string;
+  /** 这批 cookie 是怎么来的：http=纯 HTTP 接口（最快）/ browser=无头浏览器 */
+  via: 'http' | 'browser';
 }
 
 export function readHarvestMeta(siteId: string): HarvestMeta | null {
@@ -421,9 +487,25 @@ export async function ensureHarvested(
     const t0 = Date.now();
     scoped.info(`[MARK:${COOKIE_MARKER}] 开始自动获取 cookies：${profile.name}（${profile.harvestUrl}）`);
     try {
-      const cookies = launcherOverride ? await launcherOverride(profile) : await launchAndHarvest(profile);
+      // ① 优先不用浏览器（快、稳、不招风控）
+      let via: 'http' | 'browser' = 'http';
+      let cookies: ParsedCookie[] = [];
+      if (profile.httpProvider && !launcherOverride) {
+        try {
+          cookies = await profile.httpProvider();
+          scoped.info(`[MARK:${COOKIE_MARKER}] ${profile.name}：HTTP 接口直接拿到 ${cookies.length} 条 cookie（未启动浏览器）`);
+        } catch (e) {
+          scoped.warn(`[MARK:${COOKIE_MARKER}] ${profile.name} 的 HTTP 途径失败，改用无头浏览器：${(e as Error).message}`);
+          cookies = [];
+        }
+      }
+      // ② 退到无头浏览器
+      if (!cookies.length) {
+        via = 'browser';
+        cookies = launcherOverride ? await launcherOverride(profile) : await launchAndHarvest(profile);
+      }
       if (!cookies.length && profile.requireCookies) {
-        throw new Error('浏览器没能拿到任何 cookie（站点可能改了挑战流程）');
+        throw new Error('没能拿到任何 cookie（HTTP 接口与无头浏览器都失败，站点可能改了流程）');
       }
       if (cookies.length) {
         writeCookieFile(harvestedFile(profile.id), cookies, `由无头浏览器自动获取（${profile.name}）`);
@@ -437,11 +519,12 @@ export async function ensureHarvested(
         cookieCount: cookies.length,
         cookieNames: cookies.map((c) => c.name),
         ua: DESKTOP_UA,
+        via,
       };
       fs.mkdirSync(harvestedDir(), { recursive: true, mode: 0o700 });
       fs.writeFileSync(harvestedMetaFile(profile.id), JSON.stringify(meta, null, 1), { mode: 0o600 });
       scoped.info(
-        `[MARK:${COOKIE_MARKER}] 自动获取成功：${profile.name} ${cookies.length} 条（${Date.now() - t0}ms）`,
+        `[MARK:${COOKIE_MARKER}] 自动获取成功：${profile.name} ${cookies.length} 条（via=${via}，${Date.now() - t0}ms）`,
         { cookies: meta.cookieNames.slice(0, 20) },
       );
       return meta;
@@ -502,7 +585,11 @@ export async function cookiesForUrl(
   };
 
   const wantHarvest =
-    !!profile && harvestEnabled() && defaultHarvestSites().includes(profile.id) && !!chromiumPath();
+    !!profile &&
+    harvestEnabled() &&
+    defaultHarvestSites().includes(profile.id) &&
+    // 有纯 HTTP 途径的站点（抖音/TikTok）不需要浏览器
+    (!!profile.httpProvider || !!chromiumPath());
   if (!wantHarvest || !profile) return base;
 
   const meta = await ensureHarvested(profile, { force: opts.forceHarvest });
@@ -542,7 +629,18 @@ export function harvestStatus(): {
   enabled: boolean;
   chromium: string | null;
   available: boolean;
-  sites: { id: string; name: string; auto: boolean; hasCookies: boolean; cookieCount: number; ageMinutes: number | null; url: string }[];
+  sites: {
+    id: string;
+    name: string;
+    auto: boolean;
+    hasCookies: boolean;
+    cookieCount: number;
+    ageMinutes: number | null;
+    url: string;
+    /** 是否需要无头浏览器（false = 纯 HTTP 就能拿到，没装 chromium 也能用） */
+    needsBrowser: boolean;
+    via: 'http' | 'browser' | null;
+  }[];
   harvestSites: string[];
 } {
   const enabled = harvestEnabled();
@@ -564,6 +662,8 @@ export function harvestStatus(): {
         cookieCount: meta?.cookieCount ?? 0,
         ageMinutes: age === null ? null : Math.round(age / 60000),
         url: p.harvestUrl,
+        needsBrowser: !p.httpProvider,
+        via: meta?.via ?? null,
       };
     }),
   };
@@ -573,7 +673,7 @@ export function harvestStatus(): {
 export async function harvestNow(siteId: string): Promise<HarvestMeta | null> {
   const profile = SITE_PROFILES.find((p) => p.id === siteId);
   if (!profile) throw Object.assign(new Error(`未知站点：${siteId}`), { status: 400 });
-  if (!chromiumPath()) {
+  if (!profile.httpProvider && !chromiumPath()) {
     throw Object.assign(new Error('服务器上没有 chromium，请先安装：sudo apt install -y chromium'), { status: 400 });
   }
   const meta = await ensureHarvested(profile, { force: true });

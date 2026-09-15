@@ -96,6 +96,7 @@ export interface Settings {
   webvideoCookiesFile: string // 服务器上 cookies.txt 路径，''=未设置（会员/登录视频需要）
   webvideoCookiesFromBrowser: string // '' | 'chrome' | 'chromium' | 'edge' | 'firefox' | 'brave' | 'opera' | 'vivaldi' | 'safari'
   webvideoExtraArgs: string // 追加给 yt-dlp 的额外参数（空格分隔），''=无
+  cookieHarvestEnabled: boolean // 自动获取访客 cookies：用服务器上的无头浏览器抓「不需要登录」的站点 cookies（抖音/TikTok 必需）
   transcodeQuality: string // 预留
   autoDeleteAfterReport: boolean // 安卓上报后是否删除（默认 true）
   clearLogsAfterReport: boolean // 下载诊断报告成功后是否清空已收集的历史日志（默认 false）
@@ -111,6 +112,39 @@ export interface Settings {
   }
 }
 
+/** 单个站点的「访客 cookies 自动获取」状态 */
+export interface CookieHarvestSite {
+  id: string // douyin / tiktok / bilibili / youtube / instagram / x
+  name: string // 中文名
+  auto: boolean // 是否启用自动抓取
+  hasCookies: boolean // 是否已经抓过并存下来了
+  cookieCount: number // 抓到了多少条 cookie
+  ageMinutes: number | null // 多久之前抓的（分钟）；null = 没抓过
+  url: string // 抓取时打开的页面
+}
+
+/** 自动获取访客 cookies 的总体状态（GET /api/webvideo/cookies/harvest） */
+export interface CookieHarvestStatus {
+  enabled: boolean // 设置里的开关（cookieHarvestEnabled）
+  chromium: string | null // 探测到的浏览器路径，null = 服务器上没装
+  available: boolean // enabled && chromium 存在
+  harvestSites: string[] // 目前启用自动抓取的站点 id，如 ["douyin","tiktok"]
+  hint: string // 后端写好的中文说明（直接展示）
+  sites: CookieHarvestSite[]
+}
+
+/** 一次抓取的元信息（POST /api/webvideo/cookies/harvest 返回的 meta） */
+export interface CookieHarvestMeta {
+  site: string
+  name: string
+  url: string
+  file: string
+  fetchedAt: string
+  cookieCount: number
+  cookieNames: string[]
+  ua: string
+}
+
 /** yt-dlp cookies 状态（GET/POST/DELETE /api/webvideo/cookies） */
 export interface CookiesStatus {
   cookiesFile: string // 当前生效的 cookies 文件绝对路径（可能来自设置或默认路径）
@@ -122,6 +156,13 @@ export interface CookiesStatus {
   valid: boolean // 结构是否可用（warnings 为空才算 true）
   warnings: string[] // 需要用户处理的问题（可直接展示；为空才算结构正常）
   notes: string[] // 提示性说明（多账号提醒、会过期等，不影响可用性）
+  /**
+   * 这份 cookies.txt 覆盖了哪些站点（按域名），以及各站点是否「能自动获取、不用人工导出」。
+   * 用户最常见的困惑就是「我传了 Google 的 cookies，为什么抖音还是不行」——cookies 按站点隔离。
+   */
+  sites: { domain: string; count: number; auto: boolean; note: string }[]
+  /** 自动获取访客 cookies 的总体情况（同 GET /api/webvideo/cookies/harvest；后端可能返回 null） */
+  harvest: CookieHarvestStatus | null
   /** 结构统计（只在 exists=true 时有意义） */
   stats: {
     total: number // cookie 条数

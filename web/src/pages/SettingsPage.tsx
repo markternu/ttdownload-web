@@ -5,6 +5,7 @@ import {
   Cookie,
   Database,
   Gauge,
+  Globe,
   HardDrive,
   Info,
   Monitor,
@@ -40,7 +41,14 @@ import { useToast } from '../context/ToastContext'
 import { api } from '../lib/api'
 import { CONCURRENCY_OPTIONS, FORMAT_OPTIONS, QUALITY_OPTIONS } from '../lib/constants'
 import { formatBytes, humanizeError } from '../lib/format'
-import type { CookiesStatus, Settings, TestTool, ThemeMode } from '../types'
+import type {
+  CookieHarvestSite,
+  CookieHarvestStatus,
+  CookiesStatus,
+  Settings,
+  TestTool,
+  ThemeMode,
+} from '../types'
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun; description: string }[] = [
   { value: 'light', label: 'Light', icon: Sun, description: '始终使用浅色界面' },
@@ -107,6 +115,38 @@ function formatDomainSpread(byDomain: Record<string, number>): string {
   return entries.length > 5 ? `${top} 等 ${entries.length} 个域名` : top
 }
 
+/** 访客 cookies 的缓存 TTL（与后端 COOKIE_HARVEST_TTL_HOURS 默认一致：6 小时） */
+const HARVEST_TTL_MINUTES = 360
+
+/** 人性化「多久之前」：<1 分钟 → 刚刚，<60 → N 分钟前，<24h → N 小时前，否则 N 天前 */
+function humanizeAge(minutes: number): string {
+  if (!Number.isFinite(minutes) || minutes < 1) return '刚刚'
+  if (minutes < 60) return `${Math.round(minutes)} 分钟前`
+  if (minutes < 24 * 60) return `${Math.round(minutes / 60)} 小时前`
+  return `${Math.round(minutes / (24 * 60))} 天前`
+}
+
+/** 这份访客 cookies 是否可能已过期（超过 TTL；下载时会自动重新获取） */
+function harvestStale(site: CookieHarvestSite): boolean {
+  return site.hasCookies && site.ageMinutes !== null && site.ageMinutes > HARVEST_TTL_MINUTES
+}
+
+/**
+ * 草稿里相对于已保存设置的「未保存改动」（不含 cookieHarvestEnabled）。
+ * 开关是即时保存的：保存后 store 会刷新 settings 并重置草稿，
+ * 用这份差值把用户其它还没保存的编辑合回来，避免被静默丢弃。
+ */
+function pendingEdits(draft: Settings, settings: Settings | null): Partial<Settings> {
+  if (!settings) return {}
+  const out: Partial<Settings> = {}
+  const target = out as Record<string, unknown>
+  for (const key of Object.keys(draft) as (keyof Settings)[]) {
+    if (key === 'cookieHarvestEnabled') continue
+    if (JSON.stringify(draft[key]) !== JSON.stringify(settings[key])) target[key] = draft[key]
+  }
+  return out
+}
+
 export default function SettingsPage() {
   const toast = useToast()
   const { settings, loading, error, saving, refresh, save } = useSettingsStore()
@@ -127,16 +167,29 @@ export default function SettingsPage() {
   const [cookiesUploading, setCookiesUploading] = useState(false)
   const [cookiesDeleting, setCookiesDeleting] = useState(false)
 
+  // 自动获取访客 cookies（GET/POST /api/webvideo/cookies/harvest）
+  const [harvestStatus, setHarvestStatus] = useState<CookieHarvestStatus | null>(null)
+  const [harvestRefreshing, setHarvestRefreshing] = useState<string | null>(null)
+  const [harvestSaving, setHarvestSaving] = useState(false)
+  /** 即时保存开关时暂存用户其它未保存的编辑（详见 pendingEdits） */
+  const pendingDraftRef = useRef<Partial<Settings> | null>(null)
+
   const refreshCookies = useCallback(async () => {
     setCookiesLoading(true)
-    try {
-      const data = await api.getWebvideoCookies()
-      setCookiesStatus(data)
-    } catch {
+    // 两个接口互不影响：一个失败另一个照样更新界面
+    const [cookiesRes, harvestRes] = await Promise.allSettled([
+      api.getWebvideoCookies(),
+      api.getCookieHarvest(),
+    ])
+    if (cookiesRes.status === 'fulfilled') {
+      setCookiesStatus(cookiesRes.value)
+      // 专用接口失败时，用 /cookies 里附带的 harvest 兜底
+      if (harvestRes.status !== 'fulfilled') setHarvestStatus(cookiesRes.value.harvest)
+    } else {
       setCookiesStatus(null)
-    } finally {
-      setCookiesLoading(false)
     }
+    if (harvestRes.status === 'fulfilled') setHarvestStatus(harvestRes.value)
+    setCookiesLoading(false)
   }, [])
 
   useEffect(() => {
@@ -145,7 +198,10 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (settings) {
-      setDraft(settings)
+      // 即时保存开关会刷新 settings：把用户其它未保存的编辑合回来，避免被覆盖
+      const pending = pendingDraftRef.current
+      pendingDraftRef.current = null
+      setDraft(pending ? { ...settings, ...pending } : settings)
       setSpeedInput(toSpeedInput(settings.maxSpeedBps))
     }
   }, [settings])
@@ -230,6 +286,62 @@ export default function SettingsPage() {
       )
     } finally {
       setCookiesDeleting(false)
+    }
+  }
+
+  /** 开关「启用自动获取」：改 cookieHarvestEnabled 并立即保存（只需提交这一个字段） */
+  const handleHarvestToggle = async (checked: boolean) => {
+    if (!draft) return
+    const before = draft
+    const applyLocal = (next: boolean) => {
+      patch('cookieHarvestEnabled', next)
+      setHarvestStatus((current) =>
+        current ? { ...current, enabled: next, available: next && !!current.chromium } : current,
+      )
+    }
+    applyLocal(checked)
+    setHarvestSaving(true)
+    pendingDraftRef.current = pendingEdits(before, settings)
+    try {
+      await save({ cookieHarvestEnabled: checked })
+      toast.success(
+        checked ? '已开启自动获取访客 cookies' : '已关闭自动获取访客 cookies',
+        checked
+          ? '抖音这类站点会由服务器上的无头浏览器自动获取并定期续期'
+          : '抖音这类站点将需要你手工上传 cookies.txt',
+      )
+    } catch (err) {
+      // 保存失败：把开关和草稿回滚，别让界面显示不存在的状态
+      pendingDraftRef.current = null
+      applyLocal(!checked)
+      setDraft(before)
+      toast.error(
+        '保存失败',
+        humanizeError((err as { code?: string }).code ?? '', (err as Error).message),
+      )
+    } finally {
+      setHarvestSaving(false)
+    }
+  }
+
+  /** 「立即刷新」：抓一次该站点的访客 cookies，成功后用返回的 status 覆盖界面 */
+  const handleHarvestRefresh = async (site: CookieHarvestSite) => {
+    setHarvestRefreshing(site.id)
+    try {
+      const res = await api.refreshCookieHarvest(site.id)
+      setHarvestStatus(res.status)
+      toast.success(
+        `${site.name} 访客 cookies 已更新`,
+        res.meta ? `本次获取 ${res.meta.cookieCount} 条` : undefined,
+      )
+    } catch (err) {
+      // 原样展示后端 error.message（例如「服务器上没有 chromium，请先安装…」）
+      toast.error(
+        `${site.name} 自动获取失败`,
+        humanizeError((err as { code?: string }).code ?? '', (err as Error).message),
+      )
+    } finally {
+      setHarvestRefreshing(null)
     }
   }
 
@@ -701,6 +813,162 @@ export default function SettingsPage() {
                 无法获取 cookies 状态，请确认后端服务已启动。
               </p>
             )}
+
+            {/* 这份 cookies.txt 到底覆盖了哪些站点（答案：cookies 按站点隔离） */}
+            {cookiesStatus?.sites?.length ? (
+              <div className="space-y-2 rounded-xl border border-slate-200 px-3 py-2.5 dark:border-slate-700">
+                <p className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                  当前 cookies.txt 覆盖的站点
+                </p>
+                <ul className="space-y-1.5">
+                  {cookiesStatus.sites.map((site) => (
+                    <li
+                      key={site.domain}
+                      className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400"
+                    >
+                      <Badge tone={site.auto ? 'brand' : 'neutral'}>{site.domain}</Badge>
+                      <span className="shrink-0">{site.count} 条</span>
+                      <span className="text-slate-400 dark:text-slate-500">{site.note}</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[11px] leading-relaxed text-slate-400 dark:text-slate-500">
+                  cookies 按站点隔离：为 Google / YouTube 导出的 cookies 不会让抖音生效，反之亦然。
+                </p>
+              </div>
+            ) : null}
+
+            {/* 自动获取访客 cookies（不用人工导出） */}
+            <div className="space-y-3 border-t border-slate-200 pt-4 dark:border-slate-700">
+              <div className="flex items-start gap-2">
+                <Globe className="mt-0.5 h-4 w-4 shrink-0 text-brand-600 dark:text-brand-300" />
+                <div className="min-w-0">
+                  <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                    自动获取访客 cookies（不用人工导出）
+                  </h4>
+                  <p className="mt-1 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                    抖音 / TikTok 这类站点要的是
+                    <strong className="font-medium text-slate-600 dark:text-slate-300">
+                      浏览器自动生成的访客 cookies
+                    </strong>
+                    （不需要登录），而且几小时就过期——人工导出跟不上，所以由服务器上的无头浏览器自动获取并定期续期。只有
+                    <strong className="font-medium text-slate-600 dark:text-slate-300">
+                      会员专享 / 年龄限制 / 私有视频
+                    </strong>
+                    才需要你手工导出一次登录 cookies。
+                  </p>
+                </div>
+              </div>
+
+              <Switch
+                checked={harvestStatus?.enabled ?? draft.cookieHarvestEnabled}
+                disabled={harvestSaving}
+                onChange={(checked) => void handleHarvestToggle(checked)}
+                label="启用自动获取"
+                description="关闭后，抖音这类站点只能靠你手工上传的 cookies.txt"
+              />
+
+              {cookiesLoading && !harvestStatus ? (
+                <p className="text-xs text-slate-400 dark:text-slate-500">正在读取自动获取状态…</p>
+              ) : harvestStatus ? (
+                <div className="space-y-3">
+                  {harvestStatus.chromium ? (
+                    <p className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                      <Badge tone="success" dot>
+                        浏览器可用
+                      </Badge>
+                      <code className="break-all rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        {harvestStatus.chromium}
+                      </code>
+                    </p>
+                  ) : (
+                    <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        服务器上没有 chromium，无法自动获取：
+                        <code className="mx-1 break-all rounded bg-amber-100/70 px-1 py-0.5 dark:bg-amber-900/40">
+                          sudo apt install -y chromium
+                        </code>
+                        （Debian/Ubuntu/树莓派），或到「修复脚本」页执行{' '}
+                        <code className="break-all rounded bg-amber-100/70 px-1 py-0.5 dark:bg-amber-900/40">
+                          deploy/scripts/fix-cookies-browser.sh
+                        </code>
+                      </span>
+                    </p>
+                  )}
+
+                  {harvestStatus.hint ? (
+                    <p className="flex items-start gap-1.5 rounded-xl bg-slate-50 px-3 py-2 text-[11px] leading-relaxed text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+                      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{harvestStatus.hint}</span>
+                    </p>
+                  ) : null}
+
+                  {!harvestStatus.enabled ? (
+                    <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+                      自动获取已关闭：抖音这类站点将需要你手工上传 cookies.txt
+                    </p>
+                  ) : null}
+
+                  {harvestStatus.sites.length ? (
+                    <ul className="divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 dark:divide-slate-800 dark:border-slate-700">
+                      {harvestStatus.sites.map((site) => {
+                        const stale = harvestStale(site)
+                        return (
+                          <li
+                            key={site.id}
+                            className="flex flex-wrap items-center justify-between gap-2 px-3 py-2"
+                          >
+                            <div className="min-w-0">
+                              <p className="flex flex-wrap items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+                                <span className="font-medium">{site.name}</span>
+                                <span className="text-[11px] text-slate-400 dark:text-slate-500">
+                                  {site.id}
+                                </span>
+                                {site.auto ? (
+                                  <Badge tone="brand">自动</Badge>
+                                ) : (
+                                  <Badge tone="neutral">未启用</Badge>
+                                )}
+                              </p>
+                              <p
+                                className={
+                                  stale
+                                    ? 'mt-0.5 text-[11px] text-amber-600 dark:text-amber-400'
+                                    : 'mt-0.5 text-[11px] text-slate-400 dark:text-slate-500'
+                                }
+                              >
+                                {site.hasCookies
+                                  ? `已获取 ${site.cookieCount} 条 · ${
+                                      site.ageMinutes === null
+                                        ? '—'
+                                        : humanizeAge(site.ageMinutes)
+                                    }`
+                                  : '尚未获取'}
+                                {stale ? ' · 可能已过期，下载时会自动重新获取' : ''}
+                              </p>
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              loading={harvestRefreshing === site.id}
+                              onClick={() => void handleHarvestRefresh(site)}
+                              icon={<RefreshCw className="h-3.5 w-3.5" />}
+                            >
+                              {harvestRefreshing === site.id ? '获取中…' : '立即刷新'}
+                            </Button>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+                  无法获取自动抓取状态，请确认后端服务已启动。
+                </p>
+              )}
+            </div>
 
             <Field
               label="额外参数"

@@ -190,3 +190,95 @@ test('★回归：「需要新鲜 cookies」不能被当成「被限流」（否
   assert.match(msg, /cookies/);
   assert.equal(isRateLimitError(msg), false);
 });
+
+test('★抖音：纯 HTTP 拿 ttwid（不需要浏览器、不需要 chromium）', async () => {
+  // 清掉浏览器路径，证明「没装 chromium 也能自动获取」
+  const savedChromium = process.env.CHROMIUM_PATH;
+  delete process.env.CHROMIUM_PATH;
+  cookies.__setHarvesterLauncher(null);
+
+  const realFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async (url, init) => {
+    fetchCalls += 1;
+    assert.match(String(url), /ttwid\.bytedance\.com/);
+    assert.equal(init?.method, 'POST');
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    assert.equal(body.region, 'cn', '应按官方要求带上 region/aid 等参数');
+    return {
+      status: 200,
+      headers: {
+        getSetCookie: () => ['ttwid=1%7Cabc%7C123%7Cdef; Path=/; Domain=bytedance.com; Max-Age=31536000; HttpOnly; Secure'],
+        get: () => null,
+      },
+    };
+  };
+
+  try {
+    assert.equal(cookies.chromiumPath(), null, '前提：这台机器上探测不到 chromium');
+    const meta = await cookies.harvestNow('douyin');
+    assert.ok(meta, '应成功');
+    assert.equal(meta.via, 'http', '应走 HTTP 途径（不是浏览器）');
+    assert.equal(fetchCalls, 1);
+    const parsed = cookies.readCookieFile(meta.file);
+    const ttwid = parsed.find((c) => c.name === 'ttwid');
+    assert.ok(ttwid, '应有 ttwid');
+    assert.equal(ttwid.value, '1%7Cabc%7C123%7Cdef', 'ttwid 原样保留（含 URL 编码的竖线）');
+    assert.ok(parsed.some((c) => c.domain === '.douyin.com'), '必须挂到 .douyin.com（网页接口要的就是它）');
+    assert.ok(parsed.some((c) => c.domain === '.bytedance.com'), '原始域也保留');
+    assert.match(fs.readFileSync(meta.file, 'utf8'), /#HttpOnly_/, 'ttwid 是 HttpOnly，必须写成 #HttpOnly_ 前缀');
+  } finally {
+    globalThis.fetch = realFetch;
+    if (savedChromium) process.env.CHROMIUM_PATH = savedChromium;
+    cookies.__setHarvesterLauncher(null);
+  }
+});
+
+test('★没有 chromium 时，有 HTTP 途径的站点（抖音）依然能自动获取', async () => {
+  const savedChromium = process.env.CHROMIUM_PATH;
+  delete process.env.CHROMIUM_PATH;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    status: 200,
+    headers: {
+      getSetCookie: () => ['ttwid=xyz; Path=/; Domain=bytedance.com; HttpOnly; Secure'],
+      get: () => null,
+    },
+  });
+  try {
+    assert.equal(cookies.chromiumPath(), null);
+    const r = await cookies.cookiesForUrl('https://v.douyin.com/abc/', null, { forceHarvest: true });
+    assert.equal(r.harvested, true, '没装浏览器也该能自动获取（抖音走 HTTP）');
+    assert.ok(r.cookiesFile);
+    const names = cookies.readCookieFile(r.cookiesFile).map((c) => c.name);
+    assert.ok(names.length >= 1 && names.every((n) => n === 'ttwid'), `应只有 ttwid，实际 ${JSON.stringify(names)}`);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (savedChromium) process.env.CHROMIUM_PATH = savedChromium;
+  }
+});
+
+test('HTTP 途径失败时会退回无头浏览器（两条腿走路）', async () => {
+  process.env.CHROMIUM_PATH = '/bin/sh';
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('模拟网络失败');
+  };
+  let launcherUsed = 0;
+  cookies.__setHarvesterLauncher(async () => {
+    launcherUsed += 1;
+    return [
+      { domain: '.douyin.com', includeSubdomains: true, path: '/', secure: true, expires: 1900000000, name: '__ac_signature', value: 'sig-browser', httpOnly: false },
+    ];
+  });
+  try {
+    const meta = await cookies.harvestNow('douyin');
+    assert.equal(launcherUsed, 1, 'HTTP 失败后应启动浏览器兜底');
+    assert.equal(meta.via, 'browser');
+    assert.equal(cookies.readCookieFile(meta.file)[0].name, '__ac_signature');
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.CHROMIUM_PATH;
+    cookies.__setHarvesterLauncher(null);
+  }
+});

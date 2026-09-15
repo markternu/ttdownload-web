@@ -8,6 +8,8 @@ import type {
   BtProxyStatus,
   BtStatus,
   BtUploadResponse,
+  CookieHarvestMeta,
+  CookieHarvestStatus,
   CookiesStatus,
   DebugStatus,
   FileListResponse,
@@ -438,6 +440,16 @@ export const api = {
 
   /** 读取当前 yt-dlp cookies 状态（GET /api/webvideo/cookies） */
   getWebvideoCookies: () => request<CookiesStatus>('/api/webvideo/cookies'),
+
+  /** 读取「自动获取访客 cookies」状态（GET /api/webvideo/cookies/harvest） */
+  getCookieHarvest: () => request<CookieHarvestStatus>('/api/webvideo/cookies/harvest'),
+
+  /** 立即刷新某个站点的访客 cookies（POST /api/webvideo/cookies/harvest） */
+  refreshCookieHarvest: (site: string) =>
+    request<{ ok: boolean; meta: CookieHarvestMeta; status: CookieHarvestStatus }>(
+      '/api/webvideo/cookies/harvest',
+      jsonBody({ site }),
+    ),
 
   /** 上传 cookies.txt（POST /api/webvideo/cookies，multipart 字段名 file） */
   uploadWebvideoCookies: (file: File) => {
