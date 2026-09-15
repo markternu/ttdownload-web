@@ -430,9 +430,17 @@ test('机器人校验/限流类失败：连续 2 种就停手，并提示「等�
     assert.ok(result.error, '应返回错误');
     assert.match(result.error, /等待 10~30 分钟|别连打|等待/, '应提示等待冷却');
     assert.match(result.error, /JS 运行时|deno/, '应提示确认 JS 运行时');
-    // 连续限流应停止：只试 2 种方式就收手（每种方式内含 2 次原地重试），不把整条阶梯走完
+    // 连续限流应停止：只试 2 种方式就收手，不把整条阶梯走完
     assert.match(result.error, /已自动尝试 2 种方式/, `应只尝试 2 种方式，实际错误：${result.error}`);
     assert.ok(ladderArgs().length <= 7, `连续限流应尽早停手，实际发起 ${ladderArgs().length} 次请求`);
+    // ★ 关键：机器人校验（sign in to confirm）**不该原地重试** ——
+    //   曾经把它当"瞬时错误"，于是「60s 重试→换客户端→30s 重试…」连打十几次，
+    //   只会把出口 IP 的风控拖得更久（树莓派 task#9 实际发生过）。
+    const downloadCalls = ladderAllCalls().filter((l) => l.includes('-o '));
+    assert.ok(
+      downloadCalls.length <= 2,
+      `机器人校验不应原地重试：下载调用应 ≤2 次，实际 ${downloadCalls.length} 次\n${downloadCalls.join('\n')}`,
+    );
   } finally {
     delete process.env.LADDER_DOWNLOAD_ERROR;
     delete process.env.YTDLP_RATE_LIMIT_BACKOFF_MS;

@@ -272,7 +272,7 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
-  test('会员专享视频：解析受限横幅 + 仍然下载（自动多方式尝试）', async (t) => {
+  test('会员专享视频：解析失败横幅（红）+ 仍可尝试下载', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     process.env.BROWSER_PARSE_FAIL =
       "ERROR: [youtube] f6kl3G_ek-A: This video is available to this channel's members on level: 高级VIP会员（人工咨询服务） (or any higher level). Join this channel to get access to members-only content and other exclusive perks.";
@@ -281,13 +281,18 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
       await page.goto(base, { waitUntil: 'networkidle' });
       await page.getByPlaceholder('粘贴视频链接').first().fill('https://www.youtube.com/watch?v=f6kl3G_ek-A');
       await page.getByRole('button', { name: /解析视频/ }).first().click();
-      await page.waitForSelector('text=/解析受限/', { timeout: 20000 });
+      // 解析失败要明确表现为"失败"（红色徽章 + 说明），而不是含糊的"受限但能下"
+      await page.waitForSelector('text=/解析失败/', { timeout: 20000 });
       assert.ok((await page.locator('text=/频道会员专享/').count()) > 0, '应显示会员专享的具体原因');
-      assert.ok((await page.locator('text=/上传 cookies/').count()) > 0, '应引导去上传 cookies');
-      const stillDownload = page.getByRole('button', { name: /仍然下载/ }).first();
-      assert.ok(await stillDownload.isVisible(), '受限视频也应能继续下载');
+      assert.ok((await page.locator('text=/上传/').count()) > 0, '应引导去上传 cookies');
+      assert.ok(
+        (await page.locator('text=/没拿到任何可用格式/').count()) > 0,
+        '应说明没拿到格式、直接下载多半会失败',
+      );
+      const stillDownload = page.getByRole('button', { name: /仍要尝试下载/ }).first();
+      assert.ok(await stillDownload.isVisible(), '仍然允许用户强行尝试下载');
       await stillDownload.click();
-      await page.waitForSelector('text=/已加入下载队列|仍然下载/', { timeout: 15000 });
+      await page.waitForSelector('text=/已加入下载队列|仍要尝试下载/', { timeout: 15000 });
       await page.close();
     } finally {
       delete process.env.BROWSER_PARSE_FAIL;

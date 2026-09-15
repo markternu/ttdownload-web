@@ -875,10 +875,15 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
         return;
       }
     }
-    // 瞬时性错误（YouTube 风控抖一下/页面需要刷新）：先原地重试，不急着换方式
+    // 瞬时性错误（YouTube 风控抖一下/页面需要刷新）：先原地重试，不急着换方式。
+    //
+    // ⚠️ 这里**故意不包含** `sign in to confirm ... not a bot`：
+    //    那不是在"抖一下"，而是 YouTube 对**出口 IP** 的判定。原地重试只是拿同一个 IP
+    //    再撞一次，实测（树莓派上 task#9）会变成「60s 重试 → 换客户端 → 30s 重试 …」
+    //    连打十几次，**只会让这个 IP 的风控更久**。正确做法是尽快停手并告诉用户换出口 IP
+    //    或补登录 cookies（见 isRateLimitError / buildFinalError）。
     const transient =
       rawErr.includes('page needs to be reloaded') ||
-      rawErr.includes('sign in to confirm') ||
       rawErr.includes('http error 5') ||
       rawErr.includes('connection reset') ||
       rawErr.includes('timed out') ||
