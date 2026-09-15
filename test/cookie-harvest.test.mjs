@@ -282,3 +282,67 @@ test('HTTP 途径失败时会退回无头浏览器（两条腿走路）', async 
     cookies.__setHarvesterLauncher(null);
   }
 });
+
+test('★B站：纯 HTTP 从首页拿 buvid3 等访客 cookies（并且带中文 Accept-Language）', async () => {
+  const realFetch = globalThis.fetch;
+  let seenHeaders = {};
+  globalThis.fetch = async (url, init) => {
+    seenHeaders = init?.headers ?? {};
+    assert.match(String(url), /bilibili\.com/);
+    return {
+      status: 200,
+      headers: {
+        getSetCookie: () => [
+          'buvid3=ABC123infoc; Path=/; Domain=.bilibili.com; Expires=Wed, 01 Jan 2027 00:00:00 GMT',
+          'b_nut=1789459423; Path=/; Domain=.bilibili.com',
+          'unwanted=xx; Path=/; Domain=.bilibili.com',
+        ],
+        get: () => null,
+      },
+    };
+  };
+  try {
+    const got = await cookies.fetchHomepageCookies('https://www.bilibili.com/', ['buvid3', 'b_nut']);
+    assert.deepEqual(
+      got.map((c) => c.name).sort(),
+      ['b_nut', 'buvid3'],
+      '只保留需要的名字',
+    );
+    assert.ok(got.every((c) => c.domain === '.bilibili.com'), '应挂到 .bilibili.com（覆盖子域）');
+    assert.equal(seenHeaders['Accept-Language'], 'zh-CN,zh;q=0.9', '对国内站点必须发中文 Accept-Language');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('B站已加入默认可自动获取的站点，并带 referer + 中文 Accept-Language', () => {
+  // 这个文件开头为了别的用例设了 COOKIE_HARVEST_SITES，这里要看「默认值」
+  const saved = process.env.COOKIE_HARVEST_SITES;
+  delete process.env.COOKIE_HARVEST_SITES;
+  try {
+    assert.ok(cookies.defaultHarvestSites().includes('bilibili'), 'B站应默认开启自动获取');
+    assert.ok(cookies.defaultHarvestSites().includes('douyin'), '抖音也应在默认清单里');
+  } finally {
+    if (saved !== undefined) process.env.COOKIE_HARVEST_SITES = saved;
+  }
+  const p = cookies.profileFor('https://b23.tv/vckgrcX');
+  assert.equal(p?.id, 'bilibili');
+  assert.ok(p.extraArgs.includes('--referer'));
+  const i = p.extraArgs.indexOf('--add-header');
+  assert.ok(i >= 0 && /Accept-Language: zh-CN/.test(p.extraArgs[i + 1]), '应覆盖成中文 Accept-Language');
+  assert.equal(typeof p.httpProvider, 'function', 'B站应能用纯 HTTP 拿 cookies（不需要浏览器）');
+  const site = cookies.harvestStatus().sites.find((x) => x.id === 'bilibili');
+  assert.equal(site?.needsBrowser, false, 'harvestStatus 里应标明不需要浏览器');
+});
+
+test('★B站 412 的错误提示必须指向「出口 IP 归属」，而不是让用户去折腾 cookies', async () => {
+  const { humanizeYtDlpError } = await import('../dist/modules/webvideo.js');
+  const msg = humanizeYtDlpError(
+    'ERROR: [BiliBili] 1eh8q6rEoS: Unable to download webpage: HTTP Error 412: Precondition Failed',
+    'https://b23.tv/vckgrcX',
+  );
+  assert.match(msg, /412/);
+  assert.match(msg, /出口 IP|机房|海外/, '要指出是出口 IP 归属问题');
+  assert.match(msg, /bilibili\.com|b23\.tv/, '要指出哪些域名要走直连');
+  assert.doesNotMatch(msg, /上传 cookies\.txt（或填/, '不能又让用户去导 cookies（那是错的方向）');
+});

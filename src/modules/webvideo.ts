@@ -281,6 +281,18 @@ export function humanizeYtDlpError(raw: string, url = ''): string {
   if (has('private video', 'this video is private')) {
     return '该视频为私有视频，只有有权限的账号能看：若你有权限，请在设置里上传 cookies.txt 后重试';
   }
+  // 412 / 403：最常见的是站点按「出口 IP 归属」风控（B站对机房/海外 IP 的视频页直接 412），
+  // 与 cookies/账号无关 —— 必须说清楚，否则用户会一直去折腾 cookies。
+  if (has('http error 412', 'precondition failed', 'http error 403', 'forbidden')) {
+    const who = site?.id === 'bilibili' ? 'B站' : site?.name ? site.name : '该站点';
+    const code = has('412') ? '412' : '403';
+    return (
+      `${who} 返回 HTTP ${code}：这是**按出口 IP 归属**做的风控（机房/海外 IP 会被直接拒绝），不是 cookies 或账号问题。` +
+      `抖音这类站点不受影响。处理办法：在路由器/代理里让 ${site?.id === 'bilibili' ? 'bilibili.com、b23.tv、hdslb.com、bilivideo.com' : '该站点'} 走国内家庭宽带直连，` +
+      `或给 yt-dlp 配一个国内出口的代理（设置 → 公开视频（yt-dlp）→ 额外参数，例如 --proxy socks5://127.0.0.1:1080）。` +
+      `首页「网络自检」里新增了「出口 IP 归属」「B站可达性」两项，可直接看到当前出口是哪里`
+    );
+  }
   if (has('unsupported url')) return '当前平台不支持解析该链接';
   if (has('video unavailable') || s.includes('not available')) return '视频不可访问（可能已删除、地区限制或需要登录）';
   if (has('drm')) return '该视频受 DRM 保护（Widevine 等），任何下载工具都无法直接下载';

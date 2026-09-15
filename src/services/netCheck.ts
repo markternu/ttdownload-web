@@ -62,6 +62,132 @@ function proxyEnv(): Record<string, string> {
   return out;
 }
 
+/** 常见云厂商/机房关键字：命中就说明出口是机房 IP（很多站点会对它风控） */
+const DATACENTER_HINTS =
+  /oracle|amazon|aws|google|microsoft|azure|digitalocean|vultr|linode|akamai|hetzner|ovh|scaleway|cloudflare|alibaba|aliyun|tencent|huawei cloud|choopa|contabo|leaseweb|m247|datacamp|hosting|datacenter|server/i;
+
+export interface EgressInfo {
+  ip: string | null;
+  org: string;
+  country: string;
+  city: string;
+  datacenter: boolean;
+  overseas: boolean;
+  error?: string;
+}
+
+/** 查当前出口 IP 与归属（yt-dlp 走的是同一个出口） */
+export async function egressInfo(timeoutMs = 8000): Promise<EgressInfo> {
+  const out: EgressInfo = { ip: null, org: '', country: '', city: '', datacenter: false, overseas: false };
+  const get = async (url: string): Promise<string> => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: ac.signal, headers: { 'User-Agent': 'ttdownload-web-netcheck' } });
+      return (await res.text()).trim();
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  try {
+    try {
+      out.ip = JSON.parse(await get('https://api.ipify.org?format=json')).ip ?? null;
+    } catch {
+      out.ip = (await get('https://api.ipify.org')).slice(0, 64) || null;
+    }
+    if (out.ip) {
+      const info = JSON.parse(await get(`https://ipinfo.io/${encodeURIComponent(out.ip)}/json`));
+      out.org = String(info.org ?? '');
+      out.country = String(info.country ?? '');
+      out.city = String(info.city ?? '');
+      out.datacenter = DATACENTER_HINTS.test(out.org);
+      out.overseas = !!out.country && out.country.toUpperCase() !== 'CN';
+    }
+  } catch (e) {
+    out.error = (e as Error).message;
+  }
+  return out;
+}
+
+/** 出口 IP 自检项 */
+async function egressCheck(): Promise<NetworkCheck> {
+  const started = Date.now();
+  const info = await egressInfo();
+  if (!info.ip) {
+    return {
+      id: 'egress-ip',
+      label: '出口 IP 归属（决定会不会被 B站/YouTube 拦）',
+      status: 'skip',
+      latencyMs: Date.now() - started,
+      detail: `查询不到出口 IP：${info.error ?? '未知原因'}`,
+      group: 'net',
+    };
+  }
+  const where = [info.country, info.city].filter(Boolean).join(' / ') || '未知地区';
+  const risky = info.datacenter || info.overseas;
+  return {
+    id: 'egress-ip',
+    label: '出口 IP 归属（决定会不会被 B站/YouTube 拦）',
+    status: risky ? 'fail' : 'ok',
+    latencyMs: Date.now() - started,
+    detail:
+      `出口 IP ${info.ip}（${where}，${info.org || '归属未知'}）` +
+      (info.datacenter ? '｜判定：机房 IP' : '') +
+      (info.overseas ? '｜判定：海外 IP' : ''),
+    hint: risky
+      ? 'B站 对机房/海外 IP 的视频页与接口会直接返回 412；YouTube 也可能要求「确认你不是机器人」。' +
+        '这不是 cookies 或账号问题。处理办法：在路由器/代理里让 bilibili.com、b23.tv、hdslb.com、bilivideo.com、' +
+        'youtube.com、googlevideo.com 走**国内家庭宽带直连**，或给 yt-dlp 配一个国内出口的代理（设置 → 公开视频（yt-dlp）→ 额外参数，例如 --proxy socks5://127.0.0.1:1080）'
+      : undefined,
+    group: 'net',
+  };
+}
+
+/** B站可达性：首页 200 但视频页 412 = 被按出口 IP 拦了（实测定性） */
+async function bilibiliEgressCheck(): Promise<NetworkCheck> {
+  const started = Date.now();
+  const ua =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+  const probe = async (url: string): Promise<number> => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10000);
+    try {
+      const res = await fetch(url, { signal: ac.signal, headers: { 'User-Agent': ua, 'Accept-Language': 'zh-CN,zh;q=0.9' } });
+      return res.status;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  try {
+    const home = await probe('https://www.bilibili.com/');
+    const video = await probe('https://www.bilibili.com/video/BV1GJ411x7h7');
+    const blocked = video === 412 || video === 403;
+    return {
+      id: 'bilibili-egress',
+      label: 'B站（哔哩哔哩）可达性',
+      status: blocked ? 'fail' : video < 400 ? 'ok' : 'skip',
+      latencyMs: Date.now() - started,
+      detail: `首页 HTTP ${home}，视频页 HTTP ${video}`,
+      hint: blocked
+        ? `B站对当前出口 IP 返回 ${video}（Precondition Failed），这就是「B站下载失败」的原因：` +
+          'B站会拦截机房/海外 IP 的视频页与 API。请让 B站相关域名走国内直连或换国内出口的代理；带上你的 B站登录 cookies 也不一定能绕过（这是 IP 风控，不是登录态问题）'
+        : home >= 400
+          ? 'B站首页都不通：检查出口网络/代理分流'
+          : undefined,
+      group: 'net',
+    };
+  } catch (e) {
+    return {
+      id: 'bilibili-egress',
+      label: 'B站（哔哩哔哩）可达性',
+      status: 'skip',
+      latencyMs: Date.now() - started,
+      detail: `检测异常：${(e as Error).message}`,
+      group: 'net',
+    };
+  }
+}
+
 export async function probeHttp(
   url: string,
   timeoutMs: number,
@@ -156,6 +282,15 @@ async function runChecks(): Promise<NetworkReport> {
         : '未配置代理（直连）',
     group: 'net',
   });
+
+  // ---- 0.5) 出口 IP 归属（这一项决定了 B站/YouTube 会不会直接把你拦掉）----
+  //  实测踩过的坑：家里路由器把整网流量走了境外云主机（Oracle 伦敦），于是
+  //  ① B站视频页/接口一律 412（首页却是 200）② YouTube 报「Sign in to confirm you're not a bot」。
+  //  这两件事看起来像 cookies/账号问题，其实只是出口 IP 的归属问题 —— 必须让用户一眼看到。
+  checks.push(await egressCheck());
+
+  // ---- 0.6) B站可达性（用真实视频页测，比猜 IP 归属更准）----
+  checks.push(await bilibiliEgressCheck());
 
   // ---- 1) DNS ----
   const hosts = ['www.youtube.com', 'redirector.googlevideo.com', 'github.com'];
@@ -514,15 +649,28 @@ async function runChecks(): Promise<NetworkReport> {
   checks.push(...httpsChecks, ...ytdlpChecks, ...cookiesChecks, ...jsRuntimeChecks, ...localChecks);
 
   // ---- 结论 ----
-  const netFail = checks.filter((c) => c.group === 'net' && c.id !== 'proxy' && c.status === 'fail');
+  const netFail = checks.filter(
+    (c) => c.group === 'net' && c.id !== 'proxy' && c.status === 'fail' && c.id !== 'egress-ip' && c.id !== 'bilibili-egress',
+  );
+  // 出口 IP 归属问题单独提出来说：它不是「网络不通」，而是「会被站点风控」
+  const egressRisky = checks.find((c) => c.id === 'egress-ip' && c.status === 'fail');
+  const biliBlocked = checks.find((c) => c.id === 'bilibili-egress' && c.status === 'fail');
   const ytFail = checks.filter((c) => c.group === 'ytdlp' && c.status === 'fail' && c.id !== 'cookies');
   const overall: NetworkReport['overall'] = netFail.length > 0 ? 'fail' : ytFail.length > 0 ? 'partial' : 'ok';
+  // 出口 IP 被站点风控这件事，无论 overall 是什么都要写进结论里
+  // （它看起来「网络一切正常」，但 B站 就是下不动 —— 之前用户正是卡在这里）
+  const egressNote = egressRisky
+    ? `；⚠️ 出口 IP 是${/机房/.test(egressRisky.detail) ? '机房' : ''}${/海外/.test(egressRisky.detail) ? '海外' : ''} IP（${egressRisky.detail.replace(/^出口 IP /, '')}），B站/YouTube 可能直接拒绝 —— 这不是 cookies 问题`
+    : '';
+  const biliNote = biliBlocked ? '；B站对当前出口 IP 返回 412（首页能开但视频页被拦）' : '';
   const summary =
-    overall === 'ok'
+    (overall === 'ok'
       ? '网络链路正常：YouTube 元数据解析成功、视频 CDN 可达 —— 在线视频下载可用'
       : overall === 'partial'
         ? `基础网络正常，但 yt-dlp / YouTube 链路有问题（${ytFail.map((c) => c.label).join('、')}）—— 在线视频可能下载失败，请看下方建议`
-        : `基础外网不通（${netFail.map((c) => c.label).join('、')}）—— 请先解决树莓派的出网/DNS/代理`;
+        : `基础外网不通（${netFail.map((c) => c.label).join('、')}）—— 请先解决树莓派的出网/DNS/代理`) +
+    biliNote +
+    egressNote;
 
   scoped.mark('NET_CHECK', '网络自检完成', { overall, summary });
   return {

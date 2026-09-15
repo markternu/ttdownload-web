@@ -258,11 +258,26 @@ test('网络自检：yt-dlp / YouTube / CDN 全部通过，并带中文说明与
   }
   // overall 取决于真实外网（https-google/youtube/github 三项），这里只做一致性校验：
   // 基础网络全通过 → 因为 yt-dlp 链路已通过，overall 必须是 ok；否则必须是 fail。
-  const netFailures = report.checks.filter((c) => c.group === 'net' && c.id !== 'proxy' && c.status === 'fail');
+  //
+  // 例外：egress-ip / bilibili-egress 这两项判的是「出口 IP 会不会被站点风控」，
+  // 不是「外网通不通」—— 测试机出口正好是境外机房（Oracle），这两项必然 fail，
+  // 但它们不该把 overall 拖成「基础外网不通」（那会给出完全错误的建议）。
+  const SITE_RISK_IDS = new Set(['egress-ip', 'bilibili-egress']);
+  const netFailures = report.checks.filter(
+    (c) => c.group === 'net' && c.id !== 'proxy' && !SITE_RISK_IDS.has(c.id) && c.status === 'fail',
+  );
   if (netFailures.length === 0) {
     assert.equal(report.overall, 'ok', '基础网络与 yt-dlp 链路都通过时 overall 应为 ok');
   } else {
     assert.equal(report.overall, 'fail', `基础网络有失败项时 overall 应为 fail（失败项：${netFailures.map((c) => c.id).join(',')}）`);
+  }
+  // 出口 IP 有风险时，结论摘要必须把这件事说出来（否则用户只会看到一片绿）
+  const egress = report.checks.find((c) => c.id === 'egress-ip');
+  const bili = report.checks.find((c) => c.id === 'bilibili-egress');
+  assert.ok(egress && bili, '网络自检应包含「出口 IP 归属」与「B站可达性」两项');
+  assert.ok(egress.detail.includes('出口 IP'), `应报出出口 IP 与归属，实际：${egress.detail}`);
+  if (egress.status === 'fail' || bili.status === 'fail') {
+    assert.match(report.summary, /出口 IP|B站/, '出口被风控时摘要里要点出来');
   }
   // 无论外网如何，yt-dlp 三项检查必须是确定的（用假 yt-dlp + 本地 CDN 服务）
   assert.equal(byId['ytdlp-version'].status, 'ok');

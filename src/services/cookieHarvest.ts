@@ -115,6 +115,59 @@ export async function fetchTtwidCookies(target: 'douyin' | 'tiktok', timeoutMs =
   }
 }
 
+/**
+ * 通用「纯 HTTP 抓首页访客 cookies」：不少站点（如 B站）在首页响应头里就把
+ * `buvid3`/`b_nut` 这类访客标识发下来了，不需要跑 JS 挑战。
+ * 只保留需要的名字（`want` 为空则全要），并在域名上做基础过滤。
+ */
+export async function fetchHomepageCookies(
+  url: string,
+  want: string[] = [],
+  timeoutMs = 15000,
+): Promise<ParsedCookie[]> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': DESKTOP_UA,
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+      },
+      signal: ac.signal,
+    });
+    const host = hostOf(url);
+    const lines = typeof res.headers.getSetCookie === 'function'
+      ? res.headers.getSetCookie()
+      : [res.headers.get('set-cookie') ?? ''];
+    const out: ParsedCookie[] = [];
+    const expires = Math.floor(Date.now() / 1000) + 86400 * 30;
+    for (const line of lines) {
+      const name = line.split('=')[0]?.trim();
+      if (!name) continue;
+      if (want.length && !want.includes(name)) continue;
+      const value = /^[^=]+=([^;]*)/.exec(line)?.[1] ?? '';
+      const domain = /\bdomain=([^;]+)/i.exec(line)?.[1]?.trim();
+      // 站点自己没写 Domain 时，挂到该站的主域（带前导点，覆盖子域）
+      const rootDomain = host.split('.').slice(-2).join('.');
+      out.push({
+        domain: domain ? (domain.startsWith('.') ? domain : `.${domain}`) : `.${rootDomain}`,
+        includeSubdomains: true,
+        path: /\bpath=([^;]+)/i.exec(line)?.[1]?.trim() || '/',
+        secure: /;\s*secure/i.test(line),
+        expires,
+        name,
+        value,
+        httpOnly: /httponly/i.test(line),
+      });
+    }
+    if (!out.length) throw new Error(`首页没有下发需要的 cookies（HTTP ${res.status}）`);
+    return out;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 取 URL 的 host（失败返回 ''） */
 export function hostOf(url: string): string {
   try {
@@ -161,7 +214,14 @@ export const SITE_PROFILES: CookieSiteProfile[] = [
     harvestUrl: 'https://www.bilibili.com/',
     waitMs: 4000,
     requireCookies: false,
-    extraArgs: ['--referer', 'https://www.bilibili.com/'],
+    extraArgs: [
+      '--referer',
+      'https://www.bilibili.com/',
+      // B站对 en-US 的 Accept-Language 更容易判定为爬虫（实测复刻 yt-dlp 默认头就 412）
+      '--add-header',
+      'Accept-Language: zh-CN,zh;q=0.9',
+    ],
+    httpProvider: () => fetchHomepageCookies('https://www.bilibili.com/', ['buvid3', 'buvid4', 'b_nut', 'buvid_sig']),
   },
   {
     id: 'youtube',
@@ -211,7 +271,8 @@ export function profileFor(url: string): CookieSiteProfile | null {
 export function defaultHarvestSites(): string[] {
   const raw = String(process.env.COOKIE_HARVEST_SITES ?? '').trim();
   if (raw) return raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-  return ['douyin', 'tiktok'];
+  // 抖音/TikTok 实测必需；B站的 buvid3 用纯 HTTP 也能拿到，一起放开
+  return ['douyin', 'tiktok', 'bilibili'];
 }
 
 export function harvestedDir(): string {
