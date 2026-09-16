@@ -251,6 +251,8 @@ export function createPublishTask(opts: {
   originalName: string;
   sizeBytes: number;
   parentTaskId: number;
+  /** 扫货来源：发布成功后要删哪个目录、删哪个 transmission 任务 */
+  harvest?: Record<string, unknown>;
 }): number {
   const task = tasksRepo.create({
     module: opts.module,
@@ -266,7 +268,7 @@ export function createPublishTask(opts: {
       originalName: opts.originalName,
       publishUnits: [{ files: opts.files, name: opts.originalName }],
       parentTaskId: opts.parentTaskId,
-      earlyHandoff: true,
+      ...(opts.harvest ? { harvest: opts.harvest } : { earlyHandoff: true }),
     },
   });
   taskLog(task.id, 'pipeline').mark('BT_EARLY',

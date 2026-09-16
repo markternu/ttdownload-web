@@ -23,7 +23,12 @@ function buidDirs(): DirLayout {
     btZip: p('transmission', 'btzhongzi_zip'),
     btPending: p('transmission', 'btzhongzi_nodownd'),
     btQueued: p('transmission', 'btzhongzi_yijingdownding'),
-    btDownload: p('transmission', 'downloads'),
+    // ⚠️ 生产上用 **transmission 自己的完成目录**（部署脚本会写进 .env）：
+    //    我们以前把它改成 /ttdownload/...（root 所有），而 transmission 以 debian-transmission
+    //    运行 —— 下完从 incomplete 搬过来时 "Permission denied (13)"，每个完成的种子都失败、
+    //    文件永远进不了 downloads。
+    //    没配置时退回下载根目录下的 transmission/downloads（本地开发/测试用）。
+    btDownload: str(process.env.BT_DOWNLOAD_DIR, p('transmission', 'downloads')),
     aria2: p('downd_aria2_path'),
     webTools: p('downd_web_tools'),
     webToolsDone: p('downd_web_tools', 'downdok'),
@@ -37,8 +42,13 @@ function buidDirs(): DirLayout {
 export const DIRS: DirLayout = buidDirs();
 
 export function ensureDirs(): void {
+  // 注意：btDownload / transmission 的 incomplete 目录**不属于我们**（属主 debian-transmission），
+  // 不去创建它们 —— 没权限会直接 EACCES，而且那是 transmission 的地盘。
+  const skip = new Set<string>([path.resolve(DIRS.btDownload), path.resolve(config.transmissionIncompleteDir)]);
   for (const dir of Object.values(DIRS)) {
-    fs.mkdirSync(dir, { recursive: true });
+    const abs = path.resolve(dir);
+    if (skip.has(abs)) continue;
+    fs.mkdirSync(abs, { recursive: true });
   }
 }
 
@@ -68,13 +78,20 @@ export const config = {
   },
   autoRetry: num(process.env.AUTO_RETRY, 2),
 
-  // BT 内容甄别：默认"只要视频 + 排掉广告"，关键词可由用户在设置页增删。
-  // 图片默认 auto：种子里有视频就把图片当宣传图排除；整包都是图片（照片合集）才保留。
+  // BT：只挑视频文件（按扩展名，大小写不敏感），别的什么都不做。
+  // 不做关键词/广告识别 —— 那套判断不准，会把正片当广告排除（用户明确要求删掉）。
   btSelect: {
-    keepImages: (process.env.BT_KEEP_IMAGES as 'auto' | 'always' | 'never') || 'auto',
-    blockKeywords: [] as string[], // 空 = 用内置默认表（services/btSelect.ts）
-    minVideoBytes: num(process.env.BT_MIN_VIDEO_BYTES, 0),
-    publishIndividuallyMinBytes: num(process.env.BT_PUBLISH_INDIVIDUAL_MIN, 500 * 1024 ** 2),
+    /** 单个文件小于它：多个小文件合成一个 zip；大于等于它：一个一个单独走 */
+    smallFileMaxBytes: num(process.env.BT_SMALL_FILE_MAX, 300 * 1024 ** 2),
+  },
+  // BT 种子超时策略：扔给 transmission 后只读进度，8 小时内不干涉
+  btPolicy: {
+    /** 交给 transmission 多少小时后第一次判断 */
+    checkAfterHours: num(process.env.BT_CHECK_AFTER_HOURS, 8),
+    /** 到点时进度 ≤ 该百分比 -> 直接清理（连残留一起删） */
+    minProgressPercent: num(process.env.BT_MIN_PROGRESS_PERCENT, 60),
+    /** 进度 > 该值时再给这么多小时宽限，到点还没完也清理 */
+    graceHours: num(process.env.BT_GRACE_HOURS, 4),
   },
   /** 修复脚本上传/执行：默认关闭（危险功能，需在网页显式开启） */
   scriptUploadEnabled: str(process.env.SCRIPT_UPLOAD_ENABLED, '0') === '1',

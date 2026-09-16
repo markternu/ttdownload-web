@@ -5,7 +5,7 @@ import { logger, taskLog } from '../core/logger';
 import { runCommand } from '../services/archive';
 import { getSettings } from '../services/settings';
 import { createPublishTask } from '../services/pipeline';
-import { selectBtFiles, buildPublishUnits, pickUniqueDirName, DEFAULT_BT_BLOCK_KEYWORDS } from '../services/btSelect';
+import { selectBtFiles } from '../services/btSelect';
 import { seedsRepo, tasksRepo } from '../core/db';
 import { cleanupBtTaskDirs } from '../services/btCleanup';
 import type { SeedItem } from '../types';
@@ -206,6 +206,17 @@ export const transmissionModule: ModuleAdapter = {
    * 交给调度器复查空间；装不下就回等待队列（种子在 transmission 里保持暂停），
    * 排到它时 start() 只需要 torrent-start。幂等：重复调用不会加出第二个种子。
    */
+  /**
+   * 准备：把种子**以暂停状态**加给 transmission，只勾选视频文件，算出视频总大小用于排队。
+   *
+   * 三条铁律（都是真机踩出来的）：
+   *  ① **绝不覆盖 download-dir / incomplete-dir**。transmission 以 debian-transmission 运行，
+   *     它自己的两个目录（/var/lib/transmission/downloads 与 /var/lib/transmission/incomplete）
+   *     它有写权限；我们以前把它改成 /ttdownload/...（root 所有），结果它下完从 incomplete
+   *     搬过来时 "Permission denied (13)"，每个种子都失败、文件永远进不了 downloads。
+   *  ② 只勾选视频（大小写不敏感的扩展名白名单），别的文件标 unwanted —— 不下广告图和垃圾。
+   *  ③ 不做任何"广告识别"之类的猜测（用户明确否掉了：会把正片误杀）。
+   */
   async prepare(task): Promise<void> {
     const payload = task.payload ?? {};
 
@@ -214,14 +225,13 @@ export const transmissionModule: ModuleAdapter = {
       throw new Error('transmission 不可用：请确认已安装并启动 transmission-daemon');
     }
 
-    // 已经加过（上次 prepare 过、或因空间不够被退回等待、或服务重启后重新排队）→ 复用。
-    // ⚠️ 这条分支必须放在"检查种子文件存在"**之前**：prepare 成功后我们会把 .torrent
-    //    移到 btQueued 留痕，再检查原路径就会误判成"种子不存在"而永久失败 ——
-    //    空间不够被退回等待的种子下一轮一重试就废了（真机踩过）。
+    // 已经加过（空间不够被退回等待 / 服务重启重新排队）→ 复用，保持暂停。
+    // 这条必须放在"检查种子文件存在"之前：prepare 成功后 .torrent 会被移到 btQueued 留痕，
+    // 再查原路径会误判"种子不存在"而永久失败（空间不够被退回等待的种子一重试就废）。
     const existingId = Number(payload.torrentId ?? 0);
     if (existingId) {
       await client.call('torrent-stop', { ids: [existingId] }).catch(() => undefined);
-      await syncBtSelection(task, existingId);
+      await syncBtVideoSelection(task, existingId);
       return;
     }
 
@@ -229,22 +239,18 @@ export const transmissionModule: ModuleAdapter = {
     if (!seedPath || !fs.existsSync(seedPath)) throw new Error('种子文件不存在（可能已被移动或删除）');
 
     const base64 = fs.readFileSync(seedPath).toString('base64');
-    const dirName = pickUniqueBtDirName(seedPath, task.id);
-    const downloadDir = path.join(config.dirs.btDownload, dirName);
-    fs.mkdirSync(downloadDir, { recursive: true });
-
-    const addRes = await client.call<{ 'torrent-added'?: { id: number; name: string; hashString: string }; 'torrent-duplicate'?: { id: number; name: string } }>(
-      'torrent-add',
-      { metainfo: base64, 'download-dir': downloadDir, paused: true },
-    );
+    const addRes = await client.call<{
+      'torrent-added'?: { id: number; name: string; hashString: string };
+      'torrent-duplicate'?: { id: number; name: string; hashString?: string };
+    }>('torrent-add', { metainfo: base64, paused: true });
     const added = addRes['torrent-added'] ?? addRes['torrent-duplicate'];
     if (!added) throw new Error('transmission 未返回任务 id（种子可能无效）');
     const torrentId = added.id;
 
-    // 先把 payload 落库再选片：万一选片抛错（比如没有核心内容），cancel 也能把它清掉
-    tasksRepo.update(task.id, { payload: { ...payload, torrentId, downloadDir } });
+    // 先把 id 落库再选片：万一选片抛错（整个种子没有视频），cancel 也能把它清掉
+    tasksRepo.update(task.id, { payload: { ...payload, torrentId, btHash: added.hashString ?? '' } });
 
-    const selectedBytes = await syncBtSelection(task, torrentId);
+    const selectedBytes = await syncBtVideoSelection(task, torrentId);
 
     // 种子文件移入"已下载中"目录留痕（只做一次）
     if (fs.existsSync(seedPath)) {
@@ -265,13 +271,12 @@ export const transmissionModule: ModuleAdapter = {
     }
 
     logger.child('transmission').mark('BT_PREPARE',
-      `BT 任务已备好（种子暂停中，等空间准入）#${task.id}：要下 ${(selectedBytes / 1024 ** 2).toFixed(1)}MB`, {
+      `BT 已备好（种子暂停中，等空间准入）#${task.id}：只挑视频 ${(selectedBytes / 1024 ** 2).toFixed(1)}MB`, {
         torrentId,
+        hash: added.hashString ?? '',
         selectedBytes,
-        downloadDir,
       });
   },
-
 
 /** 真正开跑：种子在 prepare 阶段已经加好（暂停）、选好片，这里只放行 */
   async start(task): Promise<void> {
@@ -284,6 +289,8 @@ export const transmissionModule: ModuleAdapter = {
     }
     const selectedBytes = Math.max(0, Number(payload.selectedBytes ?? task.expectBytes ?? 0) || 0);
     await client.call('torrent-start', { ids: [torrentId] });
+    // 记录"什么时候扔给 transmission 的"：8 小时/4 小时策略从这一刻算起
+    const handedAt = String(payload.btHandedAt ?? new Date().toISOString());
 
     const seedId = Number(payload.seedId ?? 0);
     if (seedId) {
@@ -296,8 +303,8 @@ export const transmissionModule: ModuleAdapter = {
       startedAt: new Date().toISOString(),
       payload: {
         ...payload,
-        // 出清机制：累计"实际下载尝试时长"，初始 0（满 10 小时才参与出清判断）
-        btActiveMs: Number(payload.btActiveMs ?? 0) || 0,
+        btHandedAt: handedAt,
+        btLastProgress: 0,
         btLastCheckAt: null,
       },
     });
@@ -308,126 +315,53 @@ export const transmissionModule: ModuleAdapter = {
     });
   },
 
+  /**
+   * 只**读**进度。8 小时窗口内不对 transmission 里的种子做任何操作
+   * （不暂停、不删文件、不改勾选）—— 有的资源这会儿没速度，过一小时才上线，
+   * 干涉只会把能下完的种子搞坏。到点后的清理由 btPolicy 负责；
+   * 下完的货由 btHarvest 扫目录处理。
+   */
   async poll(task): Promise<PollResult> {
     const payload = task.payload ?? {};
     const torrentId = Number(payload.torrentId ?? 0);
     if (!torrentId) return { error: '缺少 transmission 任务 id（需重试）' };
+
     const client = transmissionClient();
     let torrent: TorrentInfo | undefined;
     try {
       const info = await client.call<{ torrents: TorrentInfo[] }>('torrent-get', {
         ids: [torrentId],
-        fields: ['id', 'name', 'status', 'percentDone', 'rateDownload', 'eta', 'leftUntilDone', 'totalSize', 'downloadDir', 'error', 'errorString', 'files', 'wanted'],
+        fields: ['id', 'name', 'status', 'percentDone', 'rateDownload', 'eta', 'leftUntilDone', 'totalSize', 'downloadDir', 'error', 'errorString', 'files', 'wanted', 'hashString', 'uploadRatio'],
       });
       torrent = info.torrents?.[0];
     } catch (e) {
       return { error: `transmission 查询失败: ${(e as Error).message}` };
     }
     if (!torrent) return { error: 'transmission 中找不到该任务（可能被外部删除）' };
-    if (torrent.error && torrent.error !== 0) {
-      return { error: `BT 下载失败：${torrent.errorString || `错误码 ${torrent.error}`}` };
-    }
+
     const progress = Math.min(100, (torrent.percentDone ?? 0) * 100);
     const speed = torrent.rateDownload ?? 0;
     const eta = torrent.eta && torrent.eta > 0 ? torrent.eta : null;
 
-    const finished = (torrent.leftUntilDone ?? 1) === 0 && (torrent.percentDone ?? 0) >= 1;
-
-    // ---- 早交付：单个大文件一下完就单独交给流水线，不用等整个种子 ----
-    // 用户要的是"下载好了一个就把一个单独改名加密"。前提是把该文件在 transmission 里
-    // 标成 unwanted —— 否则文件被移走后，transmission 重新校验会认为文件缺失又去重下。
-    if (!finished) {
-      const sel0 = getSettings().btSelect;
-      const threshold0 = Math.max(0, Number(sel0.publishIndividuallyMinBytes) || 0);
-      if (threshold0 > 0 && Array.isArray(torrent.files) && torrent.files.length) {
-        const doneList: string[] = Array.isArray(payload.handedOff) ? [...(payload.handedOff as string[])] : [];
-        const dir0 = String(payload.downloadDir || torrent.downloadDir || config.dirs.btDownload);
-        const picked: { idx: number; name: string; size: number }[] = [];
-        for (let i = 0; i < torrent.files.length; i += 1) {
-          const f = torrent.files[i];
-          if (!f || !f.name) continue;
-          const want = wantedIdxOf(torrent.wanted, i);
-          if (!want) continue;
-          if (doneList.includes(f.name)) continue;
-          const complete = f.length > 0 && f.bytesCompleted >= f.length;
-          if (!complete) continue;
-          if (f.length < threshold0) continue; // 小文件留到最后一起打包
-          picked.push({ idx: i, name: f.name, size: f.length });
-        }
-        if (picked.length) {
-          // ① 先标 unwanted（防止移走后重下）
-          await client.call('torrent-set', { ids: [torrentId], 'files-unwanted': picked.map((p) => p.idx) }).catch(() => undefined);
-          // ② 每个文件建一个独立发布任务
-          let handedBytes = 0;
-          for (const p of picked) {
-            const abs = path.join(dir0, p.name);
-            if (!fs.existsSync(abs)) continue;
-            createPublishTask({
-              module: 'transmission',
-              title: `${torrent.name || task.title || `task_${task.id}`} · ${path.basename(p.name).replace(/\.[^.]+$/, '')}`,
-              platform: 'BT',
-              files: [abs],
-              originalName: path.basename(p.name).replace(/\.[^.]+$/, ''),
-              sizeBytes: p.size,
-              parentTaskId: task.id,
-            });
-            doneList.push(p.name);
-            handedBytes += p.size;
-          }
-          if (handedBytes > 0) {
-            // ③ 记下已交付 + 把预留空间减掉（文件已经不在下载队列里了）
-            const nextExpect = Math.max(0, Number(task.expectBytes ?? 0) - handedBytes);
-            tasksRepo.update(task.id, {
-              payload: { ...payload, handedOff: doneList },
-              expectBytes: nextExpect,
-            });
-          }
-        }
-      }
+    // 进度快照留痕（给 8h/4h 判断用，也方便排查"到底卡在多少"）
+    if (Math.abs(progress - Number(payload.btLastProgress ?? -1)) >= 1) {
+      tasksRepo.update(task.id, { payload: { ...payload, btLastProgress: progress, btLastCheckAt: new Date().toISOString() } });
     }
 
-    if (finished) {
-      const wanted = torrent.wanted ?? [];
-      const files = (torrent.files ?? []).filter((_, i) => wanted.length === 0 || wanted[i] !== 0);
-      const paths = files
-        .filter((f) => VIDEO_IMAGE_EXT.has(extOf(f.name)))
-        .map((f) => path.join(torrent?.downloadDir ?? config.dirs.btDownload, f.name))
-        .filter((p) => fs.existsSync(p));
-      if (paths.length === 0) return { error: 'BT 下载完成但找不到任何文件' };
-
-      // 只把 transmission 里的任务摘掉（保留文件），文件交给归档流水线搬走。
-      // ⚠️ 以前这里 setTimeout(5s) 就 rm -rf 整个下载目录 —— 而流水线这时可能还在 zip
-      //    大文件（要好几分钟），会把还在用的源文件删掉。现在改成：**发布完成之后**由
-      //    流水线清理，且清理会先确认没有别的任务共用目录、只删本任务自己的文件。
-      await client.call('torrent-remove', { ids: [torrentId], 'delete-local-data': false }).catch(() => undefined);
-
-      const seedId = Number(payload.seedId ?? 0);
-      if (seedId) seedsRepo.update(seedId, { status: 'done' });
-      const originalName = `${torrent.name || task.title || `task_${task.id}`}`;
-      const sizeBytes = paths.reduce((sum, p) => sum + fs.statSync(p).size, 0);
-
-      // 分包：单个大视频各自一个成品（单文件走"移动"，不打包）；其余小文件合成一个 zip
-      const sel = getSettings().btSelect;
-      const sizeOf = (pp: string): number => {
-        try {
-          return fs.statSync(pp).size;
-        } catch {
-          return 0;
-        }
-      };
-      const units = buildPublishUnits(paths, sel.publishIndividuallyMinBytes, sizeOf, (pp) => path.basename(pp).replace(/\.[^.]+$/, ''), originalName);
-      taskLog(task.id).mark('BT_UNITS',
-        `按 ${(sel.publishIndividuallyMinBytes / 1024 / 1024).toFixed(0)}MB 阈值拆成 ${units.length} 个成品：` +
-        units.map((u) => `${u.name}(${u.files.length}个文件)`).join('、'),
-        { units: units.map((u) => ({ name: u.name, files: u.files.length })) });
-
-      return {
-        progress: 100, speedBps: 0, totalBytes: sizeBytes, downloadedBytes: sizeBytes, etaSec: 0,
-        done: { files: paths, originalName, sizeBytes, units, torrentName: torrent.name || originalName, cleanupBtDirs: true },
-      };
+    // transmission 自己报错时如实转达，但**不**擅自删任务 —— 交给 8 小时策略
+    if (torrent.error && torrent.error !== 0) {
+      const msg = torrent.errorString || `错误码 ${torrent.error}`;
+      taskLog(task.id).warn(`transmission 报告错误（继续观察，按 8 小时策略处理）: ${msg}`);
     }
 
-    return { progress, speedBps: speed, etaSec: eta, totalBytes: torrent.totalSize ?? 0, downloadedBytes: Math.round(((torrent.percentDone ?? 0) * (torrent.totalSize ?? 0))) };
+    const selectedBytes = Math.max(0, Number(payload.selectedBytes ?? task.expectBytes ?? 0) || 0);
+    return {
+      progress,
+      speedBps: speed,
+      etaSec: eta,
+      totalBytes: torrent.totalSize ?? selectedBytes,
+      downloadedBytes: Math.round((torrent.percentDone ?? 0) * (torrent.totalSize ?? selectedBytes)),
+    };
   },
 
   async pause(task): Promise<void> {
@@ -488,77 +422,58 @@ function wantedIdxOf(wanted: number[] | undefined, i: number): boolean {
   return wanted[i] !== 0;
 }
 
-/** 给这个 BT 任务挑一个不会撞名的下载目录（撞名会导致清理时互删） */
-function pickUniqueBtDirName(seedPath: string, taskId: number): string {
-  const usedDirs = new Set<string>();
-  for (const other of tasksRepo.byStatus(['waiting', 'parsing', 'downloading', 'paused', 'archiving', 'encrypting'] as never)) {
-    const d = (other as TaskWithPayload).payload?.downloadDir;
-    if (d) usedDirs.add(path.resolve(String(d)));
-  }
-  return pickUniqueDirName(
-    path.basename(seedPath).replace(/\.torrent$/i, ''),
-    usedDirs,
-    (abs) => fs.existsSync(abs),
-    (abs) => {
-      try {
-        return fs.readdirSync(abs).length === 0;
-      } catch {
-        return true;
-      }
-    },
-    (name) => path.resolve(path.join(config.dirs.btDownload, name)),
-    taskId,
+/**
+ * 勾选视频文件：只留视频（扩展名大小写不敏感），其它标 unwanted；返回视频总字节数。
+ * 幂等，可以反复调用（空间不够被退回等待后会再来一遍）。不做任何"广告识别"。
+ */
+async function syncBtVideoSelection(task: TaskWithPayload, torrentId: number): Promise<number> {
+  const client = transmissionClient();
+  const info = await client.call<{ torrents: TorrentInfo[] }>('torrent-get', {
+    ids: [torrentId],
+    fields: ['id', 'name', 'files', 'wanted', 'totalSize', 'downloadDir', 'status', 'hashString'],
+  });
+  const torrent = info.torrents?.[0];
+  if (!torrent) throw new Error('无法读取种子信息');
+  const files = torrent.files ?? [];
+  const picked = selectBtFiles(
+    files.map((f) => ({ name: f?.name ?? '', length: f?.length ?? 0 })),
+    { videoExts: config.videoExts },
   );
-}
+  const wantedIdx = picked.keep;
+  const selectedBytes = picked.keptBytes;
 
-/** 选片：只保留核心内容，其余标 unwanted；返回选中总字节数（幂等） */
-async function syncBtSelection(task: TaskWithPayload, torrentId: number): Promise<number> {
-    const client = transmissionClient();
-    const info = await client.call<{ torrents: TorrentInfo[] }>('torrent-get', {
-      ids: [torrentId],
-      fields: ['id', 'name', 'files', 'wanted', 'totalSize', 'downloadDir', 'status'],
-    });
-    const torrent = info.torrents?.[0];
-    if (!torrent) throw new Error('无法读取种子信息');
-    const files = torrent.files ?? [];
-    const sel = getSettings().btSelect;
-    const picked = selectBtFiles(
-      files.map((f) => ({ name: f?.name ?? '', length: f?.length ?? 0 })),
-      {
-        videoExts: config.videoExts,
-        imageExts: config.imageExts,
-        keepImages: sel.keepImages,
-        blockKeywords: (sel.blockKeywords && sel.blockKeywords.length ? sel.blockKeywords : DEFAULT_BT_BLOCK_KEYWORDS),
-        minVideoBytes: sel.minVideoBytes,
-      },
-    );
-    const wantedIdx = picked.keep;
-    const selectedBytes = picked.keptBytes;
-    taskLog(task.id).mark('BT_SELECT',
-      `选片结果：保留 ${wantedIdx.length} 个（${(selectedBytes / 1024 / 1024).toFixed(1)}MB），排除 ${picked.dropped.length} 个`,
-      { keep: wantedIdx.map((i) => files[i]?.name ?? '').slice(0, 30), dropped: picked.dropped.slice(0, 30), hasVideo: picked.hasVideo });
-    for (const d of picked.dropped.slice(0, 20)) {
-      taskLog(task.id).info(`排除: ${d.name}（${(d.sizeBytes / 1024 / 1024).toFixed(1)}MB）—— ${d.reason}`);
-    }
-    if (wantedIdx.length === 0) {
-      await client.call('torrent-remove', { ids: [torrentId], 'delete-local-data': true }).catch(() => undefined);
-      const hint = picked.dropped.length
-        ? `（排除了 ${picked.dropped.length} 个：${picked.dropped.slice(0, 5).map((d) => `${d.name} - ${d.reason}`).join('；')}）`
-        : '';
-      throw new Error(`该种子内没有可下载的核心内容${hint}`);
-    }
-    const unwantedIdx = files.map((_, i) => i).filter((i) => !wantedIdx.includes(i));
-    if (unwantedIdx.length > 0) {
-      await client.call('torrent-set', { ids: [torrentId], 'files-unwanted': unwantedIdx }).catch(() => undefined);
-    }
-    await client.call('torrent-set', { ids: [torrentId], 'files-wanted': wantedIdx }).catch(() => undefined);
+  taskLog(task.id).mark('BT_SELECT',
+    `只挑视频：保留 ${wantedIdx.length} 个（${(selectedBytes / 1024 ** 2).toFixed(1)}MB），排除 ${picked.dropped.length} 个非视频`,
+    { keep: wantedIdx.map((i) => files[i]?.name ?? '').slice(0, 30) });
+  for (const d of picked.dropped.slice(0, 10)) {
+    taskLog(task.id).info(`不下载: ${d.name}（${(d.sizeBytes / 1024 ** 2).toFixed(1)}MB）—— ${d.reason}`);
+  }
 
-    const prev = (tasksRepo.get(task.id) as TaskWithPayload).payload ?? {};
-    tasksRepo.update(task.id, {
-      expectBytes: selectedBytes,
-      title: task.title || torrent.name || `task_${task.id}`,
-      payload: { ...prev, torrentId, selectedBytes, downloadDir: String(torrent.downloadDir || prev.downloadDir || '') },
-      meta: { ...(task.meta ?? {}), files: wantedIdx.map((i) => files[i]?.name ?? '') },
-    });
+  if (wantedIdx.length === 0) {
+    await client.call('torrent-remove', { ids: [torrentId], 'delete-local-data': true }).catch(() => undefined);
+    throw new Error('该种子里没有视频文件，已跳过（只下载视频）');
+  }
+
+  const unwantedIdx = files.map((_, i) => i).filter((i) => !wantedIdx.includes(i));
+  if (unwantedIdx.length > 0) {
+    await client.call('torrent-set', { ids: [torrentId], 'files-unwanted': unwantedIdx }).catch(() => undefined);
+  }
+  await client.call('torrent-set', { ids: [torrentId], 'files-wanted': wantedIdx }).catch(() => undefined);
+
+  const prev = (tasksRepo.get(task.id) as TaskWithPayload).payload ?? {};
+  tasksRepo.update(task.id, {
+    expectBytes: selectedBytes,
+    title: task.title || torrent.name || `task_${task.id}`,
+    payload: {
+      ...prev,
+      torrentId,
+      btHash: String(torrent.hashString ?? prev.btHash ?? ''),
+      selectedBytes,
+      // transmission 自己决定把数据放哪（它的两个目录它有写权限），我们只记下来用于扫货
+      btDownloadDir: String(torrent.downloadDir ?? ''),
+      torrentName: String(torrent.name ?? ''),
+    },
+    meta: { ...(task.meta ?? {}), files: wantedIdx.map((i) => files[i]?.name ?? '') },
+  });
   return selectedBytes;
 }

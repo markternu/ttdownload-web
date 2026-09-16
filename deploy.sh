@@ -240,7 +240,7 @@ ensure_transmission() {
     return 0
   fi
   if [[ ! -f "$BT_INSTALLER" ]]; then
-    warn "未找到 transmission 安装脚本：$BT_INSTALLER（transmission 模块将不可用）"
+    warn "未找到 transmission 安装脚本：${BT_INSTALLER}（transmission 模块将不可用）"
     return 1
   fi
   if ! prompt_ok; then
@@ -275,13 +275,13 @@ configure_transmission_env() {
     echo "TRANSMISSION_RPC_USER=${user}" >> .env
   fi
   if [[ -n "$password" ]]; then
-    log "transmission RPC 凭据已在 .env 中配置（用户 $user）"
+    log "transmission RPC 凭据已在 .env 中配置（用户 ${user}）"
     return 0
   fi
   if prompt_ok; then
     local input=""
     echo
-    read_prompt input "请输入刚才在 transmission 安装脚本里设置的 RPC 密码（用户 $user，直接回车可跳过，稍后可在网页「设置」里填）: "
+    read_prompt input "请输入刚才在 transmission 安装脚本里设置的 RPC 密码（用户 ${user}，直接回车可跳过，稍后可在网页「设置」里填）: "
     if [[ -n "$input" ]]; then
       # 更新 .env
       if grep -q '^TRANSMISSION_RPC_PASSWORD=' .env; then
@@ -543,7 +543,7 @@ case "$ACTION" in
         # 常见原因一：项目里混入了 root 所有的文件（历史上用 sudo 跑过 git/npm）→ 自动归位后重试
         OWNER_MISMATCH="$(find "$PROJECT_DIR" -not -user "$REPO_OWNER" 2>/dev/null | head -1)"
         if [[ -n "$OWNER_MISMATCH" && "$REPO_OWNER" != "root" ]]; then
-          warn "检测到不属于 ${REPO_OWNER} 的文件（例如 $OWNER_MISMATCH），正在自动归位属主后重试 git pull ..."
+          warn "检测到不属于 ${REPO_OWNER} 的文件（例如 ${OWNER_MISMATCH}），正在自动归位属主后重试 git pull ..."
           chown -R "${REPO_OWNER}:${REPO_OWNER}" "$PROJECT_DIR" && log "属主已归位"
           as_owner git -c safe.directory='*' pull --ff-only && git_pull_ok=1
         fi
@@ -568,7 +568,16 @@ case "$ACTION" in
     # 老部署升级时自愈：补 yt-dlp-ejs / JS 运行时（缺了 YouTube 一定失败）
     if [[ $SKIP_APT -eq 0 ]]; then ensure_ytdlp_stack; fi
     if [[ $SKIP_APT -eq 0 ]]; then ensure_cookie_browser; fi
-    # 老部署升级时把"写死的并发上限"改成 0=不限：准入只该由磁盘空间决定。
+    # 确保 transmission 的两个目录存在（它自己会写；我们只读+搬走）。缺失时创建并交给 transmission 用户。
+  for d in /var/lib/transmission/downloads /var/lib/transmission/incomplete; do
+    if [[ ! -d "$d" ]]; then
+      mkdir -p "$d" 2>/dev/null || true
+      if id debian-transmission >/dev/null 2>&1; then chown -R debian-transmission:debian-transmission "$d" 2>/dev/null || true; fi
+      log "已创建 transmission 目录: $d"
+    fi
+  done
+
+  # 老部署升级时把"写死的并发上限"改成 0=不限：准入只该由磁盘空间决定。
   # 注意：.env 的优先级高于代码里的默认值，所以光改代码对**已部署的机器无效**，
   # 必须在 .env 这一层改掉（这条自愈就是干这个的）。
   # 只替换"我们曾经写进去的旧默认值"，用户自己调过的其它数字不动。
@@ -584,6 +593,18 @@ case "$ACTION" in
     if [[ $changed_env -eq 1 ]]; then
       log "已修正 .env：并发上限改为 0=不限（准入只由磁盘空间决定：装得下的就下，装不下的先跳过等回血）"
     fi
+  fi
+
+  # 老部署升级时修正 BT 目录：以前我们把 download-dir 指到 /ttdownload/...（root 所有），
+  # 而 transmission 以 debian-transmission 运行 → 下完搬过去 "Permission denied (13)"，
+  # 每个完成的种子都失败。这里改回 transmission 自己的目录。
+  if [[ -f .env ]]; then
+    if grep -q '^BT_DOWNLOAD_DIR=.*/ttdownload/' .env; then
+      sed -i 's|^BT_DOWNLOAD_DIR=.*$|BT_DOWNLOAD_DIR=/var/lib/transmission/downloads|' .env
+      log "已修正 .env：BT_DOWNLOAD_DIR 改为 /var/lib/transmission/downloads（原来指向我们没有权限的目录）"
+    fi
+    grep -q '^BT_DOWNLOAD_DIR=' .env || echo 'BT_DOWNLOAD_DIR=/var/lib/transmission/downloads' >> .env
+    grep -q '^TRANSMISSION_INCOMPLETE_DIR=' .env || echo 'TRANSMISSION_INCOMPLETE_DIR=/var/lib/transmission/incomplete' >> .env
   fi
 
   # 老部署升级时补齐「全站鉴权」账号密码（缺了就生成并打印，否则等于没有鉴权）
@@ -686,11 +707,11 @@ else
 fi
 
 for c in node npm openssl; do
-  command -v "$c" >/dev/null 2>&1 || die "缺少必要命令: $c（请去掉 --no-apt 重新运行）"
+  command -v "$c" >/dev/null 2>&1 || die "缺少必要命令: ${c}（请去掉 --no-apt 重新运行）"
 done
 warn "以下工具缺失只影响对应模块（脚本会继续）："
 for c in aria2c transmission-daemon yt-dlp ffmpeg zip unzip; do
-  command -v "$c" >/dev/null 2>&1 && log "  ✓ $c" || warn "  ✗ $c（对应模块不可用）"
+  command -v "$c" >/dev/null 2>&1 && log "  ✓ $c" || warn "  ✗ ${c}（对应模块不可用）"
 done
 
 # ---------------------------------------------------------------- 2. 目录树
@@ -745,6 +766,12 @@ MAX_CONCURRENT=0
 CONCURRENCY_TRANSMISSION=0
 CONCURRENCY_ARIA2=0
 CONCURRENCY_WEBVIDEO=0
+
+# BT: 直接用 transmission 自己的两个目录（它以下面的用户运行，只有它有写权限）。
+# ⚠️ 千万不要在这里写我们自己的目录：transmission 下完从 incomplete 搬到 download-dir 时
+#    会 "Permission denied (13)"，每个种子都失败、文件永远进不了 downloads（真机事故）。
+BT_DOWNLOAD_DIR=/var/lib/transmission/downloads
+TRANSMISSION_INCOMPLETE_DIR=/var/lib/transmission/incomplete
 ANDROID_TOKEN=${ANDROID_TOKEN_VALUE}
 # 网页登录账号密码（全站鉴权；部署完成后终端会打印一次）
 WEB_AUTH_USER=${WEB_AUTH_USER_VALUE}

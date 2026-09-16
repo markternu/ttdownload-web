@@ -91,12 +91,16 @@ export interface Settings {
   theme: 'light' | 'dark' | 'system'
   encryptPassword: string // GET 时返回掩码 '******'；PUT 传新值才修改
   moduleConcurrency: { transmission: number; aria2: number; webvideo: number }
-  /** BT 内容甄别（挑核心内容、排广告）与成品拆分 */
+  /** BT：只挑视频（写死），这里只配一个打包阈值 */
   btSelect: {
-    keepImages: 'auto' | 'always' | 'never'
-    blockKeywords: string[]
-    minVideoBytes: number
-    publishIndividuallyMinBytes: number
+    /** 单个文件小于它 -> 多个小文件合成一个 zip；大于等于它 -> 一个一个单独走 */
+    smallFileMaxBytes: number
+  }
+  /** BT 种子超时策略：交给 transmission 后 8 小时内不干涉 */
+  btPolicy: {
+    checkAfterHours: number
+    minProgressPercent: number
+    graceHours: number
   }
   aria2Rpc: { host: string; port: number; secret: string }
   transmissionRpc: { host: string; port: number; user: string; password: string }
@@ -110,15 +114,6 @@ export interface Settings {
   autoDeleteAfterReport: boolean // 安卓上报后是否删除（默认 true）
   clearLogsAfterReport: boolean // 下载诊断报告成功后是否清空已收集的历史日志（默认 false）
   /** BT 出清机制（长时间无资源/停滞/极慢 -> 清理任务与 incomplete 目录） */
-  btEvict: {
-    enabled: boolean
-    minAgeHours: number // 硬门槛：实际下载尝试满这么多小时才参与判断（默认 10）
-    salvagePercent: number // 进度达到该百分比且是视频 -> 按“可播放视为完整”处理（默认 79）
-    stallMinutes: number // 速率 0 且停滞超过这么多分钟 -> 判定无资源（默认 30）
-    slowKbps: number // 速率低于该值(KB/s) 且预计剩余超过 slowEtaHours -> 判定过慢（默认 20）
-    slowEtaHours: number // 预计剩余时间阈值（小时，默认 72）
-    checkIntervalMin: number // 检查周期（分钟，默认 5）
-  }
 }
 
 /** 单个站点的「访客 cookies 自动获取」状态 */

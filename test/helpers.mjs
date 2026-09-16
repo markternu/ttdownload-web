@@ -154,7 +154,9 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
     eta: 30,
     peersConnected: 5,
     removed: [],
+    torrents: [],
     torrentSets: [],
+    torrentAdds: [],
     wanted: (files ?? [
       { name: 'video.mp4', length: 1000, bytesCompleted: 0 },
       { name: 'cover.jpg', length: 100, bytesCompleted: 0 },
@@ -178,6 +180,7 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
       case 'session-get':
         return ok('success', { version: '4.0.5-mock', ...(sessionExtra ?? {}) });
       case 'torrent-add':
+        state.torrentAdds.push(args);
         return ok('success', { 'torrent-added': { id: 7, name: state.name, hashString: 'abc' } });
       case 'torrent-set': {
         state.torrentSets.push(args);
@@ -196,6 +199,28 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
         state.running = false;
         return ok('success', {});
       case 'torrent-get': {
+        // 支持直接给一组"命名种子"（扫货测试要用多个不同名字的种子）
+        if (Array.isArray(state.torrents) && state.torrents.length) {
+          return ok('success', {
+            torrents: state.torrents.map((t) => ({
+              id: t.id,
+              name: t.name,
+              hashString: t.hashString ?? 'h',
+              status: 4,
+              percentDone: t.percentDone ?? 1,
+              rateDownload: 0,
+              eta: 0,
+              leftUntilDone: 0,
+              totalSize: (t.files ?? []).reduce((a, f) => a + (f.length ?? 0), 0),
+              downloadDir,
+              error: 0,
+              peersConnected: 0,
+              peersSendingToUs: 0,
+              files: t.files ?? [],
+              wanted: (t.files ?? []).map(() => 1),
+            })),
+          });
+        }
         const complete = state.complete;
         const percentDone = complete ? 1 : state.percent;
         return ok('success', {

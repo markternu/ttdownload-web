@@ -113,16 +113,16 @@ export interface Settings {
   theme: 'light' | 'dark' | 'system';
   encryptPassword: string;
   moduleConcurrency: { transmission: number; aria2: number; webvideo: number };
-  /** BT 内容甄别（挑核心内容、排广告）与成品拆分策略 */
+  /** BT：只挑视频；小文件打包阈值 */
   btSelect: {
-    /** 图片怎么处理：auto=有视频就不要图片 / always=一律保留 / never=一律不要 */
-    keepImages: 'auto' | 'always' | 'never';
-    /** 广告关键词（文件名或所在目录命中即排除；用户可增删） */
-    blockKeywords: string[];
-    /** 视频体积下限（字节），0=不按体积过滤 */
-    minVideoBytes: number;
-    /** 单个视频 ≥ 该字节数时单独发布（不打包）；其余小文件合成一个 zip */
-    publishIndividuallyMinBytes: number;
+    /** 单个文件小于它 -> 多个小文件合成一个 zip；大于等于它 -> 一个一个单独走 */
+    smallFileMaxBytes: number;
+  };
+  /** BT 种子超时策略（交给 transmission 后只读进度，8 小时内不干涉） */
+  btPolicy: {
+    checkAfterHours: number;
+    minProgressPercent: number;
+    graceHours: number;
   };
   aria2Rpc: { host: string; port: number; secret: string };
   transmissionRpc: { host: string; port: number; user: string; password: string };

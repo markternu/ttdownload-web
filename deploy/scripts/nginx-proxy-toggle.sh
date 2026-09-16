@@ -336,7 +336,7 @@ EOF
 
 preview() {
   if ! command -v "$NGINX_BIN" >/dev/null 2>&1; then
-    die "未安装 nginx（NGINX_BIN=$NGINX_BIN）"
+    die "未安装 nginx（NGINX_BIN=${NGINX_BIN}）"
   fi
   local server_file
   server_file="$(find_server_file || true)"
@@ -352,7 +352,7 @@ preview() {
 }
 
 enable() {
-  command -v "$NGINX_BIN" >/dev/null 2>&1 || die "未安装 nginx（NGINX_BIN=$NGINX_BIN）"
+  command -v "$NGINX_BIN" >/dev/null 2>&1 || die "未安装 nginx（NGINX_BIN=${NGINX_BIN}）"
   [ -f "$MAIN_CONF" ] || die "找不到主配置 ${MAIN_CONF}"
 
   # 半残状态（snippet 没了、include 还在）先清理，否则 nginx -t 必然失败

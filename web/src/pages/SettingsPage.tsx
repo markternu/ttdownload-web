@@ -1006,173 +1006,92 @@ export default function SettingsPage() {
           </div>
         </Card>
 
-        {/* BT 内容甄别：挑核心内容、排广告；决定成品怎么拆 */}
+        {/* BT：只下视频 + 打包阈值 */}
         <Card>
           <CardHeader
             title={
               <span className="inline-flex items-center gap-2">
-                <Filter className="h-4 w-4" /> BT 内容甄别
+                <Filter className="h-4 w-4" /> BT 下载规则
               </span>
             }
-            subtitle="种子里往往混着宣传图/广告视频。这里决定「下什么」以及「怎么打包成成品」。改完记得回到列表里重扫一次（已下载过的种子不会自动重来）。"
+            subtitle="扔给 transmission 之后不做任何多余操作：只勾选视频，剩下交给它下（不下图片/广告图/文本等非视频）"
           />
           <div className="space-y-4">
-            <Field
-              label="图片怎么处理"
-              hint="广告图/封面大都在图片里，默认「有视频就不要图片」；整包都是图片（照片合集）时才会保留"
-            >
-              <Select
-                value={draft.btSelect.keepImages}
-                options={[
-                  { value: 'auto', label: '自动（推荐）：有视频就丢图片，纯图片合集保留' },
-                  { value: 'never', label: '一律不要图片' },
-                  { value: 'always', label: '一律保留图片（关键词命中的仍会排掉）' },
-                ]}
-                onChange={(event) =>
-                  patch('btSelect', {
-                    ...draft.btSelect,
-                    keepImages: event.target.value as 'auto' | 'always' | 'never',
-                  })
-                }
-              />
-            </Field>
-            <Field
-              label="广告关键词"
-              hint="文件名或所在目录命中即排除（逗号/空格分隔）。留空 = 用内置默认表（广告/宣传/推广/加群/二维码/sample/trailer/screenshot 等）"
-            >
-              <textarea
-                className="w-full min-h-[72px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
-                placeholder="留空用默认表；想追加就写全量列表，例如：广告,宣传,推广,加群,二维码,sample,trailer"
-                value={(draft.btSelect.blockKeywords ?? []).join(',')}
-                onChange={(event) =>
-                  patch('btSelect', {
-                    ...draft.btSelect,
-                    blockKeywords: event.target.value
-                      .split(/[\s,，]+/)
-                      .map((x) => x.trim())
-                      .filter(Boolean),
-                  })
-                }
-              />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="视频体积下限（MB）" hint="0=不按体积过滤（默认）。有些正片就是几十 MB，一刀切会误伤，确认需要再开">
-                <Input
-                  type="number"
-                  min={0}
-                  step={1}
-                  value={String(Math.round(draft.btSelect.minVideoBytes / 1024 ** 2))}
-                  onChange={(event) =>
-                    patch('btSelect', {
-                      ...draft.btSelect,
-                      minVideoBytes: Math.max(0, Number(event.target.value)) * 1024 ** 2,
-                    })
-                  }
-                />
-              </Field>
-              <Field label="单独发布阈值（MB）" hint="单个视频 ≥ 该值就单独成一个成品（不打包）；小于它的文件会等全部下完合成一个 zip">
-                <Input
-                  type="number"
-                  min={0}
-                  step={50}
-                  value={String(Math.round(draft.btSelect.publishIndividuallyMinBytes / 1024 ** 2))}
-                  onChange={(event) =>
-                    patch('btSelect', {
-                      ...draft.btSelect,
-                      publishIndividuallyMinBytes: Math.max(0, Number(event.target.value)) * 1024 ** 2,
-                    })
-                  }
-                />
-              </Field>
-            </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              规则优先级：<b>关键词屏蔽</b> &gt; 图片开关 &gt; 体积下限。每次挑片的结果（留了哪些、排了哪些、为什么）
-              都会写进任务的运行日志，觉得误伤了就照着日志调关键词。
+            <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">
+              规则只有一条：<b>扩展名是视频的才下</b>（mp4 / avi / wmv / mkv / flv / webm / mov / ts / m2ts / rmvb …，
+              大小写不敏感）。<b>不做任何"广告识别"</b> —— 那套判断会把正片误判成广告。
+              种子里若一个视频都没有，任务会被直接跳过。
             </p>
+            <Field
+              label="小文件打包阈值（MB）"
+              hint="小于它的多个视频会等全部下完后合成一个 zip；大于等于它的一个一个单独走（各自一个成品）。默认 300MB"
+            >
+              <Input
+                type="number"
+                min={0}
+                step={50}
+                value={String(Math.round(draft.btSelect.smallFileMaxBytes / 1024 ** 2))}
+                onChange={(event) =>
+                  patch('btSelect', {
+                    ...draft.btSelect,
+                    smallFileMaxBytes: Math.max(0, Number(event.target.value)) * 1024 ** 2,
+                  })
+                }
+              />
+            </Field>
           </div>
         </Card>
 
-        {/* BT 出清（长时间无资源/停滞/极慢） */}
+        {/* BT 超时策略（8 小时 + 4 小时宽限） */}
         <Card>
           <CardHeader
             title={
               <span className="inline-flex items-center gap-2">
-                <Trash2 className="h-4 w-4" /> BT 出清
+                <Trash2 className="h-4 w-4" /> BT 超时清理
               </span>
             }
-            subtitle="长时间无资源 / 中途停滞 / 极慢的 BT 任务自动清理，并删除 transmission incomplete 目录"
+            subtitle="交给 transmission 后 8 小时内完全不干涉（有的资源过一会儿才上线）；到点还没下完才按下面的规则清理"
           />
           <div className="space-y-4">
-            <Switch
-              checked={draft.btEvict.enabled}
-              onChange={(checked) => patch('btEvict', { ...draft.btEvict, enabled: checked })}
-              label="启用 BT 出清机制"
-              description="关闭后不会自动清理任何 BT 任务"
-            />
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <Field label="尝试时间门槛（小时）" hint="给每颗种子的下载尝试时间；不足该时长一律不做出清判断（防误删）">
+            <div className="grid grid-cols-3 gap-3">
+              <Field label="多少小时后检查" hint="从交给 transmission 那一刻算起，默认 8 小时">
                 <Input
                   type="number"
                   min={1}
-                  max={720}
-                  value={String(draft.btEvict.minAgeHours)}
-                  onChange={(event) => patch('btEvict', { ...draft.btEvict, minAgeHours: Number(event.target.value) })}
+                  max={168}
+                  value={String(draft.btPolicy.checkAfterHours)}
+                  onChange={(event) => patch('btPolicy', { ...draft.btPolicy, checkAfterHours: Number(event.target.value) })}
                 />
               </Field>
-              <Field label="停滞判定（分钟）" hint="速率为 0 且进度停滞超过该时长 -> 判定无资源">
+              <Field label="进度低于多少%就清理" hint="到点时进度 ≤ 这个值 → 直接删任务 + 删残留，默认 60%">
                 <Input
                   type="number"
-                  min={5}
-                  max={1440}
-                  value={String(draft.btEvict.stallMinutes)}
-                  onChange={(event) => patch('btEvict', { ...draft.btEvict, stallMinutes: Number(event.target.value) })}
-                />
-              </Field>
-              <Field label="检查周期（分钟）">
-                <Input
-                  type="number"
-                  min={1}
-                  max={1440}
-                  value={String(draft.btEvict.checkIntervalMin)}
-                  onChange={(event) => patch('btEvict', { ...draft.btEvict, checkIntervalMin: Number(event.target.value) })}
-                />
-              </Field>
-              <Field label="极慢：速率低于（KB/s）" hint="有速率但低于该值且预计剩余时间过长 -> 判定极慢">
-                <Input
-                  type="number"
-                  min={1}
-                  max={10240}
-                  value={String(draft.btEvict.slowKbps)}
-                  onChange={(event) => patch('btEvict', { ...draft.btEvict, slowKbps: Number(event.target.value) })}
-                />
-              </Field>
-              <Field label="极慢：预计剩余超过（小时）">
-                <Input
-                  type="number"
-                  min={1}
-                  max={8760}
-                  value={String(draft.btEvict.slowEtaHours)}
-                  onChange={(event) => patch('btEvict', { ...draft.btEvict, slowEtaHours: Number(event.target.value) })}
-                />
-              </Field>
-              <Field label="视为可播放的进度（%）" hint="进度达到该值且是视频时，按“未下完但可播放”处理：移交归档而不是删除">
-                <Input
-                  type="number"
-                  min={1}
+                  min={0}
                   max={100}
-                  value={String(draft.btEvict.salvagePercent)}
-                  onChange={(event) => patch('btEvict', { ...draft.btEvict, salvagePercent: Number(event.target.value) })}
+                  value={String(draft.btPolicy.minProgressPercent)}
+                  onChange={(event) => patch('btPolicy', { ...draft.btPolicy, minProgressPercent: Number(event.target.value) })}
+                />
+              </Field>
+              <Field label="宽限小时数" hint="进度高于上面那个值时再给这么多小时，到点还没完也清理，默认 4 小时">
+                <Input
+                  type="number"
+                  min={1}
+                  max={168}
+                  value={String(draft.btPolicy.graceHours)}
+                  onChange={(event) => patch('btPolicy', { ...draft.btPolicy, graceHours: Number(event.target.value) })}
                 />
               </Field>
             </div>
-            <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
-              出清只针对“已经获得 {draft.btEvict.minAgeHours} 小时实际下载尝试时间”的任务；因磁盘空间不足被自动暂停的时间不计入尝试时间。
-              每次出清后都会广播“空间已腾挪”，等待队列会立即重新评估并放行后续任务。
+            <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">
+              已经下完（100%）的不归这里管 —— 那是「扫货」的事：程序每 2 分钟扫一遍
+              <code className="mx-1 rounded bg-slate-100 px-1 dark:bg-slate-800">/var/lib/transmission/downloads</code>
+              和
+              <code className="mx-1 rounded bg-slate-100 px-1 dark:bg-slate-800">/var/lib/transmission/incomplete</code>
+              ，发现下好的视频就自动改名 → 加密 → 进待下载列表，然后把文件夹和 transmission 任务一起清掉。
             </p>
           </div>
         </Card>
 
-        {/* 外观 */}
         <Card>
           <CardHeader
             title={

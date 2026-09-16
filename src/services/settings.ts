@@ -60,7 +60,8 @@ export function defaultSettings(): Settings {
     theme: 'system',
     encryptPassword: config.encryptPassword,
     moduleConcurrency: { ...config.moduleConcurrency },
-    btSelect: { ...config.btSelect, blockKeywords: [...(config.btSelect.blockKeywords ?? [])] },
+    btSelect: { ...config.btSelect },
+    btPolicy: { ...config.btPolicy },
     aria2Rpc: { ...config.aria2Rpc },
     transmissionRpc: { ...config.transmissionRpc },
     ytdlpPath: config.bins.ytdlp,
@@ -98,6 +99,7 @@ export function getSettings(): Settings {
       transmissionRpc: { ...base.transmissionRpc, ...(parsed.transmissionRpc ?? {}) },
       btEvict: { ...base.btEvict, ...(parsed.btEvict ?? {}) },
       btSelect: { ...base.btSelect, ...(parsed.btSelect ?? {}) },
+      btPolicy: { ...base.btPolicy, ...(parsed.btPolicy ?? {}) },
     };
     const { next, notes } = migrateSettings(merged);
     cached = next;
@@ -140,6 +142,7 @@ export function updateSettings(patch: Partial<Settings>): Settings {
     transmissionRpc: { ...current.transmissionRpc, ...(patch.transmissionRpc ?? {}) },
     btEvict: { ...current.btEvict, ...(patch.btEvict ?? {}) },
     btSelect: { ...current.btSelect, ...(patch.btSelect ?? {}) },
+    btPolicy: { ...current.btPolicy, ...(patch.btPolicy ?? {}) },
   };
   // 密码掩码回传时保持原值
   if (patch.encryptPassword === '******') next.encryptPassword = current.encryptPassword;

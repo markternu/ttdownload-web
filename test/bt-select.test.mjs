@@ -1,148 +1,96 @@
 /**
- * BT 内容甄别 + 成品拆分 测试
+ * BT 选片 + 打包规则 测试（**只有视频后缀**，不做任何广告识别）
  *
- * 背景：旧逻辑只判断"扩展名是视频或图片 → 全要"，于是宣传图、广告视频、网址文件
- * 统统下下来；而"一个种子 = 一个 zip 成品"会把好几个大视频塞进同一个包。
- *
- * 这里锁住新规则：
- *   ① 默认只要核心内容（视频）；图片在"有视频"时按宣传图排除
- *   ② 广告关键词命中即排除（文件名**和所在目录**都参与匹配）
- *   ③ 体积下限默认关闭（因为有些正片就是几十 MB，一刀切会误伤）；开了才生效
- *   ④ ≥ 阈值的视频各自一个成品（不打包）；其余小文件合成一个 zip 成品
+ * 背景：之前的"关键词 + 图片策略 + 体积下限"广告识别把正片也误判成广告，
+ * 用户明确要求删掉。现在只剩一条规则：扩展名是视频才下（大小写不敏感）。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  selectBtFiles,
-  buildPublishUnits,
-  matchedKeyword,
-  DEFAULT_BT_BLOCK_KEYWORDS,
-} from '../dist/services/btSelect.js';
+import { selectBtFiles, buildPublishUnits, extOfName } from '../dist/services/btSelect.js';
 
-const VIDEO = ['mp4', 'mkv', 'avi', 'wmv', 'mov', 'ts'];
-const IMAGE = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-const base = { videoExts: VIDEO, imageExts: IMAGE };
-
+const VIDEO = ['mp4', 'avi', 'wmv', 'mkv', 'flv', 'webm', 'mov', 'ts', 'm2ts', 'rmvb', 'mpg', 'mpeg', 'm4v', '3gp'];
+const base = { videoExts: VIDEO };
 const names = (files, res) => res.keep.map((i) => files[i].name).sort();
-const reasons = (res) => res.dropped.map((d) => `${d.name}:${d.reason}`);
 
-test('默认只要核心内容：视频留，图片（有视频时）与其它扩展名排除', () => {
+test('只下视频：任何视频后缀都要，其它一律不要', () => {
   const files = [
-    { name: 'movie.mp4', length: 700 * 1024 ** 2 },
-    { name: 'cover.jpg', length: 200 * 1024 },
-    { name: 'screenshot.png', length: 300 * 1024 },
-    { name: 'readme.txt', length: 1024 },
-    { name: 'www.abc.com.url', length: 100 },
+    { name: 'movie.mp4', length: 1000 },
+    { name: 'A.MKV', length: 1000 },        // 大写后缀也要
+    { name: 'b.Avi', length: 1000 },        // 混合大小写
+    { name: 'c.ts', length: 1000 },
+    { name: 'cover.jpg', length: 10 },      // 图片不要
+    { name: '宣传.mp4.jpg', length: 10 },   // 后缀是 jpg -> 不要（不看名字，只看后缀）
+    { name: 'readme.txt', length: 10 },
+    { name: 'www.abc.com.url', length: 10 },
+    { name: 'setup.exe', length: 10 },
   ];
   const res = selectBtFiles(files, base);
-  assert.deepEqual(names(files, res), ['movie.mp4'], '只留视频');
-  assert.equal(res.hasVideo, true);
-  assert.equal(res.keptBytes, 700 * 1024 ** 2);
-  assert.ok(reasons(res).some((r) => r.includes('不是视频/图片')), 'txt/url 应因扩展名被排除: ' + reasons(res).join(' | '));
-  assert.ok(reasons(res).some((r) => r.startsWith('cover.jpg:')), '封面图应被排除（先被关键词命中）');
+  assert.deepEqual(names(files, res), ['A.MKV', 'b.Avi', 'c.ts', 'movie.mp4'].sort(), '只留视频（后缀大小写不敏感）');
+  assert.equal(res.keptBytes, 4000, '只统计视频大小（用于排队）');
 });
 
-test('广告关键词命中就排除：文件名和所在目录都算', () => {
+test('不做任何"广告识别"：名字里带广告词但确实是视频的，照样下', () => {
   const files = [
-    { name: '正片.mp4', length: 1024 },
-    { name: '广告.jpg', length: 10 },
-    { name: '宣传视频.mp4', length: 10 },
-    { name: 'Screenshot_2024.mp4', length: 10 },
-    { name: 'trailer.mp4', length: 10 },
-    { name: '广告宣传/正片2.mp4', length: 1024 },
+    { name: '广告.mp4', length: 100 },
+    { name: '宣传片.mkv', length: 100 },
+    { name: 'sample.mp4', length: 100 },
+    { name: 'trailer.mp4', length: 100 },
+    { name: 'Screenshot_2024.mp4', length: 100 },
+    { name: '广告宣传/正片.mp4', length: 100 },
   ];
   const res = selectBtFiles(files, base);
-  assert.deepEqual(names(files, res), ['正片.mp4'], '只有正片留下（目录名命中关键词的也排掉）');
-  const r = reasons(res).join(' | ');
-  assert.ok(r.includes('广告.jpg:命中广告关键词'), r);
-  assert.ok(r.includes('宣传视频.mp4:命中广告关键词'), r);
-  assert.ok(r.includes('Screenshot_2024.mp4:命中广告关键词'), r);
-  assert.ok(r.includes('trailer.mp4:命中广告关键词'), r);
-  assert.ok(r.includes('广告宣传/正片2.mp4:命中广告关键词'), '目录名也要参与匹配: ' + r);
+  assert.equal(res.keep.length, 6, '只要后缀是视频就全要（不再按名字猜广告，避免误杀正片）');
+  assert.equal(res.dropped.length, 0);
 });
 
-test('照片合集（种子里没有视频）才保留图片', () => {
+test('一个视频都没有时：全都被排除（调用方据此跳过这个种子）', () => {
   const files = [
-    { name: '001.jpg', length: 100 },
-    { name: '002.jpg', length: 100 },
-    { name: '003.png', length: 100 },
+    { name: 'cover.jpg', length: 10 },
+    { name: 'readme.txt', length: 10 },
+    { name: 'info.nfo', length: 10 },
   ];
   const res = selectBtFiles(files, base);
-  assert.equal(res.hasVideo, false);
-  assert.equal(res.keep.length, 3, '整包都是图片时按照片合集保留');
+  assert.equal(res.keep.length, 0);
+  assert.equal(res.dropped.length, 3);
+  assert.ok(res.dropped.every((d) => d.reason.includes('不是视频文件')), res.dropped.map((d) => d.reason).join('|'));
 });
 
-test('图片策略可选择：always / never（关键词优先于图片开关）', () => {
-  // 用中性文件名，避免被关键词先命中
-  const files = [{ name: 'movie.mp4', length: 10 }, { name: '001.jpg', length: 5 }];
-  assert.deepEqual(names(files, selectBtFiles(files, { ...base, keepImages: 'always' })), ['001.jpg', 'movie.mp4']);
-  assert.deepEqual(names(files, selectBtFiles(files, { ...base, keepImages: 'never' })), ['movie.mp4']);
-  // auto（默认）：有视频 -> 丢图片
-  assert.deepEqual(names(files, selectBtFiles(files, { ...base, keepImages: 'auto' })), ['movie.mp4']);
+test('extOfName：取最后一个点之后的后缀并转小写', () => {
+  assert.equal(extOfName('a/b/c.MP4'), 'mp4');
+  assert.equal(extOfName('无扩展名'), '');
+  assert.equal(extOfName('a.b.c.mkv'), 'mkv');
 });
 
-test('关键词优先于图片开关：就算设了保留图片，广告词命中的图片照样排掉', () => {
-  const files = [{ name: 'movie.mp4', length: 10 }, { name: '广告图2.jpg', length: 5 }];
-  const res = selectBtFiles(files, { ...base, keepImages: 'always' });
-  assert.deepEqual(names(files, res), ['movie.mp4']);
-  assert.ok(reasons(res).some((r) => r.includes('命中广告关键词')), reasons(res).join(' | '));
-  // 用户把「广告」从关键词表里去掉，它就会按图片策略保留下来（表是可编辑的，这就是意义）
-  const res2 = selectBtFiles(files, { ...base, keepImages: 'always', blockKeywords: ['sample'] });
-  assert.deepEqual(names(files, res2), ['movie.mp4', '广告图2.jpg'].sort());
-});
+// ---------------- 打包规则（阈值默认 300MB） ----------------
+const MB = 1024 ** 2;
+const mk = (sizes) => {
+  const map = {};
+  Object.keys(sizes).forEach((k) => { map[`/d/${k}`] = sizes[k] * MB; });
+  return map;
+};
 
-test('体积下限默认关闭；开了才按它排除小视频', () => {
-  const files = [
-    { name: 'big.mp4', length: 50 * 1024 ** 2 },
-    { name: 'small.mp4', length: 5 * 1024 ** 2 },
-  ];
-  // 默认 0 = 不过滤（用户明确说过"几十 MB 的正片也可能是核心内容"，不能一刀切）
-  const off = selectBtFiles(files, base);
-  assert.equal(off.keep.length, 2, '默认不按体积过滤');
-
-  const on = selectBtFiles(files, { ...base, minVideoBytes: 10 * 1024 ** 2 });
-  assert.deepEqual(names(files, on), ['big.mp4']);
-  assert.ok(reasons(on).some((r) => r.includes('小于体积下限')), reasons(on).join(' | '));
-});
-
-test('自定义关键词表可覆盖默认表', () => {
-  const files = [{ name: '广告.mp4', length: 10 }, { name: 'ok.mp4', length: 10 }];
-  const res = selectBtFiles(files, { ...base, blockKeywords: ['ok'] });
-  assert.deepEqual(names(files, res), ['广告.mp4'], '传了自定义表就只用自定义表');
-  // 默认表本身要能命中常见广告词
-  assert.equal(matchedKeyword('www.广告.com/1.mp4', DEFAULT_BT_BLOCK_KEYWORDS), '广告');
-  assert.equal(matchedKeyword('sample.mp4', DEFAULT_BT_BLOCK_KEYWORDS), 'sample');
-  // 不能误伤普通片名
-  assert.equal(matchedKeyword('S01E01.mkv', DEFAULT_BT_BLOCK_KEYWORDS), null);
-  assert.equal(matchedKeyword('Interstellar.2014.1080p.mkv', DEFAULT_BT_BLOCK_KEYWORDS), null, '片名里的 ad 之类子串不能命中');
-});
-
-test('成品拆分：大文件各自一个成品，小文件合成一个 zip', () => {
-  const sizes = { '/d/a.mp4': 600 * 1024 ** 2, '/d/b.mp4': 700 * 1024 ** 2, '/d/c.mp4': 20 * 1024 ** 2 };
-  const units = buildPublishUnits(
-    Object.keys(sizes),
-    500 * 1024 ** 2,
-    (p) => sizes[p],
-    (p) => p.split('/').pop().replace(/\.[^.]+$/, ''),
-    '合集',
-  );
-  assert.equal(units.length, 3, '两个大文件各自一个 + 小文件一个 = 3 个成品');
-  assert.deepEqual(units[0], { files: ['/d/a.mp4'], name: 'a' }, '大文件单独成包（单文件走移动，不 zip）');
-  assert.deepEqual(units[1], { files: ['/d/b.mp4'], name: 'b' });
-  assert.deepEqual(units[2], { files: ['/d/c.mp4'], name: 'c' }, '只有一个小文件就用它自己的名字');
-});
-
-test('成品拆分：全是小文件时合成一个 zip 成品（等全部下完）', () => {
-  const sizes = { '/d/1.mp4': 30 * 1024 ** 2, '/d/2.mp4': 40 * 1024 ** 2, '/d/3.mp4': 50 * 1024 ** 2 };
-  const units = buildPublishUnits(Object.keys(sizes), 500 * 1024 ** 2, (p) => sizes[p], (p) => p, '整包');
-  assert.equal(units.length, 1, '小文件合成一个成品');
-  assert.equal(units[0].name, '整包');
-  assert.equal(units[0].files.length, 3, '三个文件进同一个 zip');
-});
-
-test('成品拆分：阈值为 0 时全部合成一个成品（老行为）', () => {
-  const sizes = { '/d/a.mp4': 600 * 1024 ** 2, '/d/b.mp4': 700 * 1024 ** 2 };
-  const units = buildPublishUnits(Object.keys(sizes), 0, (p) => sizes[p], (p) => p, '整包');
+test('只有 1 个文件 -> 直接单独走（不改名打包）', () => {
+  const sizes = mk({ 'a.mp4': 800 });
+  const units = buildPublishUnits(Object.keys(sizes), 300 * MB, (p) => sizes[p], (p) => p, 'fold');
   assert.equal(units.length, 1);
-  assert.equal(units[0].files.length, 2);
+  assert.deepEqual(units[0].files, ['/d/a.mp4']);
+});
+
+test('多个文件全都 < 300MB -> 合成一个 zip', () => {
+  const sizes = mk({ 'a.mp4': 100, 'b.mp4': 200, 'c.mp4': 250 });
+  const units = buildPublishUnits(Object.keys(sizes), 300 * MB, (p) => sizes[p], (p) => p, 'fold');
+  assert.equal(units.length, 1, '小文件合成一个成品（会被打成 zip）');
+  assert.equal(units[0].files.length, 3);
+  assert.equal(units[0].name, 'fold');
+});
+
+test('有文件 >= 300MB -> 大文件一个一个单独走，小的合成一个', () => {
+  const sizes = mk({ 'big1.mp4': 900, 'big2.mp4': 400, 'small1.mp4': 50, 'small2.mp4': 60 });
+  const units = buildPublishUnits(Object.keys(sizes), 300 * MB, (p) => sizes[p], (p) => p.split('/').pop().replace(/\.\w+$/, ''), 'fold');
+  const singles = units.filter((u) => u.files.length === 1).map((u) => u.files[0]).sort();
+  assert.deepEqual(singles, ['/d/big1.mp4', '/d/big2.mp4'], '两个大文件各自一个成品');
+  const batch = units.find((u) => u.files.length > 1);
+  assert.ok(batch, '小文件应该合成一个成品');
+  assert.deepEqual(batch.files.sort(), ['/d/small1.mp4', '/d/small2.mp4']);
+  assert.equal(units.length, 3);
 });

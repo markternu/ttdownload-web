@@ -6,6 +6,7 @@ import { initNamePrefix } from './services/crypto';
 import { recoverTasks, startScheduler, stopScheduler, kickScheduler } from './core/scheduler';
 import { startPipeline, stopPipeline } from './services/pipeline';
 import { startBtEvictWorker, stopBtEvictWorker } from './services/btEvict';
+import { startBtHarvestWorker, stopBtHarvestWorker } from './services/btHarvest';
 import { ensureAria2Daemon } from './modules/aria2Client';
 import { logAuthBootState } from './services/auth';
 
@@ -54,6 +55,7 @@ async function main(): Promise<void> {
   startPipeline();
   startScheduler();
   startBtEvictWorker();
+  startBtHarvestWorker();
   kickScheduler();
 
   const app = createApp();
@@ -67,6 +69,7 @@ async function main(): Promise<void> {
     stopScheduler();
     stopPipeline();
     stopBtEvictWorker();
+    stopBtHarvestWorker();
     server.close(() => {
       logger.mark('BOOT', '已退出');
       process.exit(0);
