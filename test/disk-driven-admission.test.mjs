@@ -88,29 +88,34 @@ test('空间驱动的准入：一直放行到装不下为止（先进先出，�
   waitTask('t2-2G', 2 * GB);
   waitTask('t3-3G', 3 * GB);
   waitTask('t4-35G', 3.5 * GB);
-  setUsable(5.5 * GB); // 留余量：1G+2G 起得来（共 3G，<5.5G），3G 起不来（余 2.5G < 3G）
+  setUsable(5.5 * GB); // 1G+2G 起得来（共 3G），剩 2.5G 装不下 3G / 3.5G
 
   await schedulerTick();
 
-  // 用户例子：1G 起（剩 4G）→ 2G 起（剩 2G）→ 2G 之后 3G 装不下，停在这里
-  assert.deepEqual(runningTitles(), ['t1-1G', 't2-2G'].sort(), '应该起了 1G 和 2G 两个（共 3G，剩 2G）');
-  assert.deepEqual(waitingTitles(), ['t3-3G', 't4-35G'].sort(), '3G 装不下，后面的 3.5G 也不能插队');
+  // 1G 起（剩 4.5G）→ 2G 起（剩 2.5G）→ 3G 装不下跳过 → 3.5G 也装不下跳过
+  assert.deepEqual(runningTitles(), ['t1-1G', 't2-2G'].sort(), '起了 1G 和 2G（共 3G，剩 2.5G）');
+  assert.deepEqual(waitingTitles(), ['t3-3G', 't4-35G'].sort(), '3G/3.5G 都装不下，继续等回血');
+
+  // 再回一点血：3G 能起来
+  setUsable(8.2 * GB);
+  await schedulerTick();
+  assert.ok(runningTitles().includes('t3-3G'), '空间够了以后 3G 起来');
 });
 
-test('队首装不下就停住等回血（严格先进先出，不让后面的小任务插队）', async () => {
+test('装不下的跳过，让后面装得下的先跑（不浪费空间）', async () => {
   reset();
   waitTask('big-3G', 3 * GB);
   waitTask('small-100M', 100 * MB);
-  setUsable(1 * GB); // 只够 100M，但队首是 3G
+  setUsable(1 * GB); // 只够 100M
 
   await schedulerTick();
-  assert.deepEqual(runningTitles(), [], '队首 3G 装不下时，不允许跳过它去跑后面的小任务');
-  assert.deepEqual(waitingTitles(), ['big-3G', 'small-100M'].sort(), '两个都在等');
+  assert.deepEqual(runningTitles(), ['small-100M'], '3G 装不下就跳过它，让后面 100M 先跑（空间不许空着）');
+  assert.deepEqual(waitingTitles(), ['big-3G'], '3G 继续等回血');
 
-  // 回血到 3.5G：队首 3G 能起来，然后 100M 也装得下 → 两个都起
+  // 回血到 3.5G：大任务也能起来了
   setUsable(3.5 * GB);
   await schedulerTick();
-  assert.deepEqual(runningTitles(), ['big-3G', 'small-100M'].sort(), '回血后队首先起，紧接着 100M 也起');
+  assert.deepEqual(runningTitles(), ['big-3G', 'small-100M'].sort(), '回血后 3G 也能起来');
 });
 
 test('回血后自动继续：任务完成腾出空间 -> 排队的任务被放行', async () => {

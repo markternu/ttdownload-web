@@ -582,7 +582,7 @@ case "$ACTION" in
       fi
     done
     if [[ $changed_env -eq 1 ]]; then
-      log "已修正 .env：并发上限改为 0=不限（准入只由磁盘空间决定：有空间就按先进先出接着下）"
+      log "已修正 .env：并发上限改为 0=不限（准入只由磁盘空间决定：装得下的就下，装不下的先跳过等回血）"
     fi
   fi
 

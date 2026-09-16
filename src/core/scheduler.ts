@@ -165,6 +165,7 @@ async function startWaiting(): Promise<void> {
   const moduleCount = (m: ModuleId): number => running.filter((t) => t.module === m).length;
 
   const gated = new Map<ModuleId, { count: number; limit: number }>();
+  const skippedBySpace: { taskId: number; needBytes: number; usableBytes: number }[] = [];
   const waiting = tasksRepo.byStatus(['waiting']) as TaskWithPayload[];
   for (const task of waiting) {
     // 0 = 不限：只让磁盘空间当"闸门"（用户要的就是这个：有空间就下）
@@ -193,17 +194,19 @@ async function startWaiting(): Promise<void> {
     const usable = freeBytes() - settings.reserveFreeBytes - reserved;
     const need = Math.max(0, task.expectBytes || 0);
     if (usable - need < 0) {
-      // 先进先出：队首装不下就**停在这里等回血**，不跳过它去跑后面更小的任务
-      // （用户明确要的语义：队列排在最前面的先拿到空间）
-      logger.child('scheduler').mark('DISK_GATE', `队首任务 #${task.id} 需要 ${(need / 1024 ** 3).toFixed(2)}G，当前可用 ${(usable / 1024 ** 3).toFixed(2)}G —— 按先进先出等待回血`, {
+      // 装不下的**跳过**，让后面装得下的先跑 —— 别让一个大家伙把可用空间白白空着。
+      // 顺序仍然是先进先出（谁先来谁先拿到空间），只是遇到放不下的会先让位。
+      logger.child('scheduler').mark('DISK_GATE',
+        `任务 #${task.id} 需要 ${(need / 1024 ** 3).toFixed(2)}G，当前可用 ${(usable / 1024 ** 3).toFixed(2)}G —— 先跳过它，放行后面装得下的（不浪费空间）`, {
         needBytes: need,
         usableBytes: usable,
         freeBytes: freeBytes(),
         reserveBytes: settings.reserveFreeBytes,
         reservedRunningBytes: reserved,
-        waitingAhead: 0,
+        skipped: true,
       });
-      break;
+      skippedBySpace.push({ taskId: task.id, needBytes: need, usableBytes: usable });
+      continue;
     }
 
     try {
@@ -232,6 +235,14 @@ async function startWaiting(): Promise<void> {
     } catch (e) {
       failTask(task, (e as Error).message);
     }
+  }
+
+  if (skippedBySpace.length) {
+    logger.child('scheduler').mark('DISK_GATE',
+      `本轮因空间不足跳过 ${skippedBySpace.length} 个任务，等回血后再来（顺序仍是先进先出）`, {
+        skipped: skippedBySpace.slice(0, 10),
+        usableBytes: freeBytes() - settings.reserveFreeBytes,
+      });
   }
 
   if (gated.size) {

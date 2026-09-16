@@ -405,7 +405,7 @@ export default function SettingsPage() {
             />
             <Select
               label="最大并发任务"
-              hint="0=不限：只要磁盘还有可用空间就按「先进先出」一直放行，装不下的排队等回血（推荐）"
+              hint="0=不限（推荐）：只要磁盘还有可用空间就一直放行；装不下的先跳过，让后面装得下的先跑，等有空间再轮到它"
               value={String(draft.maxConcurrent)}
               options={CONCURRENCY_OPTIONS.map((value) => ({
                 value: String(value),
@@ -478,8 +478,8 @@ export default function SettingsPage() {
               </div>
               <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
                 三个数是 <b>BT / 直链 / 在线视频</b>，<b>0 表示不限</b>。默认全是 0：
-                程序会按「先进先出」把等待队列里装得下的任务一直放行，直到磁盘可用空间不够为止，
-                空间回血后自动继续 —— 不需要你在这里限制个数。
+                程序会把等待队列里装得下的任务一直放行，装不下的先跳过（让后面小的先跑，不浪费空间），
+                空间回血后再轮到它 —— 顺序仍然是先进先出。不需要你在这里限制个数。
               </p>
             </Field>
           </div>
