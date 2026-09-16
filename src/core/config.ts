@@ -53,8 +53,12 @@ export const config = {
 
   reserveFreeBytes: num(process.env.RESERVE_FREE_BYTES, 10 * 1024 ** 3),
   maxConcurrent: num(process.env.MAX_CONCURRENT, 3),
+  // 每个模块自己的并发上限（还要再受上面的全局 maxConcurrent 约束）。
+  // ⚠️ transmission 以前默认 1：上传来一包种子（10 多个）时只有 1 个在下、
+  //    其余全部排队，而磁盘和全局并发都还空着 —— 用户完全看不出原因（那道门当时
+  //    还是静默 continue）。BT 本来就是要同时跑多个种子，默认 3 才合理。
   moduleConcurrency: {
-    transmission: num(process.env.CONCURRENCY_TRANSMISSION, 1),
+    transmission: num(process.env.CONCURRENCY_TRANSMISSION, 3),
     aria2: num(process.env.CONCURRENCY_ARIA2, 2),
     webvideo: num(process.env.CONCURRENCY_WEBVIDEO, 2),
   },

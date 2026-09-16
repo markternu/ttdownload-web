@@ -100,6 +100,8 @@ export interface SeedItem {
 }
 
 export interface Settings {
+  /** 设置结构版本：用于给**已部署的机器**做一次性修正（改动历史见 services/settings.ts） */
+  schemaVersion?: number;
   maxConcurrent: number;
   defaultQuality: string;
   defaultFormat: string;

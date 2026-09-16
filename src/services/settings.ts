@@ -1,8 +1,31 @@
 import { config } from '../core/config';
 import { settingsRepo } from '../core/db';
+import { logger } from '../core/logger';
 import type { Settings } from '../types';
 
 const KEY = 'app_settings';
+
+/**
+ * 设置结构版本。给**已经部署的机器**做一次性修正用（它们数据库里存着旧设置，
+ * 改默认值对它们不生效）。加新修正时把数字 +1，并在 migrateSettings 里写清楚原因。
+ *
+ *   0 -> 1：moduleConcurrency.transmission 的旧默认值是 1，导致用户上传一包种子
+ *          （10 多个 .torrent）时**只有 1 个在下载**，其余全部排队，而磁盘和全局
+ *          并发都还空着；当时那道门还是静默跳过，界面上只显示"等待"，用户完全
+ *          无从排查。新默认是 3，这里把仍是旧值的部署改过来。
+ */
+const SETTINGS_SCHEMA = 1;
+
+export function migrateSettings(s: Settings): { next: Settings; notes: string[] } {
+  if ((s.schemaVersion ?? 0) >= SETTINGS_SCHEMA) return { next: s, notes: [] };
+  const notes: string[] = [];
+  const mc = { ...(s.moduleConcurrency ?? config.moduleConcurrency) };
+  if (mc.transmission === 1) {
+    mc.transmission = config.moduleConcurrency.transmission;
+    notes.push(`BT(transmission) 并发 1 -> ${mc.transmission}（旧默认值太低：上传来一包种子时只会跑一个）`);
+  }
+  return { next: { ...s, moduleConcurrency: mc, schemaVersion: SETTINGS_SCHEMA }, notes };
+}
 
 export function defaultSettings(): Settings {
   return {
@@ -46,7 +69,7 @@ export function getSettings(): Settings {
   }
   try {
     const parsed = JSON.parse(raw) as Partial<Settings>;
-    cached = {
+    const merged: Settings = {
       ...base,
       ...parsed,
       moduleConcurrency: { ...base.moduleConcurrency, ...(parsed.moduleConcurrency ?? {}) },
@@ -54,10 +77,29 @@ export function getSettings(): Settings {
       transmissionRpc: { ...base.transmissionRpc, ...(parsed.transmissionRpc ?? {}) },
       btEvict: { ...base.btEvict, ...(parsed.btEvict ?? {}) },
     };
+    const { next, notes } = migrateSettings(merged);
+    cached = next;
+    if (notes.length) {
+      // 落盘 + 明确告诉用户改了什么（用户没主动改过，必须让他知道）
+      settingsRepo.setMany({ [KEY]: JSON.stringify(next) });
+      for (const n of notes) {
+        logger.child('settings').warn(
+          `[MARK:SETTINGS_MIGRATE] 已自动修正一项旧配置：${n} —— 如不想这样请到「设置」里改回去`);
+      }
+    }
   } catch {
     cached = base;
   }
   return cached;
+}
+
+/**
+ * 丢掉缓存、重新从数据库读一遍设置（迁移逻辑也会再跑一次）。
+ * 平时不用调；测试验证"老部署启动时被自动修正"就走这条路径。
+ */
+export function reloadSettings(): Settings {
+  cached = null;
+  return getSettings();
 }
 
 /** 返回给前端的设置（密码掩码） */

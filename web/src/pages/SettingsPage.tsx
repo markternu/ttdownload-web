@@ -432,7 +432,10 @@ export default function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="模块并发（transmission / aria2 / webvideo）">
+            <Field
+              label="模块并发（BT / 直链 / 在线视频）"
+              hint="每个模块各自最多同时跑几个；还要再受上面的「最大并发任务」限制"
+            >
               <div className="grid grid-cols-3 gap-2">
                 <Input
                   type="number"
@@ -474,6 +477,11 @@ export default function SettingsPage() {
                   aria-label="webvideo 并发"
                 />
               </div>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                第一个数是 <b>BT</b>：一次上传一包种子（10 多个 .torrent）时，同时下载的个数就由它决定。
+                默认 3；嫌慢可以调大（别忘了上面的「最大并发任务」也要够大），
+                机器/带宽吃不消就调小到 1。
+              </p>
             </Field>
           </div>
 

@@ -149,16 +149,35 @@ async function resumeSpacePaused(usable: number): Promise<void> {
   }
 }
 
+const MODULE_CN: Record<ModuleId, string> = { transmission: 'BT', aria2: '直链', webvideo: '在线视频' };
+
+// 模块并发门控的提示节流：数量变了或超过 60 秒才再说一次（这个 tick 每 3 秒一轮）
+let gateNotice = { at: 0, sig: '' };
+
 async function startWaiting(): Promise<void> {
   const settings = getSettings();
   let running = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
   const moduleCount = (m: ModuleId): number => running.filter((t) => t.module === m).length;
 
+  const gated = new Map<ModuleId, { count: number; limit: number }>();
   const waiting = tasksRepo.byStatus(['waiting']) as TaskWithPayload[];
   for (const task of waiting) {
     if (running.length >= settings.maxConcurrent) break;
     const limit = settings.moduleConcurrency[task.module] ?? 1;
-    if (moduleCount(task.module) >= limit) continue;
+    if (moduleCount(task.module) >= limit) {
+      // ⚠️ 这里以前是静默 continue：用户传 10 多个种子只跑一个，界面上只有"等待"、
+      //    日志里一个字都没有，根本没法自己排查。现在两处都写清楚：
+      //    ① 任务上写原因（任务列表直接能看到） ② 日志打 MODULE_GATE（节流）
+      const g = gated.get(task.module) ?? { count: 0, limit };
+      g.count++;
+      gated.set(task.module, g);
+      const msg = `${MODULE_CN[task.module]} 并发已满（上限 ${limit} 个，可到「设置」里调大）`;
+      if (task.error !== msg) {
+        tasksRepo.update(task.id, { error: msg });
+        emit(task.id);
+      }
+      continue;
+    }
 
     const adapter = adapters[task.module];
     if (!adapter) continue;
@@ -191,6 +210,7 @@ async function startWaiting(): Promise<void> {
         emit(task.id);
         continue;
       }
+      tasksRepo.update(task.id, { error: null });
       await adapter.start(fresh);
       logger.child('scheduler').mark('TASK_STATE', `任务 #${task.id} 已启动`, {
         module: task.module,
@@ -202,6 +222,20 @@ async function startWaiting(): Promise<void> {
       running = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
     } catch (e) {
       failTask(task, (e as Error).message);
+    }
+  }
+
+  if (gated.size) {
+    const sig = [...gated.entries()].map(([m, g]) => `${m}:${g.count}`).join(',');
+    const now = Date.now();
+    if (sig !== gateNotice.sig || now - gateNotice.at > 60_000) {
+      gateNotice = { at: now, sig };
+      for (const [m, g] of gated) {
+        logger.child('scheduler').mark('MODULE_GATE',
+          `${MODULE_CN[m]} 并发已满：正在跑 ${g.limit} 个（模块上限），还有 ${g.count} 个在等待。` +
+          `想同时跑更多请到「设置 → 模块并发」把 ${m} 调大（全局并发上限 ${settings.maxConcurrent}）`,
+          { module: m, moduleLimit: g.limit, gated: g.count, maxConcurrent: settings.maxConcurrent });
+      }
     }
   }
 }
