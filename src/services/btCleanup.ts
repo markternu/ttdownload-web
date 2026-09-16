@@ -93,6 +93,25 @@ export function findSharedDirs(task: Task, dirs: string[]): Map<string, number[]
     }
     if (hit.length) shared.set(dir, hit);
   }
+
+  // 还要看"别的任务的文件是不是就躺在这些目录里" —— 早交付的子任务正是这种情况：
+  // 父任务已下完并触发清理时，子任务（archiving）的文件可能还没被流水线搬走，
+  // 这时整目录删就把它的源文件删了。宁可晚点释放，也不能删错。
+  for (const o of others) {
+    const payload = (o as Task & { payload?: Record<string, unknown> }).payload ?? {};
+    const paths = Array.isArray(payload.downloadedPaths) ? (payload.downloadedPaths as string[]) : [];
+    const id = Number(o.id);
+    for (const raw of paths) {
+      const abs = path.resolve(String(raw));
+      for (const dir of dirs) {
+        if (abs === dir || abs.startsWith(dir + path.sep)) {
+          const list = shared.get(dir) ?? [];
+          if (!list.includes(id)) list.push(id);
+          shared.set(dir, list);
+        }
+      }
+    }
+  }
   return shared;
 }
 

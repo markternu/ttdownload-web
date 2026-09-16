@@ -185,3 +185,36 @@ export function buildPublishUnits(
   else if (small.length > 1) units.push({ files: small, name: fallbackName });
   return units;
 }
+
+/**
+ * 给 BT 任务挑一个**不会撞名**的下载目录名。
+ *
+ * 为什么需要：目录名以前是拿 .torrent 文件名（还截断到 80 字符）算的，两个不同种子
+ * 完全可能算出同一个名字（名字很长时截断后就一样了）。而清理是按目录做的 —— 撞名
+ * 就意味着一个任务清理时会把另一个任务的文件一起删掉。所以这里保证唯一：
+ *   ① 用户/其它任务已经占用的（用于在跑的 downloadDir）
+ *   ② 磁盘上已存在且非空的目录
+ * 两条都避开；空目录可以直接复用（避免留一堆空壳）。
+ */
+export function pickUniqueDirName(
+  base: string,
+  used: Set<string>,
+  exists: (abs: string) => boolean,
+  isEmpty: (abs: string) => boolean,
+  resolveAbs: (name: string) => string,
+  fallbackSuffix: string | number,
+): string {
+  const clean = String(base || '')
+    .replace(/[^\w\u4e00-\u9fa5.-]+/g, '_')
+    .replace(/^[.\-_]+|[.\-_]+$/g, '')
+    .slice(0, 60);
+  const root = clean || `seed_${fallbackSuffix}`;
+  for (let n = 1; n <= 200; n += 1) {
+    const name = n === 1 ? root : `${root}-${n}`;
+    const abs = resolveAbs(name);
+    if (used.has(abs)) continue;
+    if (exists(abs) && !isEmpty(abs)) continue;
+    return name;
+  }
+  return `${root}-${fallbackSuffix}`;
+}

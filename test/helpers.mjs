@@ -150,6 +150,12 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
     eta: 30,
     peersConnected: 5,
     removed: [],
+    torrentSets: [],
+    wanted: (files ?? [
+      { name: 'video.mp4', length: 1000, bytesCompleted: 0 },
+      { name: 'cover.jpg', length: 100, bytesCompleted: 0 },
+      { name: 'readme.txt', length: 50, bytesCompleted: 0 },
+    ]).map(() => 1),
     downloadDir,
     files: files ?? [
       { name: 'video.mp4', length: 1000, bytesCompleted: 0 },
@@ -169,8 +175,12 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
         return ok('success', { version: '4.0.5-mock', ...(sessionExtra ?? {}) });
       case 'torrent-add':
         return ok('success', { 'torrent-added': { id: 7, name: state.name, hashString: 'abc' } });
-      case 'torrent-set':
+      case 'torrent-set': {
+        state.torrentSets.push(args);
+        if (Array.isArray(args['files-wanted'])) for (const i of args['files-wanted']) if (state.wanted[i] !== undefined) state.wanted[i] = 1;
+        if (Array.isArray(args['files-unwanted'])) for (const i of args['files-unwanted']) if (state.wanted[i] !== undefined) state.wanted[i] = 0;
         return ok('success', {});
+      }
       case 'torrent-remove':
         state.removed.push({ ids: args.ids, deleteLocalData: args['delete-local-data'] === true });
         state.running = false;
@@ -199,8 +209,13 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
               error: 0,
               peersConnected: state.peersConnected,
               peersSendingToUs: state.peersConnected,
-              files: state.files.map((f) => ({ ...f, bytesCompleted: Math.round(f.length * percentDone) })),
-              wanted: [1, 1, 1],
+              // 逐文件进度：测试显式给了 bytesCompleted（例如"这个大文件已经下完"）就用它，
+              // 否则按整体百分比推算（老测试依赖这个行为）
+              files: state.files.map((f) => ({
+                ...f,
+                bytesCompleted: f.bytesCompleted > 0 ? f.bytesCompleted : Math.round(f.length * percentDone),
+              })),
+              wanted: state.files.map((_, i) => (state.wanted[i] === undefined ? 1 : state.wanted[i])),
             },
           ],
         });

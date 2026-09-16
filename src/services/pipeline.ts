@@ -8,7 +8,7 @@ import { archiveTaskFiles, moveWithDedup } from './archive';
 import { encryptFile, stripExtension } from './crypto';
 import { encryptPassword, getSettings } from './settings';
 import { cleanupBtTaskDirs } from './btCleanup';
-import type { Task } from '../types';
+import type { ModuleId, Task } from '../types';
 
 /**
  * 归档 → 加密 → 发布 流水线（消费者目录）。
@@ -233,6 +233,47 @@ export function startPipeline(): void {
 export function stopPipeline(): void {
   if (timer) clearInterval(timer);
   timer = null;
+}
+
+/**
+ * 为一个"已经下完、就躺在磁盘上"的文件单独创建一个发布任务。
+ *
+ * 用途：BT 里的大文件（≥「单独发布阈值」）**一下完就提前交付**，不用等整个种子下完
+ * —— 用户能更早在手机上取到第一个成品。任务直接以 archiving 状态创建，
+ * 跳过下载阶段，交给流水线正常走 归档 → 加密 → 发布。
+ * 调用方负责先把该文件在 transmission 里标成 unwanted（否则文件被移走后会被重新校验/重下）。
+ */
+export function createPublishTask(opts: {
+  module: ModuleId;
+  title: string;
+  platform?: string | null;
+  files: string[];
+  originalName: string;
+  sizeBytes: number;
+  parentTaskId: number;
+}): number {
+  const task = tasksRepo.create({
+    module: opts.module,
+    title: opts.title,
+    platform: opts.platform ?? null,
+    url: null,
+    status: 'archiving',
+    priority: 0,
+    expectBytes: opts.sizeBytes,
+    meta: { files: opts.files.map((f) => path.basename(f)) },
+    payload: {
+      downloadedPaths: opts.files,
+      originalName: opts.originalName,
+      publishUnits: [{ files: opts.files, name: opts.originalName }],
+      parentTaskId: opts.parentTaskId,
+      earlyHandoff: true,
+    },
+  });
+  taskLog(task.id, 'pipeline').mark('BT_EARLY',
+    `大文件已下完，提前进入归档（不等整个种子）: ${opts.originalName}`,
+    { sizeBytes: opts.sizeBytes, parentTaskId: opts.parentTaskId, files: opts.files });
+  bus.emitTask(tasksRepo.get(task.id));
+  return task.id;
 }
 
 /** 手工把文件推入归档（模块完成时调用）：更新任务状态即可，流水线会自动接手 */

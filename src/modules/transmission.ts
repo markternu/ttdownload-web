@@ -4,7 +4,8 @@ import { config } from '../core/config';
 import { logger, taskLog } from '../core/logger';
 import { runCommand } from '../services/archive';
 import { getSettings } from '../services/settings';
-import { selectBtFiles, buildPublishUnits, DEFAULT_BT_BLOCK_KEYWORDS } from '../services/btSelect';
+import { createPublishTask } from '../services/pipeline';
+import { selectBtFiles, buildPublishUnits, pickUniqueDirName, DEFAULT_BT_BLOCK_KEYWORDS } from '../services/btSelect';
 import { seedsRepo, tasksRepo } from '../core/db';
 import { cleanupBtTaskDirs } from '../services/btCleanup';
 import type { SeedItem } from '../types';
@@ -206,7 +207,27 @@ export const transmissionModule: ModuleAdapter = {
     const payload = task.payload ?? {};
     const seedPath = String(payload.seedPath ?? '');
     const base64 = fs.readFileSync(seedPath).toString('base64');
-    const dirName = path.basename(seedPath).replace(/\.torrent$/i, '').replace(/[^\w\u4e00-\u9fa5.-]+/g, '_').slice(0, 80) || `seed_${task.id}`;
+    // 目录名要**保证唯一**：以前直接拿 .torrent 文件名（截断 80 字符）算，两个不同种子
+    // 可能算出同一个名字，而清理是按目录做的 —— 撞名会导致一个任务把别人的文件删掉。
+    const usedDirs = new Set<string>();
+    for (const other of tasksRepo.byStatus(['waiting', 'parsing', 'downloading', 'paused', 'archiving', 'encrypting'] as never)) {
+      const d = (other as TaskWithPayload).payload?.downloadDir;
+      if (d) usedDirs.add(path.resolve(String(d)));
+    }
+    const dirName = pickUniqueDirName(
+      path.basename(seedPath).replace(/\.torrent$/i, ''),
+      usedDirs,
+      (abs) => fs.existsSync(abs),
+      (abs) => {
+        try {
+          return fs.readdirSync(abs).length === 0;
+        } catch {
+          return true;
+        }
+      },
+      (name) => path.resolve(path.join(config.dirs.btDownload, name)),
+      task.id,
+    );
     const downloadDir = path.join(config.dirs.btDownload, dirName);
     fs.mkdirSync(downloadDir, { recursive: true });
 
@@ -328,6 +349,60 @@ export const transmissionModule: ModuleAdapter = {
     const eta = torrent.eta && torrent.eta > 0 ? torrent.eta : null;
 
     const finished = (torrent.leftUntilDone ?? 1) === 0 && (torrent.percentDone ?? 0) >= 1;
+
+    // ---- 早交付：单个大文件一下完就单独交给流水线，不用等整个种子 ----
+    // 用户要的是"下载好了一个就把一个单独改名加密"。前提是把该文件在 transmission 里
+    // 标成 unwanted —— 否则文件被移走后，transmission 重新校验会认为文件缺失又去重下。
+    if (!finished) {
+      const sel0 = getSettings().btSelect;
+      const threshold0 = Math.max(0, Number(sel0.publishIndividuallyMinBytes) || 0);
+      if (threshold0 > 0 && Array.isArray(torrent.files) && torrent.files.length) {
+        const doneList: string[] = Array.isArray(payload.handedOff) ? [...(payload.handedOff as string[])] : [];
+        const dir0 = String(payload.downloadDir || torrent.downloadDir || config.dirs.btDownload);
+        const picked: { idx: number; name: string; size: number }[] = [];
+        for (let i = 0; i < torrent.files.length; i += 1) {
+          const f = torrent.files[i];
+          if (!f || !f.name) continue;
+          const want = wantedIdxOf(torrent.wanted, i);
+          if (!want) continue;
+          if (doneList.includes(f.name)) continue;
+          const complete = f.length > 0 && f.bytesCompleted >= f.length;
+          if (!complete) continue;
+          if (f.length < threshold0) continue; // 小文件留到最后一起打包
+          picked.push({ idx: i, name: f.name, size: f.length });
+        }
+        if (picked.length) {
+          // ① 先标 unwanted（防止移走后重下）
+          await client.call('torrent-set', { ids: [torrentId], 'files-unwanted': picked.map((p) => p.idx) }).catch(() => undefined);
+          // ② 每个文件建一个独立发布任务
+          let handedBytes = 0;
+          for (const p of picked) {
+            const abs = path.join(dir0, p.name);
+            if (!fs.existsSync(abs)) continue;
+            createPublishTask({
+              module: 'transmission',
+              title: `${torrent.name || task.title || `task_${task.id}`} · ${path.basename(p.name).replace(/\.[^.]+$/, '')}`,
+              platform: 'BT',
+              files: [abs],
+              originalName: path.basename(p.name).replace(/\.[^.]+$/, ''),
+              sizeBytes: p.size,
+              parentTaskId: task.id,
+            });
+            doneList.push(p.name);
+            handedBytes += p.size;
+          }
+          if (handedBytes > 0) {
+            // ③ 记下已交付 + 把预留空间减掉（文件已经不在下载队列里了）
+            const nextExpect = Math.max(0, Number(task.expectBytes ?? 0) - handedBytes);
+            tasksRepo.update(task.id, {
+              payload: { ...payload, handedOff: doneList },
+              expectBytes: nextExpect,
+            });
+          }
+        }
+      }
+    }
+
     if (finished) {
       const wanted = torrent.wanted ?? [];
       const files = (torrent.files ?? []).filter((_, i) => wanted.length === 0 || wanted[i] !== 0);
@@ -422,4 +497,10 @@ export function enqueueSeed(seed: SeedItem, priority = 0): import('../types').Ta
   });
   seedsRepo.update(seed.id, { status: 'queued', taskId: task.id });
   return task;
+}
+
+/** transmission 的 wanted 数组：空数组/缺省 = 全都要；0 = 不要 */
+function wantedIdxOf(wanted: number[] | undefined, i: number): boolean {
+  if (!Array.isArray(wanted) || wanted.length === 0) return true;
+  return wanted[i] !== 0;
 }
