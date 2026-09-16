@@ -132,10 +132,22 @@ function SidebarContent({ onClose }: { onClose: () => void }) {
       <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50/80 p-3.5 dark:border-slate-800 dark:bg-slate-800/40">
         <div className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
           <HardDrive className="h-3.5 w-3.5" />
-          磁盘可用空间
+          可用于下载
         </div>
         <p className="text-lg font-semibold text-slate-900 tabular-nums dark:text-slate-50">
-          {system ? formatBytes(system.disk.freeBytes, '未知') : '—'}
+          {system ? formatBytes(system.disk.usableBytes, '未知') : '—'}
+        </p>
+        <p className="text-[11px] leading-4 text-slate-400">
+          系统实际可用 {system ? formatBytes(system.disk.freeBytes, '未知') : '—'}
+          <br />
+          （已扣掉 {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'} 的加密/归档周转预留）
+          {system && (system.disk.reservedBytes ?? 0) > 0 ? (
+            <>
+              <br />
+              运行中任务已预留 {formatBytes(system.disk.reservedBytes ?? 0, '0 B')}，还能再放行{' '}
+              {formatBytes(system.disk.admittableBytes ?? 0, '0 B')}
+            </>
+          ) : null}
         </p>
         <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
           <div
@@ -147,7 +159,7 @@ function SidebarContent({ onClose }: { onClose: () => void }) {
           />
         </div>
         <p className="text-[11px] text-slate-500 dark:text-slate-400">
-          已用 {diskPercent}% · 预留 {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'}
+          整盘已用 {diskPercent}% · 已扣预留 {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'}
         </p>
         <div className="flex items-center gap-3 border-t border-slate-200 pt-2.5 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
           <span className="inline-flex items-center gap-1">

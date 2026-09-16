@@ -420,7 +420,7 @@ export default function SettingsPage() {
                 placeholder="/ttdownload"
               />
             </Field>
-            <Field label="预留磁盘空间（GB）" hint="空间门控阈值，低于该值不再放行新任务">
+            <Field label="预留磁盘空间（GB）" hint="留给「归档/加密/发布」等文件操作周转的空间（加密是边读边删，留够一次操作的量就够）。剩余空间低于它就不再放行新下载 —— 即「可用于下载」= 系统实际可用 − 这个预留">
               <Input
                 type="number"
                 min={0}
@@ -1276,10 +1276,11 @@ export default function SettingsPage() {
                 <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
                   <span className="inline-flex items-center gap-1">
                     <HardDrive className="h-3.5 w-3.5" />
-                    磁盘剩余空间
+                    磁盘空间（整盘）
                   </span>
                   <span className="tabular-nums">
-                    {formatBytes(system.disk.freeBytes, '未知')} 可用 / 共{' '}
+                    可用于下载 {formatBytes(system.disk.usableBytes, '未知')} · 系统可用{' '}
+                    {formatBytes(system.disk.freeBytes, '未知')} / 共{' '}
                     {formatBytes(system.disk.totalBytes, '未知')}
                   </span>
                 </div>

@@ -250,8 +250,14 @@ export interface SystemDisk {
   totalBytes: number
   freeBytes: number
   usedBytes: number
+  /** 预留：留给"归档/加密/发布"等文件操作周转（不参与新下载） */
   reserveBytes: number
+  /** 可用于下载 = 系统可用 − 预留 */
   usableBytes: number
+  /** 运行中任务已"预计占用"的空间（调度器放行新任务时会扣掉） */
+  reservedBytes?: number
+  /** 实际还能不能再放行新任务 = usableBytes − reservedBytes */
+  admittableBytes?: number
 }
 
 export interface ToolStatus {

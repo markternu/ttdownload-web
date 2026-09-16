@@ -189,6 +189,23 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
+  test('磁盘空间文案：必须说清"可用于下载"和"系统实际可用"的区别', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    // 首页 + 设置页都要能说清：预留是给加密/归档周转的，新下载能用的是"系统可用 − 预留"
+    await page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    const home = await page.locator('body').innerText();
+    assert.match(home, /可用于下载/, '首页要写"可用于下载"');
+    assert.match(home, /加密|归档/, '首页要解释预留空间是干什么用的');
+
+    await page.goto(`${base}/settings`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=/预留磁盘空间/', { timeout: 15000 });
+    const settings = await page.locator('body').innerText();
+    assert.match(settings, /可用于下载/, '设置页要出现"可用于下载"这个口径');
+    assert.match(settings, /系统可用|系统实际可用/, '设置页要同时给"系统可用"的数');
+    await page.close();
+  });
+
   test('暗色模式：切换后 html 带 dark 类', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     const page = await newPage();

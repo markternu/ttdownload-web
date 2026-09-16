@@ -66,6 +66,11 @@ systemRouter.get(
       toolStatus(config.bins.ffmpeg, ['-version']),
       toolStatus(config.bins.openssl, ['version']),
     ]);
+    // 运行中任务"预计要占"的空间：调度器放行新任务时会把它扣掉，
+    // 所以"还能不能再放行"= 系统可用 - 预留 - 这些预留。前端要能说清楚这个差额。
+    const runningTasks = tasksRepo.byStatus(['downloading', 'parsing']) as { expect_bytes?: number }[];
+    const reservedBytes = runningTasks.reduce((sum, t) => sum + Math.max(0, Number(t.expect_bytes ?? 0) || 0), 0);
+    const usable = usableBytes(settings.reserveFreeBytes);
     res.json({
       disk: {
         path: DIRS.root,
@@ -73,7 +78,9 @@ systemRouter.get(
         freeBytes: sf.free,
         usedBytes: sf.total - sf.free,
         reserveBytes: settings.reserveFreeBytes,
-        usableBytes: usableBytes(settings.reserveFreeBytes),
+        usableBytes: usable,
+        reservedBytes,
+        admittableBytes: usable - reservedBytes,
       },
       db: { path: config.dbPath, sizeBytes: dbFileSize(), ok: true },
       dirs: DIRS as unknown as Record<string, string>,

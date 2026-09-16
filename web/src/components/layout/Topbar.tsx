@@ -82,10 +82,19 @@ export function Topbar({ title, onOpenSidebar }: TopbarProps) {
                 ? 'bg-red-500/10 text-red-600 dark:text-red-400'
                 : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',
             )}
-            title={system ? `路径：${system.disk.path}` : '暂无系统状态'}
+            title={
+              system
+                ? [
+                    `可用于下载：${formatBytes(system.disk.usableBytes, '未知')}`,
+                    `系统实际可用：${formatBytes(system.disk.freeBytes, '未知')}`,
+                    `其中预留 ${formatBytes(system.disk.reserveBytes, '0 B')} 给「归档/加密/发布」等文件操作周转，不参与新下载`,
+                    `路径：${system.disk.path}`,
+                  ].join('\n')
+                : '暂无系统状态'
+            }
           >
             {lowSpace ? <AlertTriangle className="h-3.5 w-3.5" /> : null}
-            磁盘 {system ? formatBytes(system.disk.freeBytes, '未知') : '—'}
+            可下载 {system ? formatBytes(system.disk.usableBytes, '未知') : '—'}
           </div>
 
           {/* SSE 状态 */}
@@ -136,9 +145,10 @@ export function Topbar({ title, onOpenSidebar }: TopbarProps) {
         <div className="flex items-start gap-2 border-t border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700 sm:px-6 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
-            磁盘可用空间已低于预留阈值（
+            「可用于下载」的空间已不足预留阈值（预留{' '}
             {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'}
-            ），新任务将进入等待队列。请清理已发布文件或调整预留空间。
+            是给归档/加密/发布等文件操作周转用的，不参与下载），新任务会先排队等待。
+            可清理「已发布文件」，或把设置里的「预留磁盘空间」调小。
           </span>
         </div>
       ) : null}

@@ -442,7 +442,10 @@ export default function HomePage() {
             <li className="flex gap-2">
               <Download className="mt-0.5 h-4 w-4 shrink-0 text-brand-500" />
               <span>
-                磁盘可用 {system ? formatBytes(system.disk.freeBytes, '未知') : '—'}，低于预留阈值时自动暂停。
+                可用于下载 {system ? formatBytes(system.disk.usableBytes, '未知') : '—'}
+                （系统实际可用 {system ? formatBytes(system.disk.freeBytes, '未知') : '—'}，已扣掉
+                {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'} 的加密/归档周转预留），
+                不够时新任务自动排队等回血。
               </span>
             </li>
           </ul>

@@ -225,8 +225,23 @@ export default function DashboardPage() {
                 tone={diskUsedRatio > 0.9 ? 'danger' : diskUsedRatio > 0.75 ? 'warning' : 'brand'}
               />
               <p className="mt-1.5 text-[11px] text-slate-400">
-                可用 {system ? formatBytes(system.disk.freeBytes, '未知') : '—'} · 预留{' '}
+                <span className="font-medium text-slate-500 dark:text-slate-300">
+                  可用于下载 {system ? formatBytes(system.disk.usableBytes, '未知') : '—'}
+                </span>{' '}
+                · 系统实际可用 {system ? formatBytes(system.disk.freeBytes, '未知') : '—'} · 预留{' '}
                 {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'}
+              </p>
+              <p className="mt-1 text-[11px] leading-4 text-slate-400">
+                预留那份是留给「归档 → 加密 → 发布」等文件操作周转的（加密时源文件是边读边删，
+                留够一次操作的空间就不会把自己写满）。所以<b>新下载能用的 = 系统实际可用 − 预留</b>；
+                想让它多下点就把设置里的「预留磁盘空间」调小。
+                {system && (system.disk.reservedBytes ?? 0) > 0 ? (
+                  <>
+                    <br />
+                    当前运行中的任务已预留 {formatBytes(system.disk.reservedBytes ?? 0, '0 B')}，
+                    实际还能再放行 {formatBytes(system.disk.admittableBytes ?? 0, '0 B')} 的新任务。
+                  </>
+                ) : null}
               </p>
             </div>
 
