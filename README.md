@@ -178,8 +178,8 @@ docker compose up -d
 | `DOWNLOAD_ROOT` | /ttdownload | 下载根目录（所有模块/归档/发布目录都在其下，改后需重启） |
 | `ENCRYPT_PASSWORD` | 老脚本默认值 | AES 密码（必须与 PC 端解密工具一致） |
 | `RESERVE_FREE_BYTES` | 10737418240 (10GiB) | 磁盘保留空间：低于它就暂停下载 |
-| `MAX_CONCURRENT` | 3 | 全局最大并发下载数 |
-| `CONCURRENCY_TRANSMISSION` / `_ARIA2` / `_WEBVIDEO` | 3 / 2 / 2 | 各模块并发上限（BT 一次同时下几个种子） |
+| `MAX_CONCURRENT` | 0 | 全局并发上限，**0=不限**（准入只由磁盘空间决定） |
+| `CONCURRENCY_TRANSMISSION` / `_ARIA2` / `_WEBVIDEO` | 0 / 0 / 0 | 各模块并发上限，**0=不限**（准入只由磁盘空间决定） |
 
 ### BT 到底下哪些文件？（内容甄别）
 

@@ -167,9 +167,10 @@ async function startWaiting(): Promise<void> {
   const gated = new Map<ModuleId, { count: number; limit: number }>();
   const waiting = tasksRepo.byStatus(['waiting']) as TaskWithPayload[];
   for (const task of waiting) {
-    if (running.length >= settings.maxConcurrent) break;
-    const limit = settings.moduleConcurrency[task.module] ?? 1;
-    if (moduleCount(task.module) >= limit) {
+    // 0 = 不限：只让磁盘空间当"闸门"（用户要的就是这个：有空间就下）
+    if (settings.maxConcurrent > 0 && running.length >= settings.maxConcurrent) break;
+    const limit = settings.moduleConcurrency[task.module] ?? 0;
+    if (limit > 0 && moduleCount(task.module) >= limit) {
       // ⚠️ 这里以前是静默 continue：用户传 10 多个种子只跑一个，界面上只有"等待"、
       //    日志里一个字都没有，根本没法自己排查。现在两处都写清楚：
       //    ① 任务上写原因（任务列表直接能看到） ② 日志打 MODULE_GATE（节流）
@@ -192,14 +193,17 @@ async function startWaiting(): Promise<void> {
     const usable = freeBytes() - settings.reserveFreeBytes - reserved;
     const need = Math.max(0, task.expectBytes || 0);
     if (usable - need < 0) {
-      logger.child('scheduler').mark('DISK_GATE', `任务 #${task.id} 空间不足，继续等待`, {
+      // 先进先出：队首装不下就**停在这里等回血**，不跳过它去跑后面更小的任务
+      // （用户明确要的语义：队列排在最前面的先拿到空间）
+      logger.child('scheduler').mark('DISK_GATE', `队首任务 #${task.id} 需要 ${(need / 1024 ** 3).toFixed(2)}G，当前可用 ${(usable / 1024 ** 3).toFixed(2)}G —— 按先进先出等待回血`, {
         needBytes: need,
         usableBytes: usable,
         freeBytes: freeBytes(),
         reserveBytes: settings.reserveFreeBytes,
         reservedRunningBytes: reserved,
+        waitingAhead: 0,
       });
-      continue;
+      break;
     }
 
     try {

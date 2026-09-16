@@ -52,15 +52,18 @@ export const config = {
   logPath: str(process.env.LOG_PATH, path.join(DIRS.state, 'app.log')),
 
   reserveFreeBytes: num(process.env.RESERVE_FREE_BYTES, 10 * 1024 ** 3),
-  maxConcurrent: num(process.env.MAX_CONCURRENT, 3),
-  // 每个模块自己的并发上限（还要再受上面的全局 maxConcurrent 约束）。
-  // ⚠️ transmission 以前默认 1：上传来一包种子（10 多个）时只有 1 个在下、
-  //    其余全部排队，而磁盘和全局并发都还空着 —— 用户完全看不出原因（那道门当时
-  //    还是静默 continue）。BT 本来就是要同时跑多个种子，默认 3 才合理。
+  // ⚠️ 这里**默认不限并发**（0 = 不限）。
+  // 真正的准入条件只有一个：**磁盘空间**。调度器按先进先出依次尝试启动等待任务：
+  //     usable = 实际可用 - 预留 - 已在跑任务的预留
+  //     usable - 这个任务预计要占的空间 >= 0  → 启动它，usable 相应扣掉，继续下一个
+  //     装不下 → 停在它这里等回血（完成+被安卓取走+服务端删除后会广播回血，立刻重算）
+  // 以前写死过 1 / 3，结果是"磁盘还空着 18G，却只跑一个任务，其余白等" —— 那是错的。
+  // 想要限制（比如小机器怕卡）再自己调大/调小，0 就是不管。
+  maxConcurrent: num(process.env.MAX_CONCURRENT, 0),
   moduleConcurrency: {
-    transmission: num(process.env.CONCURRENCY_TRANSMISSION, 3),
-    aria2: num(process.env.CONCURRENCY_ARIA2, 2),
-    webvideo: num(process.env.CONCURRENCY_WEBVIDEO, 2),
+    transmission: num(process.env.CONCURRENCY_TRANSMISSION, 0),
+    aria2: num(process.env.CONCURRENCY_ARIA2, 0),
+    webvideo: num(process.env.CONCURRENCY_WEBVIDEO, 0),
   },
   autoRetry: num(process.env.AUTO_RETRY, 2),
 

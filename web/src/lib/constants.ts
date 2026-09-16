@@ -37,7 +37,8 @@ export const FORMAT_OPTIONS: { value: string; label: string }[] = [
   { value: 'm4a', label: 'M4A（仅音频）' },
 ]
 
-export const CONCURRENCY_OPTIONS = [1, 2, 3, 5, 10] as const
+/** 并发上限可选项；0 = 不限（准入只由磁盘空间决定） */
+export const CONCURRENCY_OPTIONS = [0, 1, 2, 3, 5, 10] as const
 
 /** 各分辨率的估算码率（Kbps），用于在拿不到文件大小时给出预估体积 */
 const BITRATE_KBPS: Record<string, number> = {

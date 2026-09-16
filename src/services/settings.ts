@@ -16,19 +16,35 @@ const KEY = 'app_settings';
  *   1 -> 2：承上。⚠️ 真正生效的默认值其实在 .env（`CONCURRENCY_TRANSMISSION=1`，
  *          由 deploy.sh 写入）——.env 优先级高于代码默认值，所以 schema 1 那次迁移
  *          把值"改成"了 config 里的 1，等于没改（真机上验证时抓到的）。
- *          schema 2 会在 deploy.sh 已经把 .env 修正为 3 之后再跑一次，才真正生效。
+ *   2 -> 3：**并发上限不该是限制条件**。用户要求：只要还有可用空间就按先进先出
+ *          一直放行，直到下一个装不下；空间回血（完成→安卓取走→服务端删除）
+ *          再继续。所以把"我们曾经写死的那些默认值"统一改成 0 = 不限
+ *          （maxConcurrent 3；transmission 1/3；aria2 2；webvideo 2）。
+ *          用户自己调过的其它数字不动；想限制随时能在设置页改回去。
  */
-export const SETTINGS_SCHEMA = 2;
+export const SETTINGS_SCHEMA = 3;
 
 export function migrateSettings(s: Settings): { next: Settings; notes: string[] } {
   if ((s.schemaVersion ?? 0) >= SETTINGS_SCHEMA) return { next: s, notes: [] };
   const notes: string[] = [];
   const mc = { ...(s.moduleConcurrency ?? config.moduleConcurrency) };
-  if (mc.transmission === 1) {
-    mc.transmission = config.moduleConcurrency.transmission;
-    notes.push(`BT(transmission) 并发 1 -> ${mc.transmission}（旧默认值太低：上传来一包种子时只会跑一个）`);
+  // 老版本写死的默认值 -> 0（不限）。准入只由磁盘空间决定，别再用并发数卡任务。
+  const OLD_DEFAULTS: Record<string, number[]> = { transmission: [1, 3], aria2: [2], webvideo: [2] };
+  for (const key of Object.keys(OLD_DEFAULTS) as (keyof typeof mc)[]) {
+    if (OLD_DEFAULTS[key].includes(Number(mc[key]))) {
+      notes.push(`${key} 并发 ${mc[key]} -> 0（不限）`);
+      mc[key] = 0;
+    }
   }
-  return { next: { ...s, moduleConcurrency: mc, schemaVersion: SETTINGS_SCHEMA }, notes };
+  const next: Settings = { ...s, moduleConcurrency: mc, schemaVersion: SETTINGS_SCHEMA };
+  if (s.maxConcurrent === 3) {
+    next.maxConcurrent = config.maxConcurrent; // 0 = 不限
+    notes.push(`全局并发 3 -> ${next.maxConcurrent}（0=不限）`);
+  }
+  if (notes.length) {
+    notes.unshift('并发上限不再由写死的数字决定，改为「有磁盘空间就按先进先出接着下」');
+  }
+  return { next, notes };
 }
 
 export function defaultSettings(): Settings {

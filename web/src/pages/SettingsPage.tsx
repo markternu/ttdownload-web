@@ -405,11 +405,11 @@ export default function SettingsPage() {
             />
             <Select
               label="最大并发任务"
-              hint="超出并发的任务进入等待队列"
+              hint="0=不限：只要磁盘还有可用空间就按「先进先出」一直放行，装不下的排队等回血（推荐）"
               value={String(draft.maxConcurrent)}
               options={CONCURRENCY_OPTIONS.map((value) => ({
                 value: String(value),
-                label: `${value} 个任务`,
+                label: value === 0 ? '不限（按磁盘空间）' : `${value} 个任务`,
               }))}
               onChange={(event) => patch('maxConcurrent', Number(event.target.value))}
             />
@@ -433,13 +433,13 @@ export default function SettingsPage() {
             </Field>
             <Field
               label="模块并发（BT / 直链 / 在线视频）"
-              hint="每个模块各自最多同时跑几个；还要再受上面的「最大并发任务」限制"
+              hint="0=不限（推荐）。一般不用管这项 —— 真正决定下多少的是磁盘空间"
             >
               <div className="grid grid-cols-3 gap-2">
                 <Input
                   type="number"
-                  min={1}
-                  max={10}
+                  min={0}
+                  max={99}
                   value={String(draft.moduleConcurrency.transmission)}
                   onChange={(event) =>
                     patch('moduleConcurrency', {
@@ -451,8 +451,8 @@ export default function SettingsPage() {
                 />
                 <Input
                   type="number"
-                  min={1}
-                  max={10}
+                  min={0}
+                  max={99}
                   value={String(draft.moduleConcurrency.aria2)}
                   onChange={(event) =>
                     patch('moduleConcurrency', {
@@ -464,8 +464,8 @@ export default function SettingsPage() {
                 />
                 <Input
                   type="number"
-                  min={1}
-                  max={10}
+                  min={0}
+                  max={99}
                   value={String(draft.moduleConcurrency.webvideo)}
                   onChange={(event) =>
                     patch('moduleConcurrency', {
@@ -477,9 +477,9 @@ export default function SettingsPage() {
                 />
               </div>
               <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                第一个数是 <b>BT</b>：一次上传一包种子（10 多个 .torrent）时，同时下载的个数就由它决定。
-                默认 3；嫌慢可以调大（别忘了上面的「最大并发任务」也要够大），
-                机器/带宽吃不消就调小到 1。
+                三个数是 <b>BT / 直链 / 在线视频</b>，<b>0 表示不限</b>。默认全是 0：
+                程序会按「先进先出」把等待队列里装得下的任务一直放行，直到磁盘可用空间不够为止，
+                空间回血后自动继续 —— 不需要你在这里限制个数。
               </p>
             </Field>
           </div>

@@ -12,6 +12,10 @@ export function setupRuntime(extra = {}) {
   process.env.DOWNLOAD_ROOT = root;
   process.env.RESERVE_FREE_BYTES = String(extra.reserveFreeBytes ?? 1024 * 1024);
   process.env.ANDROID_TOKEN = extra.androidToken ?? 'test-token';
+  // 注意：这里是**测试脚手架**的默认值（3），不是生产默认值。
+  // 生产默认是 0=不限（准入只由磁盘空间决定），要测那套行为请显式传 env（见
+  // test/disk-driven-admission.test.mjs）——否则一大堆老测试会因为"任务全被放行"
+  // 而互相干扰。
   process.env.MAX_CONCURRENT = String(extra.maxConcurrent ?? 3);
   process.env.SCHEDULER_INTERVAL_MS = String(extra.schedulerIntervalMs ?? 100000);
   process.env.PIPELINE_INTERVAL_MS = String(extra.pipelineIntervalMs ?? 100000);

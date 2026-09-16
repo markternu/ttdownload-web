@@ -568,12 +568,22 @@ case "$ACTION" in
     # 老部署升级时自愈：补 yt-dlp-ejs / JS 运行时（缺了 YouTube 一定失败）
     if [[ $SKIP_APT -eq 0 ]]; then ensure_ytdlp_stack; fi
     if [[ $SKIP_APT -eq 0 ]]; then ensure_cookie_browser; fi
-    # 老部署升级时修正 BT 并发：以前 .env 里写的是 1，导致上传一包种子只跑一个。
+    # 老部署升级时把"写死的并发上限"改成 0=不限：准入只该由磁盘空间决定。
   # 注意：.env 的优先级高于代码里的默认值，所以光改代码对**已部署的机器无效**，
   # 必须在 .env 这一层改掉（这条自愈就是干这个的）。
-  if [[ -f .env ]] && grep -q '^CONCURRENCY_TRANSMISSION=1$' .env; then
-    sed -i 's/^CONCURRENCY_TRANSMISSION=1$/CONCURRENCY_TRANSMISSION=3/' .env
-    log "已修正 .env：CONCURRENCY_TRANSMISSION 1 -> 3（旧默认值太低，上传多个种子时只会跑一个；想要 1 请手动改回）"
+  # 只替换"我们曾经写进去的旧默认值"，用户自己调过的其它数字不动。
+  if [[ -f .env ]]; then
+    changed_env=0
+    for kv in "MAX_CONCURRENT:3" "CONCURRENCY_TRANSMISSION:1" "CONCURRENCY_TRANSMISSION:3" "CONCURRENCY_ARIA2:2" "CONCURRENCY_WEBVIDEO:2"; do
+      k="${kv%%:*}"; v="${kv##*:}"
+      if grep -q "^${k}=${v}$" .env; then
+        sed -i "s/^${k}=${v}$/${k}=0/" .env
+        changed_env=1
+      fi
+    done
+    if [[ $changed_env -eq 1 ]]; then
+      log "已修正 .env：并发上限改为 0=不限（准入只由磁盘空间决定：有空间就按先进先出接着下）"
+    fi
   fi
 
   # 老部署升级时补齐「全站鉴权」账号密码（缺了就生成并打印，否则等于没有鉴权）
@@ -731,10 +741,10 @@ PORT=${PORT}
 DOWNLOAD_ROOT=${DOWNLOAD_ROOT}
 ENCRYPT_PASSWORD=ec3e458fcde2582e079f19368abc780f
 RESERVE_FREE_BYTES=10737418240
-MAX_CONCURRENT=3
-CONCURRENCY_TRANSMISSION=3
-CONCURRENCY_ARIA2=2
-CONCURRENCY_WEBVIDEO=2
+MAX_CONCURRENT=0
+CONCURRENCY_TRANSMISSION=0
+CONCURRENCY_ARIA2=0
+CONCURRENCY_WEBVIDEO=0
 ANDROID_TOKEN=${ANDROID_TOKEN_VALUE}
 # 网页登录账号密码（全站鉴权；部署完成后终端会打印一次）
 WEB_AUTH_USER=${WEB_AUTH_USER_VALUE}

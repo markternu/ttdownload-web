@@ -17,7 +17,18 @@ import assert from 'node:assert/strict';
 import { setupRuntime, startAria2Mock } from './helpers.mjs';
 
 const mock = await startAria2Mock({ workDir: '/tmp' });
-const root = setupRuntime({ reserveFreeBytes: 1024, env: { ARIA2_RPC_PORT: String(mock.port) } });
+// 这个文件测的是"生产默认值"，所以显式声明成生产那套（否则测试脚手架默认 MAX_CONCURRENT=3
+// 会把默认值测成 3）
+const root = setupRuntime({
+  reserveFreeBytes: 1024,
+  env: {
+    ARIA2_RPC_PORT: String(mock.port),
+    MAX_CONCURRENT: '0',
+    CONCURRENCY_TRANSMISSION: '0',
+    CONCURRENCY_ARIA2: '0',
+    CONCURRENCY_WEBVIDEO: '0',
+  },
+});
 
 const { tasksRepo, settingsRepo } = await import('../dist/core/db.js');
 const { schedulerTick } = await import('../dist/core/scheduler.js');
@@ -56,12 +67,14 @@ test('调大模块并发后，等待的任务会起来（不是死住）', async
   assert.ok(running.every((t) => !/并发已满/.test(String(t.error))), '启动后不应残留门控提示');
 });
 
-test('BT 并发的默认值不该是 1（回归：上传一包种子只跑一个）', () => {
+test('并发默认是"不限"（回归：别再拿写死的数字卡住队列）', () => {
   const d = defaultSettings();
-  assert.ok(
-    d.moduleConcurrency.transmission > 1,
-    `transmission 默认并发必须 > 1，否则上传一包种子只会跑一个，实际 ${d.moduleConcurrency.transmission}`,
+  assert.equal(
+    d.moduleConcurrency.transmission,
+    0,
+    `transmission 默认必须 0=不限，否则上传一包种子时磁盘还空着却只跑一个，实际 ${d.moduleConcurrency.transmission}`,
   );
+  assert.equal(d.maxConcurrent, 0, '全局并发默认也必须是 0=不限（准入只由磁盘空间决定）');
   assert.equal(d.moduleConcurrency.transmission, config.moduleConcurrency.transmission, '默认值来自 config');
 });
 
@@ -71,17 +84,20 @@ test('已部署机器：数据库里存着 transmission=1 的旧设置，读到�
   // 1) 迁移函数本身（测的是**生产代码**，不是测试里复刻的副本）
   const legacy = { ...defaultSettings() };
   delete legacy.schemaVersion;
+  legacy.maxConcurrent = 3;
   legacy.moduleConcurrency = { transmission: 1, aria2: 2, webvideo: 2 };
   const { next, notes } = migrateSettings(legacy);
-  assert.equal(next.moduleConcurrency.transmission, config.moduleConcurrency.transmission,
-    `旧值 1 应被提到 ${config.moduleConcurrency.transmission}，实际 ${next.moduleConcurrency.transmission}`);
+  assert.equal(next.moduleConcurrency.transmission, 0,
+    `旧值 1 应被改成 0=不限，实际 ${next.moduleConcurrency.transmission}`);
+  assert.equal(next.moduleConcurrency.aria2, 0, '旧的 aria2=2 也应改成 0=不限');
+  assert.equal(next.maxConcurrent, 0, '旧的全局并发 3 应改成 0=不限');
   assert.equal(next.schemaVersion, SETTINGS_SCHEMA, '应写入当前 schemaVersion');
   assert.ok(notes.some((n) => /transmission/.test(n)), '要说明改了什么，实际: ' + notes.join(' | '));
 
   // 2) 已经有 schemaVersion 就不再动用户设置（用户手动改回 1 也不该被改）
-  const manual = { ...next, moduleConcurrency: { ...next.moduleConcurrency, transmission: 1 } };
+  const manual = { ...next, moduleConcurrency: { ...next.moduleConcurrency, transmission: 7 } };
   const again = migrateSettings(manual);
-  assert.equal(again.next.moduleConcurrency.transmission, 1, '已有 schemaVersion 时不该再改用户设置');
+  assert.equal(again.next.moduleConcurrency.transmission, 7, '已有 schemaVersion 时不该再改用户设置');
   assert.equal(again.notes.length, 0, '不该再报改动');
 
   // 3) 走真实读路径：数据库里放一份老设置 -> 读到就自动修正并落盘
@@ -89,13 +105,11 @@ test('已部署机器：数据库里存着 transmission=1 的旧设置，读到�
   delete legacyStored.schemaVersion;
   settingsRepo.setMany({ app_settings: JSON.stringify(legacyStored) });
   const loaded = reloadSettings();
-  assert.equal(loaded.moduleConcurrency.transmission, config.moduleConcurrency.transmission,
-    '从数据库读到老设置时应自动修正 BT 并发');
+  assert.equal(loaded.moduleConcurrency.transmission, 0, '从数据库读到老设置时应自动改成 0=不限');
   const persisted = JSON.parse(settingsRepo.getAll().app_settings);
-  assert.equal(persisted.moduleConcurrency.transmission, config.moduleConcurrency.transmission,
-    '修正结果必须落盘（否则下次重启又变回 1）');
+  assert.equal(persisted.moduleConcurrency.transmission, 0, '修正结果必须落盘（否则下次重启又变回 1）');
   assert.equal(persisted.schemaVersion, SETTINGS_SCHEMA, '落盘时带上 schemaVersion');
 
   // 收尾：恢复正常设置，别影响其它测试
-  updateSettings({ maxConcurrent: 3, moduleConcurrency: { transmission: 3, aria2: 2, webvideo: 2 } });
+  updateSettings({ maxConcurrent: 3, moduleConcurrency: { transmission: 1, aria2: 2, webvideo: 2 } });
 });
