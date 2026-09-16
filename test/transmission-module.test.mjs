@@ -18,6 +18,9 @@ const { config } = await import('../dist/core/config.js');
 const { seedsRepo, tasksRepo } = await import('../dist/core/db.js');
 const bt = await import('../dist/modules/transmission.js');
 const { handoffToArchive, pipelineTick } = await import('../dist/services/pipeline.js');
+const { schedulerTick } = await import('../dist/core/scheduler.js');
+const { freeBytes } = await import('../dist/core/disk.js');
+const { updateSettings } = await import('../dist/services/settings.js');
 
 test.after(async () => {
   await mock.close();
@@ -46,6 +49,7 @@ test('BT: 入队 -> 启动 -> 只要核心内容(视频) -> 完成后归档发�
   assert.equal(task.module, 'transmission');
   assert.equal(seedsRepo.get(seed.id).status, 'queued');
 
+  await bt.transmissionModule.prepare(tasksRepo.get(task.id));
   await bt.transmissionModule.start(tasksRepo.get(task.id));
   const started = tasksRepo.get(task.id);
   assert.equal(started.status, 'downloading');
@@ -93,7 +97,7 @@ test('BT: 种子内没有核心内容时给出明确错误（并说明排除了�
   bt.registerPendingSeeds();
   const seed = seedsRepo.all().find((s) => s.name === 'only_txt.torrent');
   const task = bt.enqueueSeed(seed);
-  await assert.rejects(() => bt.transmissionModule.start(tasksRepo.get(task.id)), /没有可下载的核心内容/);
+  await assert.rejects(() => bt.transmissionModule.prepare(tasksRepo.get(task.id)), /没有可下载的核心内容/);
 });
 
 test('BT 早交付：单个大文件一下完就单独建发布任务（并标 unwanted 防重下）', async () => {
@@ -113,6 +117,7 @@ test('BT 早交付：单个大文件一下完就单独建发布任务（并标 u
   bt.registerPendingSeeds();
   const seed = seedsRepo.all().find((s) => s.name === 'early.torrent');
   const task = bt.enqueueSeed(seed);
+  await bt.transmissionModule.prepare(tasksRepo.get(task.id));
   await bt.transmissionModule.start(tasksRepo.get(task.id));
   const started = tasksRepo.get(task.id);
 
@@ -170,4 +175,42 @@ test('BT 下载目录防撞名：同名种子不会共用同一个目录', async
   assert.equal(name3, 'Fresh', '没冲突就用原名');
   const name4 = pickUniqueDirName('Other', used, (abs) => existing.has(abs), () => true, (n) => `/root/dl/${n}`, 99);
   assert.equal(name4, 'Other', '空目录可以复用（不留空壳）');
+});
+
+test('【真事故回归】空间不够时 BT 任务必须"备好但不下"，不能拿 expectBytes=0 蒙过去', async () => {
+  // 事故现场：以前 transmission 的 prepare 是空壳，加种子/算大小全在 start 里，
+  // 于是调度器准入时看到的是 expectBytes=0 ——"需要 0 字节"永远放行，
+  // 十来个种子一起下、把磁盘撑爆越过预留，接着触发"空间不足全暂停"→ 永久死锁。
+  const GB = 1024 ** 3;
+  const BIG = 5 * GB;
+  mock.state.complete = false;
+  mock.state.percent = 0;
+  mock.state.running = false;
+  mock.state.files = [{ name: 'huge.mp4', length: BIG, bytesCompleted: 0 }];
+  mock.state.wanted = [1];
+
+  const fakeTorrent = tmpFile(root, 'src/huge.torrent', 'd8:announce11:http://x/ye');
+  fs.copyFileSync(fakeTorrent, path.join(config.dirs.btPending, 'huge.torrent'));
+  bt.registerPendingSeeds();
+  const seed = seedsRepo.all().find((s) => s.name === 'huge.torrent');
+  const task = bt.enqueueSeed(seed);
+
+  // 只给 3G 可用（小于这个种子要的 5G）
+  updateSettings({ reserveFreeBytes: Math.max(0, freeBytes() - 3 * GB) });
+  await schedulerTick();
+
+  const after = tasksRepo.get(task.id);
+  assert.equal(after.status, 'waiting', `空间不够就不该开下，实际 ${after.status}：${after.error ?? ''}`);
+  assert.match(String(after.error ?? ''), /磁盘空间不足/);
+  assert.ok(
+    Number(after.expectBytes) >= BIG * 0.99,
+    `准入时必须已经知道真实大小（≈5G），实际 ${((Number(after.expectBytes) || 0) / GB).toFixed(2)}G`,
+  );
+  assert.equal(mock.state.running, false, '种子在 transmission 里必须是暂停的（一个字节都不能下）');
+
+  // 空间够了以后再 tick，就应该正常放行
+  updateSettings({ reserveFreeBytes: 1024 });
+  await schedulerTick();
+  assert.equal(tasksRepo.get(task.id).status, 'downloading', '空间够了应放行开下');
+  assert.equal(mock.state.running, true, '这时才真正开始下载');
 });

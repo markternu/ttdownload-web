@@ -109,35 +109,59 @@ async function pollRunning(): Promise<number> {
   return running.length;
 }
 
-/** 空间压力：可用空间低于保留值时，暂停正在下载的任务 */
+/**
+ * 空间压力：可用空间低于保留值时，暂停部分正在下载的任务。
+ *
+ * ⚠️ 这里必须**留至少一个任务在跑**（真事故）：
+ *   以前是"usable < 0 就把所有在跑任务全暂停"，而暂停的任务永远下不完
+ *   → 永远腾不出空间 → resume 又要求"空间够了才恢复" → **永久死锁**，
+ *   表现就是"十来个任务全停住、磁盘满着、一个成品都没有"。
+ *   现在从新到旧暂停（后加入的先让位），但绝不动最后一个在跑的任务，
+ *   让它把当前这个下完 → 走完流水线 → 被安卓取走 → 服务端删除 → 空间回血。
+ */
 async function applySpacePressure(usable: number): Promise<void> {
   if (usable >= 0) return;
   const running = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
-  for (const task of running) {
+  // 新的先暂停（越晚加入的越先让），但保留最老的那个继续跑以保证一定能回血
+  const ordered = [...running].sort((a, b) => Number(b.id) - Number(a.id));
+  let remaining = running.length;
+  for (const task of ordered) {
+    if (remaining <= 1) {
+      logger.child('scheduler').warn(
+        `空间压力：已暂停到只剩任务 #${task.id}（保留一个在跑，否则没人能下完、空间永远回不来）`);
+      break;
+    }
     const adapter = adapters[task.module];
     try {
       await adapter.pause(task);
     } catch {
       /* ignore */
     }
+    remaining -= 1;
     tasksRepo.update(task.id, {
       status: 'paused',
       speedBps: 0,
-      error: '磁盘空间不足，已自动暂停（等待空间释放）',
+      error: '磁盘空间不足，已自动暂停（等正在跑的任务下完腾出空间后会自动恢复）',
       payload: { ...(task.payload ?? {}), pausedBySpace: true },
     });
     emit(task.id);
-    logger.warn(`任务 #${task.id} 因磁盘空间不足被自动暂停`);
+    logger.warn(`任务 #${task.id} 因磁盘空间不足被自动暂停（保留其它任务继续跑以腾空间）`);
   }
 }
 
 /** 空间恢复后，恢复被自动暂停的任务 */
-async function resumeSpacePaused(usable: number): Promise<void> {
+async function resumeSpacePaused(freeMinusReserve: number): Promise<void> {
   const paused = tasksRepo.byStatus(['paused']) as TaskWithPayload[];
+  // 与准入用同一口径：可用 = 系统可用 - 预留 - 运行中任务的预留
+  const runningNow = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
+  const reservedNow = runningNow.reduce((sum, t) => sum + Math.max(0, t.expectBytes || 0), 0);
+  const usable = freeMinusReserve - reservedNow;
+  const nothingRunning = runningNow.length === 0;
   for (const task of paused) {
     if (!(task.payload ?? {}).pausedBySpace) continue;
     const need = Math.max(0, task.expectBytes || 0);
-    if (usable - need < 0) continue;
+    // 防死锁：一个都没在跑时必须放行最老的（否则永远没人下完、空间永远回不来）
+    if (usable - need < 0 && !nothingRunning) continue;
     const adapter = adapters[task.module];
     try {
       await adapter.resume(task);

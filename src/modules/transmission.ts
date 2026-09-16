@@ -194,40 +194,42 @@ export const transmissionModule: ModuleAdapter = {
     registerPendingSeeds();
   },
 
+  /**
+   * 准备阶段：**必须在真正开始下载之前**把"这个种子要占多大"算出来。
+   *
+   * 为什么重要（真事故）：以前这里是空壳，加种子/选片/算大小全在 start() 里，
+   * 于是调度器做空间准入时 BT 任务的 expectBytes 还是 0 —— "需要 0 字节"当然永远放行，
+   * 结果十来个种子同时下起来把磁盘撑爆（越过了预留），随后触发"空间不足就全暂停"，
+   * 而暂停的种子永远下不完、永远腾不出空间 → 全卡死、一个都没完成。
+   *
+   * 现在：加种子时就 `paused: true`（一个字节都不下），选好片、算出 selectedBytes，
+   * 交给调度器复查空间；装不下就回等待队列（种子在 transmission 里保持暂停），
+   * 排到它时 start() 只需要 torrent-start。幂等：重复调用不会加出第二个种子。
+   */
   async prepare(task): Promise<void> {
-    const seedPath = String((task.payload ?? {}).seedPath ?? '');
-    if (!seedPath || !fs.existsSync(seedPath)) throw new Error('种子文件不存在（可能已被移动或删除）');
-  },
+    const payload = task.payload ?? {};
 
-  async start(task): Promise<void> {
     const client = transmissionClient();
     if (!(await client.ping())) {
-      throw new Error('transmission 不可用：请确认已安装并启动 transmission-daemon（sudo apt install -y transmission-daemon && sudo systemctl enable --now transmission-daemon）');
+      throw new Error('transmission 不可用：请确认已安装并启动 transmission-daemon');
     }
-    const payload = task.payload ?? {};
+
+    // 已经加过（上次 prepare 过、或因空间不够被退回等待、或服务重启后重新排队）→ 复用。
+    // ⚠️ 这条分支必须放在"检查种子文件存在"**之前**：prepare 成功后我们会把 .torrent
+    //    移到 btQueued 留痕，再检查原路径就会误判成"种子不存在"而永久失败 ——
+    //    空间不够被退回等待的种子下一轮一重试就废了（真机踩过）。
+    const existingId = Number(payload.torrentId ?? 0);
+    if (existingId) {
+      await client.call('torrent-stop', { ids: [existingId] }).catch(() => undefined);
+      await syncBtSelection(task, existingId);
+      return;
+    }
+
     const seedPath = String(payload.seedPath ?? '');
+    if (!seedPath || !fs.existsSync(seedPath)) throw new Error('种子文件不存在（可能已被移动或删除）');
+
     const base64 = fs.readFileSync(seedPath).toString('base64');
-    // 目录名要**保证唯一**：以前直接拿 .torrent 文件名（截断 80 字符）算，两个不同种子
-    // 可能算出同一个名字，而清理是按目录做的 —— 撞名会导致一个任务把别人的文件删掉。
-    const usedDirs = new Set<string>();
-    for (const other of tasksRepo.byStatus(['waiting', 'parsing', 'downloading', 'paused', 'archiving', 'encrypting'] as never)) {
-      const d = (other as TaskWithPayload).payload?.downloadDir;
-      if (d) usedDirs.add(path.resolve(String(d)));
-    }
-    const dirName = pickUniqueDirName(
-      path.basename(seedPath).replace(/\.torrent$/i, ''),
-      usedDirs,
-      (abs) => fs.existsSync(abs),
-      (abs) => {
-        try {
-          return fs.readdirSync(abs).length === 0;
-        } catch {
-          return true;
-        }
-      },
-      (name) => path.resolve(path.join(config.dirs.btDownload, name)),
-      task.id,
-    );
+    const dirName = pickUniqueBtDirName(seedPath, task.id);
     const downloadDir = path.join(config.dirs.btDownload, dirName);
     fs.mkdirSync(downloadDir, { recursive: true });
 
@@ -236,92 +238,73 @@ export const transmissionModule: ModuleAdapter = {
       { metainfo: base64, 'download-dir': downloadDir, paused: true },
     );
     const added = addRes['torrent-added'] ?? addRes['torrent-duplicate'];
-    if (!added) throw new Error('添加到 transmission 失败（返回为空）');
+    if (!added) throw new Error('transmission 未返回任务 id（种子可能无效）');
     const torrentId = added.id;
 
-    const info = await client.call<{ torrents: TorrentInfo[] }>('torrent-get', {
-      ids: [torrentId],
-      fields: ['id', 'name', 'files', 'wanted', 'totalSize', 'downloadDir', 'status'],
-    });
-    const torrent = info.torrents?.[0];
-    if (!torrent) throw new Error('无法读取种子信息');
-    const files = torrent.files ?? [];
-    // 内容甄别：只要核心内容（默认只要视频 + 排掉广告关键词命中的文件）
-    const sel = getSettings().btSelect;
-    const picked = selectBtFiles(
-      files.map((f) => ({ name: f?.name ?? '', length: f?.length ?? 0 })),
-      {
-        videoExts: config.videoExts,
-        imageExts: config.imageExts,
-        keepImages: sel.keepImages,
-        blockKeywords: (sel.blockKeywords && sel.blockKeywords.length ? sel.blockKeywords : DEFAULT_BT_BLOCK_KEYWORDS),
-        minVideoBytes: sel.minVideoBytes,
-      },
-    );
-    const wantedIdx = picked.keep;
-    const selectedBytes = picked.keptBytes;
-    // 把"留了什么/弃了什么/为什么"写进任务日志 —— 规则到底有没有用，用户一眼能看到
-    taskLog(task.id).mark('BT_SELECT',
-      `选片结果：保留 ${wantedIdx.length} 个（${(selectedBytes / 1024 / 1024).toFixed(1)}MB），排除 ${picked.dropped.length} 个`,
-      { keep: wantedIdx.map((i) => files[i]?.name ?? '').slice(0, 30), dropped: picked.dropped.slice(0, 30), hasVideo: picked.hasVideo });
-    for (const d of picked.dropped.slice(0, 20)) {
-      taskLog(task.id).info(`排除: ${d.name}（${(d.sizeBytes / 1024 / 1024).toFixed(1)}MB）—— ${d.reason}`);
-    }
-    if (wantedIdx.length === 0) {
-      await client.call('torrent-remove', { ids: [torrentId], 'delete-local-data': true }).catch(() => undefined);
-      const hint = picked.dropped.length
-        ? `（排除了 ${picked.dropped.length} 个：${picked.dropped.slice(0, 5).map((d) => `${d.name} - ${d.reason}`).join('；')}）`
-        : '';
-      throw new Error(`该种子内没有可下载的核心内容${hint}`);
-    }
-    const unwantedIdx = files.map((_, i) => i).filter((i) => !wantedIdx.includes(i));
-    if (unwantedIdx.length > 0) {
-      await client.call('torrent-set', { ids: [torrentId], 'files-unwanted': unwantedIdx }).catch(() => undefined);
-    }
-    await client.call('torrent-set', { ids: [torrentId], 'files-wanted': wantedIdx }).catch(() => undefined);
-    await client.call('torrent-start', { ids: [torrentId] });
+    // 先把 payload 落库再选片：万一选片抛错（比如没有核心内容），cancel 也能把它清掉
+    tasksRepo.update(task.id, { payload: { ...payload, torrentId, downloadDir } });
 
-    // 种子文件移入"已下载中"目录留痕
-    fs.mkdirSync(config.dirs.btQueued, { recursive: true });
-    let dest = path.join(config.dirs.btQueued, path.basename(seedPath));
-    let n = 1;
-    while (fs.existsSync(dest)) {
-      dest = path.join(config.dirs.btQueued, `${path.basename(seedPath, '.torrent')}_${n}.torrent`);
-      n += 1;
+    const selectedBytes = await syncBtSelection(task, torrentId);
+
+    // 种子文件移入"已下载中"目录留痕（只做一次）
+    if (fs.existsSync(seedPath)) {
+      fs.mkdirSync(config.dirs.btQueued, { recursive: true });
+      let dest = path.join(config.dirs.btQueued, path.basename(seedPath));
+      let n = 1;
+      while (fs.existsSync(dest)) {
+        dest = path.join(config.dirs.btQueued, `${path.basename(seedPath, '.torrent')}_${n}.torrent`);
+        n += 1;
+      }
+      try {
+        fs.renameSync(seedPath, dest);
+        const p2 = (tasksRepo.get(task.id) as TaskWithPayload).payload ?? {};
+        tasksRepo.update(task.id, { payload: { ...p2, seedPathMoved: dest } });
+      } catch {
+        /* 移动失败不影响下载 */
+      }
     }
-    try {
-      fs.renameSync(seedPath, dest);
-    } catch {
-      /* 移动失败不影响下载 */
+
+    logger.child('transmission').mark('BT_PREPARE',
+      `BT 任务已备好（种子暂停中，等空间准入）#${task.id}：要下 ${(selectedBytes / 1024 ** 2).toFixed(1)}MB`, {
+        torrentId,
+        selectedBytes,
+        downloadDir,
+      });
+  },
+
+
+/** 真正开跑：种子在 prepare 阶段已经加好（暂停）、选好片，这里只放行 */
+  async start(task): Promise<void> {
+    const payload = task.payload ?? {};
+    const torrentId = Number(payload.torrentId ?? 0);
+    if (!torrentId) throw new Error('任务未准备（缺 transmission 任务 id）：应先调用 prepare');
+    const client = transmissionClient();
+    if (!(await client.ping())) {
+      throw new Error('transmission 不可用：请确认已安装并启动 transmission-daemon（sudo apt install -y torrent-daemon 或 transmission-daemon）');
     }
+    const selectedBytes = Math.max(0, Number(payload.selectedBytes ?? task.expectBytes ?? 0) || 0);
+    await client.call('torrent-start', { ids: [torrentId] });
 
     const seedId = Number(payload.seedId ?? 0);
     if (seedId) {
-      seedsRepo.update(seedId, { status: 'downloading', sizeBytes: selectedBytes, fileCount: wantedIdx.length, taskId: task.id });
+      const meta = (task.meta ?? { files: [] }) as { files?: string[] };
+      seedsRepo.update(seedId, { status: 'downloading', sizeBytes: selectedBytes, fileCount: (meta.files ?? []).length, taskId: task.id });
     }
     tasksRepo.update(task.id, {
       status: 'downloading',
       expectBytes: selectedBytes,
       startedAt: new Date().toISOString(),
-      title: task.title || torrent.name || added.name,
       payload: {
         ...payload,
-        torrentId,
-        downloadDir,
-        seedPathMoved: dest,
-        selectedBytes,
-        // 出清机制：累计“实际下载尝试时长”，初始 0（满 10 小时才参与出清判断）
+        // 出清机制：累计"实际下载尝试时长"，初始 0（满 10 小时才参与出清判断）
         btActiveMs: Number(payload.btActiveMs ?? 0) || 0,
         btLastCheckAt: null,
       },
-      meta: { ...(task.meta ?? {}), files: wantedIdx.map((i) => files[i]?.name ?? '') },
     });
-    logger.child('transmission').mark('TASK_STATE', `BT 任务已启动 #${task.id}`, {
+    logger.child('transmission').mark('TASK_STATE', `BT 任务已放行开下 #${task.id}`, {
       torrentId,
-      selectedFiles: wantedIdx.length,
       selectedBytes,
-      downloadDir: config.dirs.btDownload,
-      incompleteDir: config.transmissionIncompleteDir,
+      downloadDir: String(payload.downloadDir ?? ''),
     });
   },
 
@@ -503,4 +486,79 @@ export function enqueueSeed(seed: SeedItem, priority = 0): import('../types').Ta
 function wantedIdxOf(wanted: number[] | undefined, i: number): boolean {
   if (!Array.isArray(wanted) || wanted.length === 0) return true;
   return wanted[i] !== 0;
+}
+
+/** 给这个 BT 任务挑一个不会撞名的下载目录（撞名会导致清理时互删） */
+function pickUniqueBtDirName(seedPath: string, taskId: number): string {
+  const usedDirs = new Set<string>();
+  for (const other of tasksRepo.byStatus(['waiting', 'parsing', 'downloading', 'paused', 'archiving', 'encrypting'] as never)) {
+    const d = (other as TaskWithPayload).payload?.downloadDir;
+    if (d) usedDirs.add(path.resolve(String(d)));
+  }
+  return pickUniqueDirName(
+    path.basename(seedPath).replace(/\.torrent$/i, ''),
+    usedDirs,
+    (abs) => fs.existsSync(abs),
+    (abs) => {
+      try {
+        return fs.readdirSync(abs).length === 0;
+      } catch {
+        return true;
+      }
+    },
+    (name) => path.resolve(path.join(config.dirs.btDownload, name)),
+    taskId,
+  );
+}
+
+/** 选片：只保留核心内容，其余标 unwanted；返回选中总字节数（幂等） */
+async function syncBtSelection(task: TaskWithPayload, torrentId: number): Promise<number> {
+    const client = transmissionClient();
+    const info = await client.call<{ torrents: TorrentInfo[] }>('torrent-get', {
+      ids: [torrentId],
+      fields: ['id', 'name', 'files', 'wanted', 'totalSize', 'downloadDir', 'status'],
+    });
+    const torrent = info.torrents?.[0];
+    if (!torrent) throw new Error('无法读取种子信息');
+    const files = torrent.files ?? [];
+    const sel = getSettings().btSelect;
+    const picked = selectBtFiles(
+      files.map((f) => ({ name: f?.name ?? '', length: f?.length ?? 0 })),
+      {
+        videoExts: config.videoExts,
+        imageExts: config.imageExts,
+        keepImages: sel.keepImages,
+        blockKeywords: (sel.blockKeywords && sel.blockKeywords.length ? sel.blockKeywords : DEFAULT_BT_BLOCK_KEYWORDS),
+        minVideoBytes: sel.minVideoBytes,
+      },
+    );
+    const wantedIdx = picked.keep;
+    const selectedBytes = picked.keptBytes;
+    taskLog(task.id).mark('BT_SELECT',
+      `选片结果：保留 ${wantedIdx.length} 个（${(selectedBytes / 1024 / 1024).toFixed(1)}MB），排除 ${picked.dropped.length} 个`,
+      { keep: wantedIdx.map((i) => files[i]?.name ?? '').slice(0, 30), dropped: picked.dropped.slice(0, 30), hasVideo: picked.hasVideo });
+    for (const d of picked.dropped.slice(0, 20)) {
+      taskLog(task.id).info(`排除: ${d.name}（${(d.sizeBytes / 1024 / 1024).toFixed(1)}MB）—— ${d.reason}`);
+    }
+    if (wantedIdx.length === 0) {
+      await client.call('torrent-remove', { ids: [torrentId], 'delete-local-data': true }).catch(() => undefined);
+      const hint = picked.dropped.length
+        ? `（排除了 ${picked.dropped.length} 个：${picked.dropped.slice(0, 5).map((d) => `${d.name} - ${d.reason}`).join('；')}）`
+        : '';
+      throw new Error(`该种子内没有可下载的核心内容${hint}`);
+    }
+    const unwantedIdx = files.map((_, i) => i).filter((i) => !wantedIdx.includes(i));
+    if (unwantedIdx.length > 0) {
+      await client.call('torrent-set', { ids: [torrentId], 'files-unwanted': unwantedIdx }).catch(() => undefined);
+    }
+    await client.call('torrent-set', { ids: [torrentId], 'files-wanted': wantedIdx }).catch(() => undefined);
+
+    const prev = (tasksRepo.get(task.id) as TaskWithPayload).payload ?? {};
+    tasksRepo.update(task.id, {
+      expectBytes: selectedBytes,
+      title: task.title || torrent.name || `task_${task.id}`,
+      payload: { ...prev, torrentId, selectedBytes, downloadDir: String(torrent.downloadDir || prev.downloadDir || '') },
+      meta: { ...(task.meta ?? {}), files: wantedIdx.map((i) => files[i]?.name ?? '') },
+    });
+  return selectedBytes;
 }
