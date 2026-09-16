@@ -66,7 +66,7 @@ test('BT 并发的默认值不该是 1（回归：上传一包种子只跑一个
 });
 
 test('已部署机器：数据库里存着 transmission=1 的旧设置，读到时会自动修正并落盘（且只做一次）', async () => {
-  const { migrateSettings, reloadSettings } = await import('../dist/services/settings.js');
+  const { migrateSettings, reloadSettings, SETTINGS_SCHEMA } = await import('../dist/services/settings.js');
 
   // 1) 迁移函数本身（测的是**生产代码**，不是测试里复刻的副本）
   const legacy = { ...defaultSettings() };
@@ -75,7 +75,7 @@ test('已部署机器：数据库里存着 transmission=1 的旧设置，读到�
   const { next, notes } = migrateSettings(legacy);
   assert.equal(next.moduleConcurrency.transmission, config.moduleConcurrency.transmission,
     `旧值 1 应被提到 ${config.moduleConcurrency.transmission}，实际 ${next.moduleConcurrency.transmission}`);
-  assert.equal(next.schemaVersion, 1, '应写入 schemaVersion=1');
+  assert.equal(next.schemaVersion, SETTINGS_SCHEMA, '应写入当前 schemaVersion');
   assert.ok(notes.some((n) => /transmission/.test(n)), '要说明改了什么，实际: ' + notes.join(' | '));
 
   // 2) 已经有 schemaVersion 就不再动用户设置（用户手动改回 1 也不该被改）
@@ -94,7 +94,7 @@ test('已部署机器：数据库里存着 transmission=1 的旧设置，读到�
   const persisted = JSON.parse(settingsRepo.getAll().app_settings);
   assert.equal(persisted.moduleConcurrency.transmission, config.moduleConcurrency.transmission,
     '修正结果必须落盘（否则下次重启又变回 1）');
-  assert.equal(persisted.schemaVersion, 1, '落盘时带上 schemaVersion');
+  assert.equal(persisted.schemaVersion, SETTINGS_SCHEMA, '落盘时带上 schemaVersion');
 
   // 收尾：恢复正常设置，别影响其它测试
   updateSettings({ maxConcurrent: 3, moduleConcurrency: { transmission: 3, aria2: 2, webvideo: 2 } });

@@ -40,7 +40,7 @@ test('zip 上传 -> 解压 -> 种子入库（并删除 zip）', async () => {
   assert.equal(seeds[0].status, 'pending');
 });
 
-test('BT: 入队 -> 启动 -> 只选中视频/图片 -> 完成后归档发布', async () => {
+test('BT: 入队 -> 启动 -> 只要核心内容(视频) -> 完成后归档发布', async () => {
   const seed = seedsRepo.all()[0];
   const task = bt.enqueueSeed(seed);
   assert.equal(task.module, 'transmission');
@@ -50,9 +50,10 @@ test('BT: 入队 -> 启动 -> 只选中视频/图片 -> 完成后归档发布', 
   const started = tasksRepo.get(task.id);
   assert.equal(started.status, 'downloading');
   assert.equal(started.payload.torrentId, 7);
-  // mock 种子含 video.mp4(1000) + cover.jpg(100) + readme.txt(50) -> 只算前两个
-  assert.equal(started.expectBytes, 1100, '只统计视频+图片大小');
-  assert.deepEqual(started.meta.files.sort(), ['cover.jpg', 'video.mp4'].sort());
+  // mock 种子含 video.mp4(1000) + cover.jpg(100) + readme.txt(50)
+  // 新规则：有视频时图片按"宣传图/封面"排除，非视频/图片扩展名一律不要 -> 只要 video.mp4
+  assert.equal(started.expectBytes, 1000, '只统计核心内容(视频)大小');
+  assert.deepEqual(started.meta.files, ['video.mp4']);
   assert.equal(fs.existsSync(path.join(config.dirs.btQueued, 'demo.torrent')), true, '种子应移到已下载目录');
 
   // 未完成：进度 50%
@@ -78,12 +79,12 @@ test('BT: 入队 -> 启动 -> 只选中视频/图片 -> 完成后归档发布', 
   assert.equal(seedsRepo.get(seed.id).status, 'done');
 });
 
-test('BT: 种子内没有视频/图片时给出明确错误', async () => {
+test('BT: 种子内没有核心内容时给出明确错误（并说明排除了什么）', async () => {
   mock.state.files = [{ name: 'readme.txt', length: 10, bytesCompleted: 0 }];
   const fakeTorrent = tmpFile(root, 'src/only_txt.torrent', 'd8:announce11:http://x/ye');
   fs.copyFileSync(fakeTorrent, path.join(config.dirs.btPending, 'only_txt.torrent'));
   bt.registerPendingSeeds();
   const seed = seedsRepo.all().find((s) => s.name === 'only_txt.torrent');
   const task = bt.enqueueSeed(seed);
-  await assert.rejects(() => bt.transmissionModule.start(tasksRepo.get(task.id)), /没有视频或图片/);
+  await assert.rejects(() => bt.transmissionModule.start(tasksRepo.get(task.id)), /没有可下载的核心内容/);
 });

@@ -568,7 +568,15 @@ case "$ACTION" in
     # 老部署升级时自愈：补 yt-dlp-ejs / JS 运行时（缺了 YouTube 一定失败）
     if [[ $SKIP_APT -eq 0 ]]; then ensure_ytdlp_stack; fi
     if [[ $SKIP_APT -eq 0 ]]; then ensure_cookie_browser; fi
-    # 老部署升级时补齐「全站鉴权」账号密码（缺了就生成并打印，否则等于没有鉴权）
+    # 老部署升级时修正 BT 并发：以前 .env 里写的是 1，导致上传一包种子只跑一个。
+  # 注意：.env 的优先级高于代码里的默认值，所以光改代码对**已部署的机器无效**，
+  # 必须在 .env 这一层改掉（这条自愈就是干这个的）。
+  if [[ -f .env ]] && grep -q '^CONCURRENCY_TRANSMISSION=1$' .env; then
+    sed -i 's/^CONCURRENCY_TRANSMISSION=1$/CONCURRENCY_TRANSMISSION=3/' .env
+    log "已修正 .env：CONCURRENCY_TRANSMISSION 1 -> 3（旧默认值太低，上传多个种子时只会跑一个；想要 1 请手动改回）"
+  fi
+
+  # 老部署升级时补齐「全站鉴权」账号密码（缺了就生成并打印，否则等于没有鉴权）
     if [[ -f .env ]]; then
       if ! grep -q '^WEB_AUTH_USER=' .env; then echo "WEB_AUTH_USER=${WEB_AUTH_USER:-admin}" >> .env; log "已补齐 WEB_AUTH_USER"; fi
       if ! grep -q '^WEB_SESSION_HOURS=' .env; then echo "WEB_SESSION_HOURS=168" >> .env; fi
@@ -724,7 +732,7 @@ DOWNLOAD_ROOT=${DOWNLOAD_ROOT}
 ENCRYPT_PASSWORD=ec3e458fcde2582e079f19368abc780f
 RESERVE_FREE_BYTES=10737418240
 MAX_CONCURRENT=3
-CONCURRENCY_TRANSMISSION=1
+CONCURRENCY_TRANSMISSION=3
 CONCURRENCY_ARIA2=2
 CONCURRENCY_WEBVIDEO=2
 ANDROID_TOKEN=${ANDROID_TOKEN_VALUE}

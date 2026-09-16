@@ -12,9 +12,13 @@ const KEY = 'app_settings';
  *   0 -> 1：moduleConcurrency.transmission 的旧默认值是 1，导致用户上传一包种子
  *          （10 多个 .torrent）时**只有 1 个在下载**，其余全部排队，而磁盘和全局
  *          并发都还空着；当时那道门还是静默跳过，界面上只显示"等待"，用户完全
- *          无从排查。新默认是 3，这里把仍是旧值的部署改过来。
+ *          无从排查。
+ *   1 -> 2：承上。⚠️ 真正生效的默认值其实在 .env（`CONCURRENCY_TRANSMISSION=1`，
+ *          由 deploy.sh 写入）——.env 优先级高于代码默认值，所以 schema 1 那次迁移
+ *          把值"改成"了 config 里的 1，等于没改（真机上验证时抓到的）。
+ *          schema 2 会在 deploy.sh 已经把 .env 修正为 3 之后再跑一次，才真正生效。
  */
-const SETTINGS_SCHEMA = 1;
+export const SETTINGS_SCHEMA = 2;
 
 export function migrateSettings(s: Settings): { next: Settings; notes: string[] } {
   if ((s.schemaVersion ?? 0) >= SETTINGS_SCHEMA) return { next: s, notes: [] };
@@ -40,6 +44,7 @@ export function defaultSettings(): Settings {
     theme: 'system',
     encryptPassword: config.encryptPassword,
     moduleConcurrency: { ...config.moduleConcurrency },
+    btSelect: { ...config.btSelect, blockKeywords: [...(config.btSelect.blockKeywords ?? [])] },
     aria2Rpc: { ...config.aria2Rpc },
     transmissionRpc: { ...config.transmissionRpc },
     ytdlpPath: config.bins.ytdlp,
@@ -76,6 +81,7 @@ export function getSettings(): Settings {
       aria2Rpc: { ...base.aria2Rpc, ...(parsed.aria2Rpc ?? {}) },
       transmissionRpc: { ...base.transmissionRpc, ...(parsed.transmissionRpc ?? {}) },
       btEvict: { ...base.btEvict, ...(parsed.btEvict ?? {}) },
+      btSelect: { ...base.btSelect, ...(parsed.btSelect ?? {}) },
     };
     const { next, notes } = migrateSettings(merged);
     cached = next;
@@ -117,6 +123,7 @@ export function updateSettings(patch: Partial<Settings>): Settings {
     aria2Rpc: { ...current.aria2Rpc, ...(patch.aria2Rpc ?? {}) },
     transmissionRpc: { ...current.transmissionRpc, ...(patch.transmissionRpc ?? {}) },
     btEvict: { ...current.btEvict, ...(patch.btEvict ?? {}) },
+    btSelect: { ...current.btSelect, ...(patch.btSelect ?? {}) },
   };
   // 密码掩码回传时保持原值
   if (patch.encryptPassword === '******') next.encryptPassword = current.encryptPassword;

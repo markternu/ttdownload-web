@@ -63,6 +63,15 @@ export const config = {
     webvideo: num(process.env.CONCURRENCY_WEBVIDEO, 2),
   },
   autoRetry: num(process.env.AUTO_RETRY, 2),
+
+  // BT 内容甄别：默认"只要视频 + 排掉广告"，关键词可由用户在设置页增删。
+  // 图片默认 auto：种子里有视频就把图片当宣传图排除；整包都是图片（照片合集）才保留。
+  btSelect: {
+    keepImages: (process.env.BT_KEEP_IMAGES as 'auto' | 'always' | 'never') || 'auto',
+    blockKeywords: [] as string[], // 空 = 用内置默认表（services/btSelect.ts）
+    minVideoBytes: num(process.env.BT_MIN_VIDEO_BYTES, 0),
+    publishIndividuallyMinBytes: num(process.env.BT_PUBLISH_INDIVIDUAL_MIN, 500 * 1024 ** 2),
+  },
   /** 修复脚本上传/执行：默认关闭（危险功能，需在网页显式开启） */
   scriptUploadEnabled: str(process.env.SCRIPT_UPLOAD_ENABLED, '0') === '1',
   scriptRunTimeoutSec: num(process.env.SCRIPT_RUN_TIMEOUT_SEC, 600),

@@ -179,7 +179,7 @@ docker compose up -d
 | `ENCRYPT_PASSWORD` | 老脚本默认值 | AES 密码（必须与 PC 端解密工具一致） |
 | `RESERVE_FREE_BYTES` | 10737418240 (10GiB) | 磁盘保留空间：低于它就暂停下载 |
 | `MAX_CONCURRENT` | 3 | 全局最大并发下载数 |
-| `CONCURRENCY_TRANSMISSION` / `_ARIA2` / `_WEBVIDEO` | 1 / 2 / 2 | 各模块并发上限 |
+| `CONCURRENCY_TRANSMISSION` / `_ARIA2` / `_WEBVIDEO` | 3 / 2 / 2 | 各模块并发上限（BT 一次同时下几个种子） |
 | `ANDROID_TOKEN` | 无 | 安卓接口 Token；不配置则安卓接口关闭（401） |
 | `ARIA2_RPC_HOST/PORT/SECRET` | 127.0.0.1 / 6800 / 空 | aria2 RPC（应用会在未启动时自动拉起 aria2c） |
 | `TRANSMISSION_RPC_HOST/PORT/USER/PASSWORD` | 127.0.0.1 / 9091 / 空 | transmission RPC |

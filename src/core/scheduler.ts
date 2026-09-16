@@ -89,7 +89,12 @@ async function pollRunning(): Promise<number> {
     try {
       const r = await adapter.poll(task);
       if (r.done) {
-        handoffToArchive(task.id, r.done.files, r.done.originalName, r.done.sizeBytes);
+        // BT 会带上发布单元（大视频各自一个成品）和"发布后清理下载目录"的标记
+        handoffToArchive(task.id, r.done.files, r.done.originalName, r.done.sizeBytes, {
+          units: r.done.units,
+          torrentName: r.done.torrentName,
+          cleanupBtDirs: r.done.cleanupBtDirs,
+        });
         continue;
       }
       if (r.error) {

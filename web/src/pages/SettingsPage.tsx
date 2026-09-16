@@ -20,8 +20,7 @@ import {
   Undo2,
   UploadCloud,
   Wifi,
-  XCircle,
-} from 'lucide-react'
+  XCircle, Filter } from 'lucide-react'
 import {
   Badge,
   Button,
@@ -1003,6 +1002,92 @@ export default function SettingsPage() {
             <p className="rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
               用浏览器登录该网站后，用 “Get cookies.txt LOCALLY” 之类扩展导出 cookies.txt，然后在这里上传。
               以上设置在点击页面右上角「保存设置」后生效。
+            </p>
+          </div>
+        </Card>
+
+        {/* BT 内容甄别：挑核心内容、排广告；决定成品怎么拆 */}
+        <Card>
+          <CardHeader
+            title={
+              <span className="inline-flex items-center gap-2">
+                <Filter className="h-4 w-4" /> BT 内容甄别
+              </span>
+            }
+            subtitle="种子里往往混着宣传图/广告视频。这里决定「下什么」以及「怎么打包成成品」。改完记得回到列表里重扫一次（已下载过的种子不会自动重来）。"
+          />
+          <div className="space-y-4">
+            <Field
+              label="图片怎么处理"
+              hint="广告图/封面大都在图片里，默认「有视频就不要图片」；整包都是图片（照片合集）时才会保留"
+            >
+              <Select
+                value={draft.btSelect.keepImages}
+                options={[
+                  { value: 'auto', label: '自动（推荐）：有视频就丢图片，纯图片合集保留' },
+                  { value: 'never', label: '一律不要图片' },
+                  { value: 'always', label: '一律保留图片（关键词命中的仍会排掉）' },
+                ]}
+                onChange={(event) =>
+                  patch('btSelect', {
+                    ...draft.btSelect,
+                    keepImages: event.target.value as 'auto' | 'always' | 'never',
+                  })
+                }
+              />
+            </Field>
+            <Field
+              label="广告关键词"
+              hint="文件名或所在目录命中即排除（逗号/空格分隔）。留空 = 用内置默认表（广告/宣传/推广/加群/二维码/sample/trailer/screenshot 等）"
+            >
+              <textarea
+                className="w-full min-h-[72px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                placeholder="留空用默认表；想追加就写全量列表，例如：广告,宣传,推广,加群,二维码,sample,trailer"
+                value={(draft.btSelect.blockKeywords ?? []).join(',')}
+                onChange={(event) =>
+                  patch('btSelect', {
+                    ...draft.btSelect,
+                    blockKeywords: event.target.value
+                      .split(/[\s,，]+/)
+                      .map((x) => x.trim())
+                      .filter(Boolean),
+                  })
+                }
+              />
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="视频体积下限（MB）" hint="0=不按体积过滤（默认）。有些正片就是几十 MB，一刀切会误伤，确认需要再开">
+                <Input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={String(Math.round(draft.btSelect.minVideoBytes / 1024 ** 2))}
+                  onChange={(event) =>
+                    patch('btSelect', {
+                      ...draft.btSelect,
+                      minVideoBytes: Math.max(0, Number(event.target.value)) * 1024 ** 2,
+                    })
+                  }
+                />
+              </Field>
+              <Field label="单独发布阈值（MB）" hint="单个视频 ≥ 该值就单独成一个成品（不打包）；小于它的文件会等全部下完合成一个 zip">
+                <Input
+                  type="number"
+                  min={0}
+                  step={50}
+                  value={String(Math.round(draft.btSelect.publishIndividuallyMinBytes / 1024 ** 2))}
+                  onChange={(event) =>
+                    patch('btSelect', {
+                      ...draft.btSelect,
+                      publishIndividuallyMinBytes: Math.max(0, Number(event.target.value)) * 1024 ** 2,
+                    })
+                  }
+                />
+              </Field>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              规则优先级：<b>关键词屏蔽</b> &gt; 图片开关 &gt; 体积下限。每次挑片的结果（留了哪些、排了哪些、为什么）
+              都会写进任务的运行日志，觉得误伤了就照着日志调关键词。
             </p>
           </div>
         </Card>

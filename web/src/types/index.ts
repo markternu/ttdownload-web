@@ -91,6 +91,13 @@ export interface Settings {
   theme: 'light' | 'dark' | 'system'
   encryptPassword: string // GET 时返回掩码 '******'；PUT 传新值才修改
   moduleConcurrency: { transmission: number; aria2: number; webvideo: number }
+  /** BT 内容甄别（挑核心内容、排广告）与成品拆分 */
+  btSelect: {
+    keepImages: 'auto' | 'always' | 'never'
+    blockKeywords: string[]
+    minVideoBytes: number
+    publishIndividuallyMinBytes: number
+  }
   aria2Rpc: { host: string; port: number; secret: string }
   transmissionRpc: { host: string; port: number; user: string; password: string }
   ytdlpPath: string // 默认 yt-dlp

@@ -113,6 +113,17 @@ export interface Settings {
   theme: 'light' | 'dark' | 'system';
   encryptPassword: string;
   moduleConcurrency: { transmission: number; aria2: number; webvideo: number };
+  /** BT 内容甄别（挑核心内容、排广告）与成品拆分策略 */
+  btSelect: {
+    /** 图片怎么处理：auto=有视频就不要图片 / always=一律保留 / never=一律不要 */
+    keepImages: 'auto' | 'always' | 'never';
+    /** 广告关键词（文件名或所在目录命中即排除；用户可增删） */
+    blockKeywords: string[];
+    /** 视频体积下限（字节），0=不按体积过滤 */
+    minVideoBytes: number;
+    /** 单个视频 ≥ 该字节数时单独发布（不打包）；其余小文件合成一个 zip */
+    publishIndividuallyMinBytes: number;
+  };
   aria2Rpc: { host: string; port: number; secret: string };
   transmissionRpc: { host: string; port: number; user: string; password: string };
   ytdlpPath: string;

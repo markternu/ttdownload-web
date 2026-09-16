@@ -11,7 +11,22 @@ export interface PollResult {
   downloadedBytes?: number;
   expectBytes?: number;
   error?: string | null;
-  done?: { files: string[]; originalName: string; sizeBytes: number };
+  /**
+   * 下载完成，交给归档流水线。
+   * units：发布单元（一个单元 = 一个成品）。BT 里"多个大视频"会拆成多个单元，
+   *        这样不会被塞进同一个 zip；"一堆小文件"合成一个单元（打成 zip）。
+   *        不传则按"全部文件一个单元"处理（保持旧行为）。
+   */
+  done?: {
+    files: string[];
+    originalName: string;
+    sizeBytes: number;
+    units?: { files: string[]; name: string }[];
+    /** BT：种子名，用于发布完成后清理下载目录 */
+    torrentName?: string;
+    /** 发布完成后是否清理 BT 下载/incomplete 目录 */
+    cleanupBtDirs?: boolean;
+  };
 }
 
 export interface ModuleAdapter {
