@@ -65,6 +65,34 @@ test('prepare：只勾视频 + 算出真实大小 + **绝不覆盖 download-dir*
   // ③ 记住唯一 ID（hash）和 transmission 的目录，供扫货用
   assert.equal(after.payload.btHash, 'abc', '要记录种子的唯一 hash');
   assert.equal(after.payload.btDownloadDir, downloadDir, '记录 transmission 报告的目录');
+
+  // ④ transmission 成功接管后，种子文件要删掉（transmission 已有元数据，留着没用）
+  const seedPath = String(after.payload.seedPath ?? '');
+  assert.ok(seedPath, 'payload 里应有种子路径');
+  assert.equal(fs.existsSync(seedPath), false, 'transmission 接管成功后应删除 .torrent 文件');
+  assert.equal(after.payload.seedPathDeleted, true, '要标记种子文件已删除');
+});
+
+test('种子文件删除后，重复 prepare 仍能正常复用（空间不够被退回等待再重试）', async () => {
+  const task = tasksRepo.list({ modules: ['transmission'], statuses: ['parsing', 'waiting'], pageSize: 1 }).items[0];
+  const before = tasksRepo.get(task.id);
+  // 种子文件已经删了，但 torrentId 在 → 应该走"复用"分支，不能报"种子文件不存在"
+  await bt.transmissionModule.prepare(before);
+  assert.equal(tasksRepo.get(task.id).status, before.status, '复用分支不该让任务失败');
+  assert.equal(Number(tasksRepo.get(task.id).payload.torrentId), 7, 'torrentId 应保持不变');
+});
+
+test('没视频的种子：接管失败，种子文件要留着（方便用户换一个或重试）', async () => {
+  mock.state.files = [{ name: 'only.txt', length: 10, bytesCompleted: 0 }];
+  mock.state.wanted = [1];
+  const fakeTorrent = tmpFile(root, 'src/novideo.torrent', 'd8:announce11:http://x/ye');
+  const placed = path.join(config.dirs.btPending, 'novideo.torrent');
+  fs.copyFileSync(fakeTorrent, placed);
+  bt.registerPendingSeeds();
+  const seed = seedsRepo.all().find((s) => s.name === 'novideo.torrent');
+  const task = bt.enqueueSeed(seed);
+  await assert.rejects(() => bt.transmissionModule.prepare(tasksRepo.get(task.id)), /没有视频文件/);
+  assert.equal(fs.existsSync(placed), true, '接管失败时种子文件应保留');
 });
 
 test('start：只做 torrent-start，并记录"什么时候交给 transmission 的"', async () => {
@@ -84,17 +112,6 @@ test('poll：只读进度，不返回 done（完成由扫货处理，8 小时内
   assert.equal(Math.round(p.progress), 50);
   assert.equal(p.done, undefined, 'poll 不该自己交付（交给扫货）');
   assert.equal(p.error, undefined);
-});
-
-test('种子里一个视频都没有 -> 明确报错并跳过（只下视频）', async () => {
-  mock.state.files = [{ name: 'readme.txt', length: 10, bytesCompleted: 0 }];
-  mock.state.wanted = [1];
-  const fakeTorrent = tmpFile(root, 'src/only_txt.torrent', 'd8:announce11:http://x/ye');
-  fs.copyFileSync(fakeTorrent, path.join(config.dirs.btPending, 'only_txt.torrent'));
-  bt.registerPendingSeeds();
-  const seed = seedsRepo.all().find((s) => s.name === 'only_txt.torrent');
-  const task = bt.enqueueSeed(seed);
-  await assert.rejects(() => bt.transmissionModule.prepare(tasksRepo.get(task.id)), /没有视频文件/);
 });
 
 test('【事故回归】空间不够时：备好但一个字节都不下，且 expectBytes 已是真实值', async () => {

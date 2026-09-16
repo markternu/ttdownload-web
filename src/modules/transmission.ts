@@ -226,7 +226,7 @@ export const transmissionModule: ModuleAdapter = {
     }
 
     // 已经加过（空间不够被退回等待 / 服务重启重新排队）→ 复用，保持暂停。
-    // 这条必须放在"检查种子文件存在"之前：prepare 成功后 .torrent 会被移到 btQueued 留痕，
+    // 这条必须放在"检查种子文件存在"之前：prepare 成功后 .torrent 就被删掉了，
     // 再查原路径会误判"种子不存在"而永久失败（空间不够被退回等待的种子一重试就废）。
     const existingId = Number(payload.torrentId ?? 0);
     if (existingId) {
@@ -252,21 +252,19 @@ export const transmissionModule: ModuleAdapter = {
 
     const selectedBytes = await syncBtVideoSelection(task, torrentId);
 
-    // 种子文件移入"已下载中"目录留痕（只做一次）
+    // 种子已经被 transmission 成功接管（拿到了任务 id、也读到了文件列表）→
+    // **把这个 .torrent 文件删掉**：transmission 自己已经保存了元数据，
+    // 留着只是占地方（用户明确要求）。注意是"确认接管成功之后"才删 ——
+    // 上面 syncBtVideoSelection 抛错时不会走到这里，种子会留着方便重试。
     if (fs.existsSync(seedPath)) {
-      fs.mkdirSync(config.dirs.btQueued, { recursive: true });
-      let dest = path.join(config.dirs.btQueued, path.basename(seedPath));
-      let n = 1;
-      while (fs.existsSync(dest)) {
-        dest = path.join(config.dirs.btQueued, `${path.basename(seedPath, '.torrent')}_${n}.torrent`);
-        n += 1;
-      }
       try {
-        fs.renameSync(seedPath, dest);
+        fs.rmSync(seedPath, { force: true });
         const p2 = (tasksRepo.get(task.id) as TaskWithPayload).payload ?? {};
-        tasksRepo.update(task.id, { payload: { ...p2, seedPathMoved: dest } });
-      } catch {
-        /* 移动失败不影响下载 */
+        tasksRepo.update(task.id, { payload: { ...p2, seedPathDeleted: true } });
+        taskLog(task.id).mark('BT_SEED_DELETED',
+          `transmission 已接管该种子，已删除种子文件: ${path.basename(seedPath)}`, { torrentId });
+      } catch (e) {
+        logger.child('transmission').warn(`删除种子文件失败（不影响下载）: ${(e as Error).message}`);
       }
     }
 

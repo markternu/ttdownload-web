@@ -245,7 +245,7 @@ ttdownload-web/
 下载目录树（`DOWNLOAD_ROOT` 下）：
 
 ```
-transmission/{btzhongzi_zip,btzhongzi_nodownd,btzhongzi_yijingdownding,downloads}
+transmission/{btzhongzi_zip,btzhongzi_nodownd}（种子交给 transmission 后 .torrent 会被删掉）
 downd_aria2_path/            downd_web_tools/{,downdok}
 downd_ok_p2/                 downd_ok_p2_jiami_tmp/
 xiaofeizhe_downd/            state/{app.db,app.log,indexFXY}

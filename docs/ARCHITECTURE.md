@@ -34,7 +34,7 @@
 ├── transmission/
 │   ├── btzhongzi_zip/            # 用户上传的种子 zip（生产入口）
 │   ├── btzhongzi_nodownd/        # 已解压、待下载的种子
-│   └── btzhongzi_yijingdownding/ # 已纳入 transmission 下载的种子（归档留痕）
+│   └── btzhongzi_yijingdownding/ # （已弃用：种子交给 transmission 成功后直接删掉，不再归档留痕）
 ├── downd_aria2_path/             # aria2 模块下载目录
 ├── downd_web_tools/              # 公开视频URL模块根目录
 │   └── downdok/                  # 该模块下载完成的成品
@@ -61,7 +61,7 @@
    计算这些文件的总大小 `btzhongdaxiao`。
 4. **磁盘门控**（见 §4）：`free - btzhongdaxiao >= 10G` 才允许下载。
 5. **下载**：调用 transmission 添加任务并只勾选视频/图片文件；成功后把种子文件从
-   `btzhongzi_nodownd` 移到 `btzhongzi_yijingdownding`。
+   `btzhongzi_nodownd` 里的 .torrent **直接删掉**（transmission 已保存元数据）。
 6. **完成**：transmission 报告完成 → 把对应下载目录内容移交归档区：
    - 多文件 → 打 zip（名含 `zip`）；单文件 → 直接用该文件；统一按下文命名规则重命名；
    - 然后 **删除 transmission 任务 + 删除其下载目录文件**。
