@@ -242,7 +242,8 @@ androidRouter.get(
       res.status(206);
       res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
       res.setHeader('Content-Length', String(end - start + 1));
-      fs.createReadStream(file.path, { start, end }).pipe(res);
+      // 高 RTT（跨洲）链路上，64KB 默认分块会让吞吐被事件循环/往返拖住 → 1MB
+      fs.createReadStream(file.path, { start, end, highWaterMark: 1 << 20 }).pipe(res);
       return;
     }
 
@@ -250,7 +251,7 @@ androidRouter.get(
     filesRepo.trackDownload(id, 'android');
     logger.child('android').mark('FILE_DOWNLOAD', `安卓端开始下载成品文件 #${id}`, { name: file.name, sizeBytes: stat.size });
     res.setHeader('Content-Length', String(stat.size));
-    fs.createReadStream(file.path).pipe(res);
+    fs.createReadStream(file.path, { highWaterMark: 1 << 20 }).pipe(res);
   }),
 );
 

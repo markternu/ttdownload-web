@@ -105,7 +105,7 @@ filesRouter.get(
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${path.basename(file.name)}"`);
     res.setHeader('Content-Length', String(fs.statSync(file.path).size));
-    fs.createReadStream(file.path).pipe(res);
+    fs.createReadStream(file.path, { highWaterMark: 1 << 20 }).pipe(res);
   }),
 );
 
