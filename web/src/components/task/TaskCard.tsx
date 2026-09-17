@@ -10,6 +10,7 @@ import {
   taskFormat,
   taskQuality,
   taskSizeBytes,
+  isPublishTask,
 } from '../../lib/format'
 import { MODULE_LABELS } from '../../lib/api'
 import { platformTone } from '../../lib/constants'
@@ -85,6 +86,11 @@ export function TaskCard({ task, onChanged, onError, className, compact = false 
               <Icon className="h-3 w-3" />
               {MODULE_LABELS[task.module]}
             </span>
+            {isPublishTask(task) ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
+                归档发布
+              </span>
+            ) : null}
             {task.meta?.resolution ? (
               <span className="rounded-full bg-slate-100 px-2 py-0.5 font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                 {taskQuality(task)}

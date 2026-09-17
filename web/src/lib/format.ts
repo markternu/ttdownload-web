@@ -195,3 +195,15 @@ export function clampPercent(value: number | null | undefined): number {
   if (value === null || value === undefined || Number.isNaN(value)) return 0
   return Math.min(100, Math.max(0, Math.round(value * 10) / 10))
 }
+
+/**
+ * 是不是「归档 → 加密 → 发布」子任务？
+ *
+ * BT 的扫货会为每个下好的目录**再建一个任务**（module 同样是 transmission），
+ * 于是"14 个种子"在任务列表里会变成 23 条。列表和计数都要能把这两类分开，
+ * 否则用户看到两个数字对不上（血案：侧边栏一个数、任务页另一个数）。
+ */
+export function isPublishTask(task: { payload?: Record<string, unknown> | null } | null | undefined): boolean {
+  const payload = task?.payload
+  return !!payload && (payload.harvest != null || payload.earlyHandoff != null)
+}

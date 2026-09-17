@@ -53,6 +53,8 @@ export interface Task {
   publishedName?: string | null // 发布后的文件名（如 oqq12）
   error?: string | null // 面向用户的中文失败原因
   meta?: TaskMeta | null
+  /** 原始 payload：BT 的「归档发布子任务」靠 payload.harvest 识别 */
+  payload?: Record<string, unknown> | null
   createdAt: string
   updatedAt: string
   startedAt?: string | null
@@ -312,6 +314,16 @@ export interface TaskListResponse {
   total: number
   page: number
   pageSize: number
+  /**
+   * 与 total **同一套筛选条件**下的统计口径。
+   * download = 种子/直链/视频下载任务；publish = BT 扫货产生的「归档→加密→发布」子任务。
+   * （页面头部用它把 total 解释清楚，避免"下载任务"标题下数出一堆发布子任务）
+   */
+  summary?: {
+    byStatus: Record<string, number>
+    download: number
+    publish: number
+  }
 }
 
 export interface FileListResponse {

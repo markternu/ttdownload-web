@@ -21,15 +21,21 @@ tasksRouter.get('/', (req, res) => {
     .filter((s): s is TaskStatus => STATUSES.includes(s as TaskStatus));
   const page = Number(req.query.page ?? 1) || 1;
   const pageSize = Number(req.query.pageSize ?? 20) || 20;
-  const { items, total } = tasksRepo.list({
+  const filter = {
     modules: modules.length ? modules : undefined,
     statuses: statuses.length ? statuses : undefined,
     q: req.query.q ? String(req.query.q) : undefined,
+  };
+  const { items, total } = tasksRepo.list({
+    ...filter,
     sort: req.query.sort ? String(req.query.sort) : 'created_desc',
     page,
     pageSize,
   });
-  res.json({ items, total, page, pageSize });
+  // 同一套筛选条件的统计：页面头部用它把 total 解释清楚
+  // （BT 的「归档发布」是**子任务**，不算种子下载任务 —— 否则数字永远对不上）
+  const summary = tasksRepo.summary(filter);
+  res.json({ items, total, page, pageSize, summary });
 });
 
 tasksRouter.use((req, _res, next) => {

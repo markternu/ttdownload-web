@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { useTaskEvents } from '../context/AppDataContext'
-import { isActiveTask } from '../lib/format'
-import type { SseTaskEvent, Task, TaskAction, TaskQuery } from '../types'
+import { isActiveTask, isPublishTask } from '../lib/format'
+import type { SseTaskEvent, Task, TaskAction, TaskListResponse, TaskQuery } from '../types'
 
 const POLL_MS = 3000
 
@@ -19,6 +19,8 @@ export interface UseTasksResult {
   act: (id: number, action: TaskAction, deleteFile?: boolean) => Promise<boolean>
   /** 正在执行动作的任务 id 集合 */
   pendingIds: number[]
+  /** 与 total 同源的统计口径（下载任务 / 归档发布子任务） */
+  summary?: TaskListResponse['summary']
 }
 
 /**
@@ -32,6 +34,7 @@ export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): Us
   const [page, setPage] = useState(query.page ?? 1)
   const [tasks, setTasks] = useState<Task[]>([])
   const [total, setTotal] = useState(0)
+  const [summary, setSummary] = useState<TaskListResponse['summary']>(undefined)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [pendingIds, setPendingIds] = useState<number[]>([])
@@ -51,6 +54,7 @@ export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): Us
       })
       setTasks(res.items ?? [])
       setTotal(res.total ?? 0)
+      setSummary(res.summary)
       setError(null)
     } catch (err) {
       setError((err as Error).message)
@@ -133,6 +137,7 @@ export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): Us
     setPage,
     act,
     pendingIds,
+    summary,
   }
 }
 
@@ -140,11 +145,15 @@ export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): Us
 export function groupBySection(tasks: Task[]) {
   const downloading: Task[] = []
   const waiting: Task[] = []
+  const publish: Task[] = []
   const finished: Task[] = []
   const failed: Task[] = []
   for (const task of tasks) {
     if (task.status === 'failed') failed.push(task)
     else if (task.status === 'completed' || task.status === 'cancelled') finished.push(task)
+    // 「归档 → 加密 → 发布」是扫货为每个目录**另建**的子任务（不是种子下载任务）→ 单独一档，
+    // 否则 14 个种子会混着 9 个发布子任务一起显示，看着就是"乱七八糟"
+    else if (isPublishTask(task)) publish.push(task)
     else if (
       task.status === 'downloading' ||
       task.status === 'paused' ||
@@ -154,5 +163,5 @@ export function groupBySection(tasks: Task[]) {
       downloading.push(task)
     } else waiting.push(task)
   }
-  return { downloading, waiting, finished, failed }
+  return { downloading, waiting, publish, finished, failed }
 }

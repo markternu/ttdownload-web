@@ -182,6 +182,38 @@ export interface TaskInput {
   payload?: Record<string, unknown>;
 }
 
+/**
+ * 任务筛选条件的 SQL 片段。
+ * ⚠️ list() 与 summary() 必须共用它 —— 否则"列表"和"头部统计"又会出现两套口径
+ * （这正是用户看到的：侧边栏一个数、任务页另一个数）。
+ */
+function taskWhere(opts: {
+  modules?: ModuleId[];
+  statuses?: TaskStatus[];
+  ids?: number[];
+  q?: string;
+}): { whereSql: string; args: unknown[] } {
+  const where: string[] = [];
+  const args: unknown[] = [];
+  if (opts.modules?.length) {
+    where.push(`module IN (${opts.modules.map(() => '?').join(',')})`);
+    args.push(...opts.modules);
+  }
+  if (opts.statuses?.length) {
+    where.push(`status IN (${opts.statuses.map(() => '?').join(',')})`);
+    args.push(...opts.statuses);
+  }
+  if (opts.ids?.length) {
+    where.push(`id IN (${opts.ids.map(() => '?').join(',')})`);
+    args.push(...opts.ids);
+  }
+  if (opts.q) {
+    where.push('(title LIKE ? OR url LIKE ?)');
+    args.push(`%${opts.q}%`, `%${opts.q}%`);
+  }
+  return { whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '', args };
+}
+
 export const tasksRepo = {
   create(input: TaskInput): Task {
     const ts = nowIso();
@@ -264,25 +296,7 @@ export const tasksRepo = {
     pageSize?: number;
     ids?: number[];
   }): { items: Task[]; total: number } {
-    const where: string[] = [];
-    const args: unknown[] = [];
-    if (opts.modules?.length) {
-      where.push(`module IN (${opts.modules.map(() => '?').join(',')})`);
-      args.push(...opts.modules);
-    }
-    if (opts.statuses?.length) {
-      where.push(`status IN (${opts.statuses.map(() => '?').join(',')})`);
-      args.push(...opts.statuses);
-    }
-    if (opts.ids?.length) {
-      where.push(`id IN (${opts.ids.map(() => '?').join(',')})`);
-      args.push(...opts.ids);
-    }
-    if (opts.q) {
-      where.push('(title LIKE ? OR url LIKE ?)');
-      args.push(`%${opts.q}%`, `%${opts.q}%`);
-    }
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const { whereSql, args } = taskWhere(opts);
     const total = (db.prepare(`SELECT COUNT(*) c FROM tasks ${whereSql}`).get(...(args as never[])) as { c: number }).c;
 
     const sortMap: Record<string, string> = {
@@ -301,6 +315,39 @@ export const tasksRepo = {
       .prepare(`SELECT * FROM tasks ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`)
       .all(...(args as never[]), pageSize, (page - 1) * pageSize) as TaskRow[];
     return { items: rows.map(rowToTask), total };
+  },
+
+  /**
+   * 列表筛选条件下的**统计口径**：状态分布 + 「种子下载任务 vs 归档发布子任务」拆分。
+   *
+   * 为什么要单独有这个（血案）：任务页标题写着"下载任务"，但 `total` 是**所有**任务 ——
+   * BT 的「扫货 → 归档 → 加密 → 发布」会为每个目录再建一个发布子任务（payload.harvest），
+   * 于是 14 个种子在页面上显示成 23 个任务，用户以为计数坏了，其实只是没说明白。
+   * 这里用**和 total 完全相同的 where 条件**统计，页面才能把 23 解释成「下载 14 + 发布 9」。
+   */
+  summary(opts: { modules?: ModuleId[]; statuses?: TaskStatus[]; q?: string }): {
+    byStatus: Record<string, number>;
+    download: number;
+    publish: number;
+  } {
+    const { whereSql, args } = taskWhere(opts);
+    const rows = db
+      .prepare(
+        `SELECT status, COUNT(*) c,
+           SUM(CASE WHEN json_extract(payload_json,'$.harvest') IS NOT NULL
+                     OR json_extract(payload_json,'$.earlyHandoff') IS NOT NULL THEN 1 ELSE 0 END) pub
+         FROM tasks ${whereSql} GROUP BY status`,
+      )
+      .all(...(args as never[])) as { status: string; c: number; pub: number }[];
+    const byStatus: Record<string, number> = {};
+    let download = 0;
+    let publish = 0;
+    for (const r of rows) {
+      byStatus[r.status] = r.c;
+      publish += Number(r.pub ?? 0);
+      download += r.c - Number(r.pub ?? 0);
+    }
+    return { byStatus, download, publish };
   },
 
   byStatus(statuses: TaskStatus[]): (Task & { payload?: Record<string, unknown> })[] {

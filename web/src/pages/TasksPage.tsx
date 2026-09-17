@@ -33,9 +33,10 @@ import {
   taskFormat,
   taskQuality,
   taskSizeBytes,
+  isPublishTask,
 } from '../lib/format'
 import type { Task } from '../types'
-import { AlertTriangle, CheckCircle2, Clock, Download, Loader2, PauseCircle } from 'lucide-react'
+import { AlertTriangle, Archive, CheckCircle2, Clock, Download, Loader2, PauseCircle } from 'lucide-react'
 
 interface SectionConfig {
   key: string
@@ -46,8 +47,9 @@ interface SectionConfig {
 }
 
 const SECTIONS: SectionConfig[] = [
-  { key: 'downloading', title: '下载中', description: '正在下载 / 暂停 / 归档发布', tone: 'brand', icon: Download },
+  { key: 'downloading', title: '下载中', description: '正在下载 / 暂停', tone: 'brand', icon: Download },
   { key: 'waiting', title: '等待中', description: '等待并发名额或磁盘空间放行', tone: 'warning', icon: Clock },
+  { key: 'publish', title: '归档发布', description: '扫货后归档 → 加密 → 发布（种子下载产生的子任务，不算种子任务）', tone: 'success', icon: Archive },
   { key: 'finished', title: '已完成', description: '已发布到消费者目录', tone: 'success', icon: CheckCircle2 },
   { key: 'failed', title: '失败', description: '可重试或删除', tone: 'danger', icon: AlertTriangle },
 ]
@@ -65,7 +67,7 @@ export default function TasksPage() {
   const [page, setPage] = useState(1)
 
   const debouncedQuery = useDebouncedValue(query, 350)
-  const { tasks, total, loading, error, refresh, act } = useTasks({
+  const { tasks, total, loading, error, refresh, act, summary } = useTasks({
     module: module as '' | 'transmission' | 'aria2' | 'webvideo',
     status,
     q: debouncedQuery,
@@ -99,6 +101,11 @@ export default function TasksPage() {
             <p className="truncate text-sm font-medium text-slate-800 dark:text-slate-100" title={task.title}>
               {task.title}
             </p>
+            {isPublishTask(task) ? (
+              <span className="mt-0.5 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
+                归档发布（种子下载产生的子任务）
+              </span>
+            ) : null}
             <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400">
               <span className={platformTone(task.platform)}>{task.platform ?? '未知平台'}</span>
               <span>· {MODULE_LABELS[task.module]}</span>
@@ -194,7 +201,13 @@ export default function TasksPage() {
         <div>
           <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">下载任务</h2>
           <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            共 {total} 个任务 ·{' '}
+            共 {total} 个任务
+            {summary && summary.publish > 0 ? (
+              <span className="text-slate-400 dark:text-slate-500">
+                （种子下载 {summary.download} · 归档发布 {summary.publish}）
+              </span>
+            ) : null}
+            {' · '}
             {sseStatus === 'open' ? (
               <span className="text-emerald-600 dark:text-emerald-400">实时更新已连接</span>
             ) : (
