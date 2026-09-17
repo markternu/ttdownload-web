@@ -20,8 +20,27 @@ export function setupRuntime(extra = {}) {
   process.env.SCHEDULER_INTERVAL_MS = String(extra.schedulerIntervalMs ?? 100000);
   process.env.PIPELINE_INTERVAL_MS = String(extra.pipelineIntervalMs ?? 100000);
   process.env.LOG_PATH = path.join(root, 'state', 'app.log');
+
+  // ⚠️ 让测试**与环境隔离**（真机测试踩到的坑）：
+  //    src/core/config.ts 会 `dotenv.config({ path: ENV_FILE || cwd/.env })`，而**部署机器上
+  //    项目根就有一份生产 .env**（开了网页鉴权、BT 目录指向 transmission 真实目录）。
+  //    测试进程一旦读到它，就会出现"本地全绿、树莓派上一片红"：
+  //      · 所有 API 用例 401（鉴权被打开）
+  //      · bt-cleanup 用例往 /var/lib/transmission/downloads 写 → EACCES
+  //    所以这里显式指向一个**不存在的** ENV_FILE（dotenv 对缺失文件是静默忽略），
+  //    并把 BT 相关目录也落到临时目录里。需要鉴权的用例用 extra.env 显式打开即可。
+  process.env.ENV_FILE = path.join(root, 'no-such.env');
+  process.env.BT_DOWNLOAD_DIR = path.join(root, 'transmission', 'downloads');
+  process.env.TRANSMISSION_INCOMPLETE_DIR = path.join(root, 'transmission', 'incomplete');
+  process.env.WEB_AUTH_USER = '';
+  process.env.WEB_AUTH_PASSWORD = '';
+  process.env.WEB_SESSION_SECRET = '';
+  // 真实机器上可能装了 aria2/transmission，别让它们影响"本机服务"判定
+  process.env.TRANSMISSION_RPC_PORT = process.env.TRANSMISSION_RPC_PORT || '9091';
   if (extra.env) Object.assign(process.env, extra.env);
   fs.mkdirSync(path.join(root, 'state'), { recursive: true });
+  fs.mkdirSync(process.env.BT_DOWNLOAD_DIR, { recursive: true });
+  fs.mkdirSync(process.env.TRANSMISSION_INCOMPLETE_DIR, { recursive: true });
   return root;
 }
 

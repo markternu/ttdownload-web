@@ -29,6 +29,37 @@ function makeSandbox({ withAria2, withTransmission, withTransmissionRemote = wit
   fs.mkdirSync(bin, { recursive: true });
   const logFile = path.join(dir, 'calls.log');
   fs.writeFileSync(logFile, '');
+
+  // 造一个"干净的系统 PATH"：软链 /usr/bin 里除**应用二进制**之外的东西。
+  // 血案（真机测试）：原来 PATH 里直接带 /usr/bin，而树莓派上真装着 aria2c /
+  // transmission-daemon / node → "未安装"的模拟全失效（该 apt install 的地方它
+  // 认为已安装），本地全绿、Pi 上一片红。
+  const APP_BINS = new Set([
+    'node', 'nodejs', 'npm', 'npx', 'corepack',
+    'aria2c', 'transmission-daemon', 'transmission-remote', 'transmission-cli',
+    'yt-dlp', 'ffmpeg', 'ffprobe', 'deno', 'bun', 'qjs', 'quickjs',
+    'chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable',
+  ]);
+  const sysBin = path.join(dir, 'sysbin');
+  fs.mkdirSync(sysBin, { recursive: true });
+  for (const src of ['/usr/bin', '/bin']) {
+    let names = [];
+    try {
+      names = fs.readdirSync(src);
+    } catch {
+      continue;
+    }
+    for (const n of names) {
+      if (APP_BINS.has(n)) continue;
+      const dest = path.join(sysBin, n);
+      if (fs.existsSync(dest)) continue;
+      try {
+        fs.symlinkSync(path.join(src, n), dest);
+      } catch {
+        /* 同名/权限问题忽略即可 */
+      }
+    }
+  }
   // 假的 apt 源目录：ensure_node 会在这里删 nodesource.list，测试不去动真实 /etc/apt
   const aptSources = path.join(dir, 'apt-sources');
   fs.mkdirSync(aptSources, { recursive: true });
@@ -87,7 +118,7 @@ exit 0`,
     `#!/bin/bash
 PROJECT_DIR="${dir}"
 BT_INSTALLER="${installer}"
-PATH="${bin}:/usr/bin:/bin"
+PATH="${bin}:${sysBin}"
 APT_SOURCES_DIR="${aptSources}"
 DEPLOY_ASSUME_TTY=1
 export PATH DEPLOY_ASSUME_TTY APT_SOURCES_DIR
@@ -111,6 +142,7 @@ ${extraCalls}
     installer,
     aptSources,
     bin,
+    sysBin,
     run: (args = []) => execFileSync('bash', [harness, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
     runAllowFail: () => {
       try {
@@ -255,7 +287,7 @@ exit 0
   fs.writeFileSync(
     harness,
     `#!/bin/bash
-PATH="${sb.bin}:/usr/bin:/bin"
+PATH="${sb.bin}:${sb.sysBin}"
 APT_SOURCES_DIR="${sb.aptSources}"
 export PATH APT_SOURCES_DIR
 log()  { echo "[deploy] $*"; }
