@@ -687,6 +687,8 @@ case "$ACTION" in
     if [[ $SKIP_APT -eq 0 ]]; then ensure_cookie_browser; fi
     # 确保 transmission 的两个目录存在 + 核对它实际用的目录（缺失会让 BT 静默失效）
     ensure_transmission_dirs
+    # 网络调优：跨国链路上单连接吞吐（--update 分支不会走到主流程，必须在这儿也调一次）
+    enable_bbr || true
 
   # 老部署升级时把"写死的并发上限"改成 0=不限：准入只该由磁盘空间决定。
   # 注意：.env 的优先级高于代码里的默认值，所以光改代码对**已部署的机器无效**，
