@@ -253,6 +253,12 @@ export function createPublishTask(opts: {
   parentTaskId: number;
   /** 扫货来源：发布成功后要删哪个目录、删哪个 transmission 任务 */
   harvest?: Record<string, unknown>;
+  /**
+   * 成品单元（一个单元 = 一个成品）。不传就按"files 全放一个单元"。
+   * 一个目录应当只建**一个**任务、带多个单元 —— 否则各单元的处理进度不一致时，
+   * 先完成的那个会把目录删掉，正在打包的那个源文件就没了（真踩过）。
+   */
+  units?: { files: string[]; name: string }[];
 }): number {
   const task = tasksRepo.create({
     module: opts.module,
@@ -266,13 +272,13 @@ export function createPublishTask(opts: {
     payload: {
       downloadedPaths: opts.files,
       originalName: opts.originalName,
-      publishUnits: [{ files: opts.files, name: opts.originalName }],
+      publishUnits: opts.units && opts.units.length ? opts.units : [{ files: opts.files, name: opts.originalName }],
       parentTaskId: opts.parentTaskId,
       ...(opts.harvest ? { harvest: opts.harvest } : { earlyHandoff: true }),
     },
   });
   taskLog(task.id, 'pipeline').mark('BT_EARLY',
-    `大文件已下完，提前进入归档（不等整个种子）: ${opts.originalName}`,
+    `进入归档：${opts.originalName}（${(opts.units ?? [{ files: opts.files }]).length} 个成品）`,
     { sizeBytes: opts.sizeBytes, parentTaskId: opts.parentTaskId, files: opts.files });
   bus.emitTask(tasksRepo.get(task.id));
   return task.id;

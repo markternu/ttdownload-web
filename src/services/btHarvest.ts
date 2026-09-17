@@ -142,9 +142,14 @@ function filesInFlight(): Set<string> {
 /** 这个目录是不是已经有发布任务在处理了（防止每个 tick 重复建任务） */
 function alreadyHarvesting(dir: string): boolean {
   const tasks = tasksRepo.list({ statuses: ['waiting', 'parsing', 'downloading', 'archiving', 'encrypting', 'paused'], pageSize: 500 }).items as TaskWithPayload[];
-  return tasks.some((t) => {
-    const h = (t.payload ?? {}).harvest as HarvestInfo | undefined;
-    return h?.dir === dir;
+  if (tasks.some((t) => ((t.payload ?? {}).harvest as HarvestInfo | undefined)?.dir === dir)) return true;
+  // 已经发布完、但还没做收尾（harvestDone）的也算 —— 中间可能隔着一次重启，
+  // 这时源文件还在目录里，不能再建一个任务。
+  const done = tasksRepo.list({ statuses: ['completed'], pageSize: 500 }).items as TaskWithPayload[];
+  return done.some((t) => {
+    const p = t.payload ?? {};
+    const h = p.harvest as HarvestInfo | undefined;
+    return h?.dir === dir && !p.harvestDone;
   });
 }
 
@@ -187,37 +192,37 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
           .find((t) => Number((t.payload ?? {}).torrentId ?? 0) === torrent.id)
       : undefined;
 
-    for (const u of units) {
-      if (dryRun) {
-        summary.published += 1;
-        continue;
-      }
-      const sizeBytes = u.files.reduce((sum, f) => sum + sizeOf(f), 0);
-      const id = createPublishTask({
-        module: 'transmission',
-        title: u.files.length > 1 ? `${entry.name}（${u.files.length}个文件）` : baseName(u.files[0]),
-        platform: 'BT',
-        files: u.files,
-        originalName: u.name,
-        sizeBytes,
-        parentTaskId: downloadTask ? Number(downloadTask.id) : 0,
-        harvest: {
-          dir: abs,
-          torrentId: torrent?.id,
-          torrentHash: torrent?.hashString,
-          torrentName: entry.name,
-          downloadTaskId: downloadTask ? Number(downloadTask.id) : undefined,
-          files: u.files,
-        },
-      });
-      summary.published += 1;
-      summary.tasks.push(id);
-      logger.child('bt-harvest').mark('BT_HARVEST',
-        `扫到货：${entry.name} → ${u.files.length} 个文件（${(sizeBytes / 1024 ** 2).toFixed(1)}MB）→ 任务 #${id}`, {
-          files: u.files.map((f) => path.basename(f)),
-          unitName: u.name,
-        });
+    // ⚠️ 一个目录只建**一个**任务（带多个成品单元）。若拆成多个任务，
+    //    先完成的那个会在收尾时把目录删掉，正在打包的那个源文件就没了。
+    const totalBytes = units.reduce((sum, u) => sum + u.files.reduce((a, f) => a + sizeOf(f), 0), 0);
+    if (dryRun) {
+      summary.published += units.length;
+      continue;
     }
+    const id = createPublishTask({
+      module: 'transmission',
+      title: entry.name,
+      platform: 'BT',
+      files: videos,
+      originalName: entry.name,
+      sizeBytes: totalBytes,
+      parentTaskId: downloadTask ? Number(downloadTask.id) : 0,
+      units,
+      harvest: {
+        dir: abs,
+        torrentId: torrent?.id,
+        torrentHash: torrent?.hashString,
+        torrentName: entry.name,
+        downloadTaskId: downloadTask ? Number(downloadTask.id) : undefined,
+        files: videos,
+      },
+    });
+    summary.published += units.length;
+    summary.tasks.push(id);
+    logger.child('bt-harvest').mark('BT_HARVEST',
+      `扫到货：${entry.name} → ${videos.length} 个视频 / ${units.length} 个成品（${(totalBytes / 1024 ** 2).toFixed(1)}MB）→ 任务 #${id}`, {
+        units: units.map((u) => ({ name: u.name, files: u.files.length })),
+      });
   }
 
   // ---------- ② incomplete 目录（只取已经下完的文件，绝不动任务和目录） ----------
@@ -316,7 +321,14 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
     }
 
     // 3b) 再删掉对应的文件夹（只删这一个种子自己的目录，走白名单安全检查）
-    if (h.dir) {
+    //     先确认"这个目录下没有别的活跃扫货任务"（防呆：一个目录本该只有一个任务）
+    const dirBusy = h.dir
+      ? (tasksRepo.list({ statuses: ['waiting', 'parsing', 'downloading', 'archiving', 'encrypting', 'paused'], pageSize: 500 }).items as TaskWithPayload[])
+          .some((x) => Number(x.id) !== Number(t.id) && ((x.payload ?? {}).harvest as HarvestInfo | undefined)?.dir === h.dir)
+      : false;
+    if (h.dir && dirBusy) {
+      logger.child('bt-harvest').mark('BT_HARVEST', `还有别的扫货任务在处理 ${h.dir}，暂不删目录`);
+    } else if (h.dir) {
       const freed = cleanupBtTaskDirs(t as Task, h.torrentName ?? path.basename(h.dir), 'bt-harvest');
       logger.child('bt-harvest').mark('BT_HARVEST',
         `扫货完成，已清理 ${h.dir}${freed ? `（释放 ${(freed / 1024 ** 2).toFixed(1)}MB）` : ''}`, { freedBytes: freed });

@@ -71,6 +71,7 @@ test('downloads：只有 1 个视频 -> 单独一个成品，然后删文件夹 
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0].payload.harvest.dir, dir, '要记住处理完删哪个文件夹');
   assert.deepEqual(tasks[0].payload.downloadedPaths, [path.join(dir, 'movie.mp4')]);
+  assert.equal(tasks[0].payload.publishUnits.length, 1, '1 个文件 -> 1 个成品单元');
 
   // 再 tick 一次不该重复建任务
   const s2 = await btHarvestTick();
@@ -99,8 +100,10 @@ test('downloads：多个视频全都小于阈值 -> 合成一个 zip', async () 
 
   await btHarvestTick();
   const tasks = harvestTasks();
-  assert.equal(tasks.length, 1, '小文件应合成一个成品');
-  assert.equal(tasks[0].payload.downloadedPaths.length, 3, '三个视频进同一个包（图片不算）');
+  assert.equal(tasks.length, 1, '一个目录只建一个任务');
+  const units = tasks[0].payload.publishUnits;
+  assert.equal(units.length, 1, '小文件应合成一个成品单元');
+  assert.equal(units[0].files.length, 3, '三个视频进同一个包（图片不算）');
 });
 
 test('downloads：有文件 >= 阈值 -> 大文件各自单独，小的合成一个', async () => {
@@ -113,11 +116,13 @@ test('downloads：有文件 >= 阈值 -> 大文件各自单独，小的合成一
 
   await btHarvestTick();
   const tasks = harvestTasks();
-  const singles = tasks.filter((t) => (t.payload.downloadedPaths ?? []).length === 1);
-  const batch = tasks.filter((t) => (t.payload.downloadedPaths ?? []).length > 1);
-  assert.equal(singles.length, 2, '两个大文件各自一个成品');
-  assert.equal(batch.length, 1, '两个小文件合成一个成品');
-  assert.equal(tasks.length, 3);
+  assert.equal(tasks.length, 1, '一个目录只建一个任务（内部拆多个成品单元）');
+  const units = tasks[0].payload.publishUnits;
+  const singles = units.filter((u) => u.files.length === 1);
+  const batch = units.filter((u) => u.files.length > 1);
+  assert.equal(singles.length, 2, '两个大文件各自一个成品单元');
+  assert.equal(batch.length, 1, '两个小文件合成一个成品单元');
+  assert.equal(units.length, 3);
 });
 
 test('incomplete：只有 1 个文件 -> 跳过（还没下完）', async () => {
@@ -144,7 +149,7 @@ test('incomplete：多个文件中已下完的那些 -> 交出去，但不动文
   const s = await btHarvestTick();
   assert.equal(s.published, 1, '已下完的那个应该被交出去');
   const tasks = harvestTasks();
-  assert.deepEqual(tasks[0].payload.downloadedPaths, [path.join(dir, 'done.mp4')]);
+  assert.deepEqual(tasks[0].payload.publishUnits[0].files, [path.join(dir, 'done.mp4')]);
   assert.equal(tasks[0].payload.harvest.dir, undefined, 'incomplete 不删文件夹');
   assert.equal(fs.existsSync(dir), true, '文件夹必须保留（还在下）');
   assert.equal(mock.state.removed.length, 0, 'transmission 任务必须保留');
@@ -152,4 +157,35 @@ test('incomplete：多个文件中已下完的那些 -> 交出去，但不动文
   // 再 tick 不会重复交同一个文件
   const s2 = await btHarvestTick();
   assert.equal(s2.published, 0, '交过的文件不重复交');
+});
+
+test('一个任务带多个成品单元 -> 流水线产出多个成品（大文件各自单独发布的关键路径）', async () => {
+  const dir = path.join(completeDir, 'Multi');
+  writeFile(path.join(dir, 'big1.mp4'), 500);
+  writeFile(path.join(dir, 'big2.mp4'), 400);
+  writeFile(path.join(dir, 'small1.mp4'), 20);
+  writeFile(path.join(dir, 'small2.mp4'), 30);
+  mock.state.torrents = [{ id: 9, name: 'Multi', hashString: 'h9', percentDone: 1 }];
+
+  await btHarvestTick();
+  const tasks = harvestTasks();
+  assert.equal(tasks.length, 1, '一个目录一个任务');
+  assert.equal(tasks[0].payload.publishUnits.length, 3, '两个大文件各自一个 + 小文件一个 = 3 个成品');
+
+  // 走完流水线：归档（单元1单独移动/单元2单独移动/单元3打成zip）→ 加密 → 发布
+  await pipelineTick();
+  await pipelineTick();
+  await pipelineTick();
+  const after = tasksRepo.get(tasks[0].id);
+  assert.equal(after.status, 'completed', after.error ?? '');
+  const fileIds = (after.payload ?? {}).fileIds ?? [];
+  assert.equal(fileIds.length, 3, `应该发布了 3 个成品，实际 ${fileIds.length}`);
+
+  // 三个成品都真的落到消费者目录了
+  const { filesRepo } = await import('../dist/core/db.js');
+  for (const id of fileIds) {
+    const f = filesRepo.get(id);
+    assert.ok(f, '成品记录应存在');
+    assert.equal(fs.existsSync(f.path), true, `成品文件应存在: ${f.path}`);
+  }
 });
