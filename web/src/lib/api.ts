@@ -360,6 +360,7 @@ export const api = {
       sort: query.sort,
       page: query.page,
       pageSize: query.pageSize,
+      kind: query.kind,
     }),
 
   task: (id: number) => request<Task>(`/api/tasks/${id}`),

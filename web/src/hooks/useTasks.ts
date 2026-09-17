@@ -30,7 +30,7 @@ export interface UseTasksResult {
  * - 存在活动任务时按 3 秒轮询兜底（SSE 不可用的降级方案）。
  */
 export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): UseTasksResult {
-  const { module = '', status = '', q = '', sort = 'created_desc', pageSize = 20 } = query
+  const { module = '', status = '', q = '', sort = 'created_desc', pageSize = 20, kind } = query
   const [page, setPage] = useState(query.page ?? 1)
   const [tasks, setTasks] = useState<Task[]>([])
   const [total, setTotal] = useState(0)
@@ -38,8 +38,8 @@ export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): Us
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [pendingIds, setPendingIds] = useState<number[]>([])
-  const queryRef = useRef({ module, status, q, sort, pageSize, page })
-  queryRef.current = { module, status, q, sort, pageSize, page }
+  const queryRef = useRef({ module, status, q, sort, pageSize, page, kind })
+  queryRef.current = { module, status, q, sort, pageSize, page, kind }
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
@@ -51,6 +51,7 @@ export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): Us
         sort,
         page: queryRef.current.page,
         pageSize,
+        kind,
       })
       setTasks(res.items ?? [])
       setTotal(res.total ?? 0)
@@ -61,7 +62,7 @@ export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): Us
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [module, status, q, sort, pageSize])
+  }, [module, status, q, sort, pageSize, kind])
 
   // 条件变化时回到第一页并重新加载
   useEffect(() => {

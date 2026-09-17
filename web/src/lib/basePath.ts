@@ -21,6 +21,12 @@
 export const APP_ROUTES = [
   'login',
   'tasks',
+  // ⚠️ 任务区的三个独立列表页。**必须用单段路径**：index.html 用的是相对资源路径
+  //    （Vite base: './'，为了兼容子路径部署），两段式 URL（如 /tasks/waiting）会让
+  //    ./assets/*.js 解析成 /tasks/assets/*.js → 服务器回退成 index.html → 白屏。
+  'tasks-waiting',
+  'tasks-publish',
+  'tasks-other',
   'history',
   'dashboard',
   'aria2',

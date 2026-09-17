@@ -19,12 +19,15 @@ tasksRouter.get('/', (req, res) => {
     .split(',')
     .map((s) => s.trim())
     .filter((s): s is TaskStatus => STATUSES.includes(s as TaskStatus));
+  const kindRaw = String(req.query.kind ?? '');
+  const kind = kindRaw === 'download' || kindRaw === 'publish' ? (kindRaw as 'download' | 'publish') : undefined;
   const page = Number(req.query.page ?? 1) || 1;
   const pageSize = Number(req.query.pageSize ?? 20) || 20;
   const filter = {
     modules: modules.length ? modules : undefined,
     statuses: statuses.length ? statuses : undefined,
     q: req.query.q ? String(req.query.q) : undefined,
+    kind,
   };
   const { items, total } = tasksRepo.list({
     ...filter,

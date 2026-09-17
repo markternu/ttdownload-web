@@ -518,6 +518,8 @@ export interface TaskQuery {
   sort?: string
   page?: number
   pageSize?: number
+  /** download = 下载任务；publish = 归档发布子任务 */
+  kind?: 'download' | 'publish'
 }
 
 /* ------------------------------ 日志 / 调试 ------------------------------ */

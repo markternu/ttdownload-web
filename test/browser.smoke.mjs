@@ -500,6 +500,38 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
+  test('★任务区：一级页面只放"正在下载/已下载"，排队/扫货/其它各有独立页面且给入口', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/tasks`, { waitUntil: 'networkidle' });
+
+    // 一级页面必须给出三个入口
+    for (const label of ['排队下载', '归档发布（扫货）', '其它任务']) {
+      const link = page.getByText(label, { exact: false }).first();
+      await link.waitFor({ state: 'visible', timeout: 15000 });
+      assert.ok(await link.isVisible(), `一级任务页应有「${label}」入口`);
+    }
+    // 一级页面不该出现"排队中/归档发布"这类分区标题（它们已挪到各自的页面）
+    const body = (await page.locator('main, body').first().innerText()).replace(/\s+/g, ' ');
+    assert.equal(body.includes('等待并发名额或磁盘空间放行'), false, '一级页面不应再显示排队分区');
+
+    // 点进"归档发布"独立页：地址要对、标题要对、且带"返回下载任务"
+    await page.getByText('归档发布（扫货）', { exact: false }).first().click();
+    await page.waitForURL(/\/tasks-publish/, { timeout: 15000 });
+    await page.waitForTimeout(400);
+    const publishBody = (await page.locator('main, body').first().innerText()).replace(/\s+/g, ' ');
+    assert.ok(publishBody.includes('归档发布'), '独立页标题应含「归档发布」');
+    assert.ok(publishBody.includes('返回下载任务'), '独立页应能返回一级页面');
+
+    // 另外两个独立页也要能直接打开（不报错、有返回入口）
+    for (const sub of ['tasks-waiting', 'tasks-other']) {
+      await page.goto(`${base}/${sub}`, { waitUntil: 'networkidle' });
+      await page.waitForTimeout(300);
+      const text = (await page.locator('main, body').first().innerText()).replace(/\s+/g, ' ');
+      assert.ok(text.includes('返回下载任务'), `/tasks/${sub} 应有返回入口`);
+    }
+  });
+
   test('★回归：解析中途点侧边栏去「任务」再回「首页」，解析不能丢（原来会变成空首页）', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     process.env.BROWSER_PARSE_DELAY = '6'; // 让解析慢 6 秒，好切走

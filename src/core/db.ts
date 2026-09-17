@@ -192,9 +192,15 @@ function taskWhere(opts: {
   statuses?: TaskStatus[];
   ids?: number[];
   q?: string;
+  /** download = 下载任务；publish = 扫货产生的「归档→加密→发布」子任务；不传 = 全部 */
+  kind?: 'download' | 'publish';
 }): { whereSql: string; args: unknown[] } {
   const where: string[] = [];
   const args: unknown[] = [];
+  const IS_PUBLISH =
+    "(json_extract(payload_json,'$.harvest') IS NOT NULL OR json_extract(payload_json,'$.earlyHandoff') IS NOT NULL)";
+  if (opts.kind === 'publish') where.push(IS_PUBLISH);
+  else if (opts.kind === 'download') where.push(`NOT ${IS_PUBLISH}`);
   if (opts.modules?.length) {
     where.push(`module IN (${opts.modules.map(() => '?').join(',')})`);
     args.push(...opts.modules);
@@ -295,6 +301,8 @@ export const tasksRepo = {
     page?: number;
     pageSize?: number;
     ids?: number[];
+    /** download = 下载任务；publish = 归档发布子任务；不传 = 全部 */
+    kind?: 'download' | 'publish';
   }): { items: Task[]; total: number } {
     const { whereSql, args } = taskWhere(opts);
     const total = (db.prepare(`SELECT COUNT(*) c FROM tasks ${whereSql}`).get(...(args as never[])) as { c: number }).c;
@@ -325,7 +333,7 @@ export const tasksRepo = {
    * 于是 14 个种子在页面上显示成 23 个任务，用户以为计数坏了，其实只是没说明白。
    * 这里用**和 total 完全相同的 where 条件**统计，页面才能把 23 解释成「下载 14 + 发布 9」。
    */
-  summary(opts: { modules?: ModuleId[]; statuses?: TaskStatus[]; q?: string }): {
+  summary(opts: { modules?: ModuleId[]; statuses?: TaskStatus[]; q?: string; kind?: 'download' | 'publish' }): {
     byStatus: Record<string, number>;
     download: number;
     publish: number;

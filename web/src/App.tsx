@@ -66,6 +66,18 @@ export default function App() {
                 </Suspense>
               }
             />
+            {/* 任务区的独立列表页（一级任务页给入口） */}
+            {(['tasks-waiting', 'tasks-publish', 'tasks-other'] as const).map((sub) => (
+              <Route
+                key={sub}
+                path={`/${sub}`}
+                element={
+                  <Suspense fallback={<LoadingBlock text="正在加载任务列表…" />}>
+                    <TasksPage />
+                  </Suspense>
+                }
+              />
+            ))}
             <Route
               path="/history"
               element={

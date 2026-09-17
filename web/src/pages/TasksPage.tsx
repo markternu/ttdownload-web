@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 import { TaskFilterBar } from '../components/task/TaskFilterBar'
 import type { ViewMode } from '../components/task/TaskFilterBar'
 import { TaskCard } from '../components/task/TaskCard'
@@ -36,7 +37,7 @@ import {
   isPublishTask,
 } from '../lib/format'
 import type { Task } from '../types'
-import { AlertTriangle, Archive, CheckCircle2, Clock, Download, Loader2, PauseCircle } from 'lucide-react'
+import { AlertTriangle, Archive, ArrowLeft, CheckCircle2, ChevronRight, Clock, Download, Loader2, PauseCircle } from 'lucide-react'
 
 interface SectionConfig {
   key: string
@@ -47,17 +48,112 @@ interface SectionConfig {
 }
 
 const SECTIONS: SectionConfig[] = [
-  { key: 'downloading', title: '下载中', description: '正在下载 / 暂停', tone: 'brand', icon: Download },
-  { key: 'waiting', title: '等待中', description: '等待并发名额或磁盘空间放行', tone: 'warning', icon: Clock },
+  { key: 'downloading', title: '正在下载', description: '正在下载 / 暂停', tone: 'brand', icon: Download },
+  { key: 'waiting', title: '排队中', description: '等待并发名额或磁盘空间放行', tone: 'warning', icon: Clock },
   { key: 'publish', title: '归档发布', description: '扫货后归档 → 加密 → 发布（种子下载产生的子任务，不算种子任务）', tone: 'success', icon: Archive },
-  { key: 'finished', title: '已完成', description: '已发布到消费者目录', tone: 'success', icon: CheckCircle2 },
-  { key: 'failed', title: '失败', description: '可重试或删除', tone: 'danger', icon: AlertTriangle },
+  { key: 'finished', title: '已下载', description: '已完成并进入归档/发布流程', tone: 'success', icon: CheckCircle2 },
+  { key: 'failed', title: '失败 / 已取消', description: '可重试或删除', tone: 'danger', icon: AlertTriangle },
 ]
+
+/**
+ * 任务区的视图（一级页面 + 各自的独立页面）。
+ *
+ * 用户要求：**一级页面只展示"正在下载"和"已下载"**；排队下载、扫货（归档发布）、
+ * 其它任务各自有独立页面，一级页面给入口点进去。文件大小只在各自的列表页显示。
+ */
+type ViewKey = 'main' | 'waiting' | 'publish' | 'other'
+
+interface ViewConfig {
+  key: ViewKey
+  path: string
+  title: string
+  description: string
+  /** 固定筛选：状态（空 = 不限制） */
+  statuses: string
+  /** 固定筛选：download=下载任务 / publish=归档发布子任务 */
+  kind?: 'download' | 'publish'
+  /** 一级页面固定为"下载中 + 已下载"两档 */
+  sections: string[]
+  /** 是否显示文件大小 */
+  showSize: boolean
+  /** 一级页面的入口卡片 */
+  entries: { to: string; label: string; hint: string; icon: typeof Download; count: (s: StatsLike) => number }[]
+  emptyHint: string
+}
+
+type StatsLike = { waiting?: number; failed?: number; publishTasks?: number; publishing?: number }
+
+const VIEWS: Record<ViewKey, ViewConfig> = {
+  main: {
+    key: 'main',
+    path: '/tasks',
+    title: '下载任务',
+    description: '正在下载与已经下载完成的任务（不含排队、归档发布等）',
+    statuses: 'downloading,parsing,paused,completed',
+    kind: 'download',
+    sections: ['downloading', 'finished'],
+    showSize: false,
+    entries: [
+      { to: '/tasks-waiting', label: '排队下载', hint: '等磁盘空间/并发名额', icon: Clock, count: (s) => s.waiting ?? 0 },
+      { to: '/tasks-publish', label: '归档发布（扫货）', hint: '归档 → 加密 → 发布', icon: Archive, count: (s) => s.publishTasks ?? 0 },
+      { to: '/tasks-other', label: '其它任务', hint: '失败 / 已取消', icon: AlertTriangle, count: (s) => s.failed ?? 0 },
+    ],
+    emptyHint: '还没有下载任务。回到首页粘贴链接，或在「BT 种子下载」页上传种子。',
+  },
+  waiting: {
+    key: 'waiting',
+    path: '/tasks-waiting',
+    title: '排队下载',
+    description: '等待放行的任务（磁盘空间或并发名额）',
+    statuses: 'waiting,paused',
+    kind: 'download',
+    sections: ['waiting', 'downloading'],
+    showSize: true,
+    entries: [],
+    emptyHint: '队列是空的，没有任务在排队。',
+  },
+  publish: {
+    key: 'publish',
+    path: '/tasks-publish',
+    title: '归档发布（扫货任务）',
+    description: 'BT 扫货把下好的文件交付归档 → 加密 → 发布；这些是下载任务产生的子任务',
+    statuses: '',
+    kind: 'publish',
+    sections: ['downloading', 'publish', 'finished', 'failed'],
+    showSize: true,
+    entries: [],
+    emptyHint: '暂无归档发布任务。',
+  },
+  other: {
+    key: 'other',
+    path: '/tasks-other',
+    title: '其它任务',
+    description: '失败与已取消的任务',
+    statuses: 'failed,cancelled',
+    kind: 'download',
+    sections: ['failed', 'finished'],
+    showSize: true,
+    entries: [],
+    emptyHint: '没有失败或已取消的任务。',
+  },
+}
+
+function viewFromPath(pathname: string): ViewKey {
+  if (pathname.endsWith('/tasks-waiting')) return 'waiting'
+  if (pathname.endsWith('/tasks-publish')) return 'publish'
+  if (pathname.endsWith('/tasks-other')) return 'other'
+  return 'main'
+}
 
 export default function TasksPage() {
   const toast = useToast()
-  const { sseStatus } = useAppData()
+  const { stats, sseStatus } = useAppData()
   const isMobile = useMediaQuery('(max-width: 767px)')
+  const { pathname } = useLocation()
+  const pageView = viewFromPath(pathname)
+  const cfg = VIEWS[pageView]
+  const isMain = pageView === 'main'
+  const shownSections = SECTIONS.filter((s) => cfg.sections.includes(s.key))
 
   const [module, setModule] = useState('')
   const [status, setStatus] = useState('')
@@ -67,9 +163,11 @@ export default function TasksPage() {
   const [page, setPage] = useState(1)
 
   const debouncedQuery = useDebouncedValue(query, 350)
-  const { tasks, total, loading, error, refresh, act, summary } = useTasks({
+  // 独立页面用**固定筛选**（排队/扫货/其它各自的口径），一级页面固定为"下载中 + 已下载"
+  const { tasks, total, loading, error, refresh, act } = useTasks({
     module: module as '' | 'transmission' | 'aria2' | 'webvideo',
-    status,
+    status: cfg.statuses || status,
+    kind: cfg.kind,
     q: debouncedQuery,
     sort,
     page,
@@ -90,7 +188,7 @@ export default function TasksPage() {
     }
   }
 
-  const columns: Column<Task>[] = [
+  const allColumns: Column<Task>[] = [
     {
       key: 'title',
       header: '任务',
@@ -195,18 +293,25 @@ export default function TasksPage() {
     },
   ]
 
+  // 文件大小只在"各自的列表页面"显示（一级页面不显示）
+  const columns = cfg.showSize ? allColumns : allColumns.filter((c) => c.key !== 'size')
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">下载任务</h2>
+          {!isMain ? (
+            <Link
+              to="/tasks"
+              className="mb-1 inline-flex items-center gap-1 text-xs text-brand-600 hover:underline dark:text-brand-400"
+            >
+              <ArrowLeft className="h-3 w-3" />
+              返回下载任务
+            </Link>
+          ) : null}
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">{cfg.title}</h2>
           <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            共 {total} 个任务
-            {summary && summary.publish > 0 ? (
-              <span className="text-slate-400 dark:text-slate-500">
-                （种子下载 {summary.download} · 归档发布 {summary.publish}）
-              </span>
-            ) : null}
+            {cfg.description} · 共 {total} 个
             {' · '}
             {sseStatus === 'open' ? (
               <span className="text-emerald-600 dark:text-emerald-400">实时更新已连接</span>
@@ -223,6 +328,36 @@ export default function TasksPage() {
         </Button>
       </div>
 
+      {isMain ? (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          {cfg.entries.map((e) => {
+            const Icon = e.icon
+            return (
+              <Link
+                key={e.to}
+                to={e.to}
+                className="group flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 transition hover:border-brand-300 hover:shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:hover:border-brand-600"
+              >
+                <span className="flex items-center gap-3">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                    <Icon className="h-4 w-4" />
+                  </span>
+                  <span>
+                    <span className="block text-sm font-medium text-slate-800 dark:text-slate-100">{e.label}</span>
+                    <span className="block text-xs text-slate-400">{e.hint}</span>
+                  </span>
+                </span>
+                <span className="flex items-center gap-1 text-sm font-semibold tabular-nums text-slate-500 dark:text-slate-300">
+                  {e.count((stats ?? {}) as StatsLike)}
+                  <ChevronRight className="h-4 w-4 text-slate-300 transition group-hover:text-brand-500" />
+                </span>
+              </Link>
+            )
+          })}
+        </div>
+      ) : null}
+
+      {isMain ? (
       <TaskFilterBar
         module={module}
         status={status}
@@ -242,19 +377,17 @@ export default function TasksPage() {
           setSort('created_desc')
         }}
       />
+      ) : null}
 
       {error ? (
         <ErrorState message={`加载任务失败：${error}`} onRetry={() => void refresh()} />
       ) : loading && !tasks.length ? (
         <LoadingBlock text="正在加载任务列表…" />
       ) : !tasks.length ? (
-        <EmptyState
-          title="没有匹配的任务"
-          description="调整筛选条件，或回到首页粘贴视频链接创建新的下载任务。"
-        />
+        <EmptyState title="没有匹配的任务" description={cfg.emptyHint} />
       ) : (
         <div className="space-y-6">
-          {SECTIONS.map((section) => {
+          {shownSections.map((section) => {
             const list = sections[section.key as keyof typeof sections] ?? []
             if (!list.length) return null
             const Icon = section.icon
@@ -294,6 +427,7 @@ export default function TasksPage() {
                       <TaskCard
                         key={task.id}
                         task={task}
+                        showSize={cfg.showSize}
                         onChanged={() => void refresh()}
                         onError={handleError}
                       />

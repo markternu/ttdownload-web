@@ -31,10 +31,12 @@ export interface TaskCardProps {
   className?: string
   /** 紧凑模式（Dashboard 最近任务） */
   compact?: boolean
+  /** 是否显示文件大小（一级任务页不显示，各自列表页显示） */
+  showSize?: boolean
 }
 
 /** 任务卡片：移动端与卡片视图使用，突出下载进度 */
-export function TaskCard({ task, onChanged, onError, className, compact = false }: TaskCardProps) {
+export function TaskCard({ task, onChanged, onError, className, compact = false, showSize = true }: TaskCardProps) {
   const meta = statusMeta(task.status)
   const Icon = MODULE_ICON[task.module] ?? Download
   const size = taskSizeBytes(task)
@@ -110,11 +112,13 @@ export function TaskCard({ task, onChanged, onError, className, compact = false 
           ) : null}
 
           <dl className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-slate-500 sm:grid-cols-4 dark:text-slate-400">
-            <div className="inline-flex items-center gap-1">
-              <HardDrive className="h-3 w-3" />
-              <dt className="sr-only">大小</dt>
-              <dd className="tabular-nums">{formatBytes(size, '未知')}</dd>
-            </div>
+            {showSize ? (
+              <div className="inline-flex items-center gap-1">
+                <HardDrive className="h-3 w-3" />
+                <dt className="sr-only">大小</dt>
+                <dd className="tabular-nums">{formatBytes(size, '未知')}</dd>
+              </div>
+            ) : null}
             <div className="inline-flex items-center gap-1">
               <Gauge className="h-3 w-3" />
               <dt className="sr-only">速度</dt>
