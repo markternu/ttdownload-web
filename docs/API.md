@@ -187,7 +187,7 @@ interface SeedItem {
   name: string;               // 种子文件名
   path: string;               // btzhongzi_nodownd 下的路径
   status: 'pending' | 'queued' | 'downloading' | 'done' | 'failed';
-  sizeBytes: number;          // 视频+图片总大小（0=未解析）
+  sizeBytes: number;          // 选中视频的总大小（0=未解析；只下视频，不选图片）
   fileCount: number;          // 选中的文件数
   taskId?: number | null;
   error?: string | null;

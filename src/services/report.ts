@@ -17,6 +17,7 @@ import { computeStats, dbFileSize, logsRepo, tasksRepo } from '../core/db';
 import { dirUsage, freeBytes, statfsBytes, toolStatus, usableBytes } from '../core/disk';
 import { listLogFiles, logger, readLogFile, redact } from '../core/logger';
 import { runCommand } from './archive';
+import { HIDDEN_NAME, hidePathDeep, hideText } from './btAnon';
 import { getSettings, getSettingsPublic } from './settings';
 import type { Task } from '../types';
 
@@ -151,6 +152,50 @@ export async function systemInfo(): Promise<Record<string, unknown>> {
   };
 }
 
+/**
+ * 导出/诊断报告专用的任务副本。
+ *
+ * 报告是**要发给开发者**的（README 里就是这么写的），所以 BT 任务的标题、种子名、
+ * 内容文件名、完整路径都要去掉 —— 否则用户一发报告就把下载内容泄露出去了。
+ * 注意：数据库与网页界面里的真实标题照旧（用户自己要看到），这里只影响导出物。
+ */
+export function taskForExport(t: Task): Task {
+  if (t.module !== 'transmission') return t;
+  const task = t as Task & { payload?: Record<string, unknown>; meta?: { files?: string[] } };
+  const p = (task.payload ?? {}) as Record<string, unknown>;
+  const harvest = (p.harvest ?? {}) as Record<string, unknown>;
+  const hideAll = (v: unknown): unknown =>
+    Array.isArray(v) ? v.map((x) => hidePathDeep(String(x))) : v === undefined ? v : HIDDEN_NAME;
+  return {
+    ...t,
+    title: HIDDEN_NAME,
+    error: t.error ? hideText(t.error) : t.error,
+    meta: task.meta ? { ...task.meta, files: (task.meta.files ?? []).map(() => HIDDEN_NAME) } : task.meta,
+    payload: {
+      ...p,
+      seedPath: p.seedPath ? HIDDEN_NAME : p.seedPath,
+      torrentName: p.torrentName ? HIDDEN_NAME : p.torrentName,
+      originalName: p.originalName ? HIDDEN_NAME : p.originalName,
+      pendingDirCleanupName: p.pendingDirCleanupName ? HIDDEN_NAME : p.pendingDirCleanupName,
+      downloadedPaths: hideAll(p.downloadedPaths),
+      harvestedFiles: hideAll(p.harvestedFiles),
+      publishUnits: Array.isArray(p.publishUnits)
+        ? (p.publishUnits as Record<string, unknown>[]).map((u) => ({
+            ...u,
+            name: HIDDEN_NAME,
+            files: hideAll(u.files),
+          }))
+        : p.publishUnits,
+      harvest: {
+        ...harvest,
+        torrentName: harvest.torrentName ? HIDDEN_NAME : harvest.torrentName,
+        dir: harvest.dir ? hidePathDeep(String(harvest.dir)) : harvest.dir,
+        files: hideAll(harvest.files),
+      },
+    },
+  } as Task;
+}
+
 /** 任务清单 + 失败明细 */
 export function tasksReport(limit = 200): {
   total: number;
@@ -159,9 +204,11 @@ export function tasksReport(limit = 200): {
   items: Task[];
 } {
   const all = tasksRepo.list({ pageSize: limit });
+  // 导出物里 BT 一律脱敏（app.log 那侧由日志层保证）
+  const items = all.items.map(taskForExport);
   const byStatus: Record<string, number> = {};
-  for (const t of all.items) byStatus[t.status] = (byStatus[t.status] ?? 0) + 1;
-  const failed = all.items
+  for (const t of items) byStatus[t.status] = (byStatus[t.status] ?? 0) + 1;
+  const failed = items
     .filter((t) => t.status === 'failed')
     .map((t) => ({
       id: t.id,
@@ -172,7 +219,7 @@ export function tasksReport(limit = 200): {
       retryCount: Number((t as Task & { retryCount?: number }).retryCount ?? 0),
       updatedAt: (t.finishedAt ?? t.createdAt) as string,
     }));
-  return { total: all.total, byStatus, failed, items: all.items };
+  return { total: all.total, byStatus, failed, items };
 }
 
 /** 只保留 WARN/ERROR（以及失败标记）的日志摘要，体积小、重点突出 */
@@ -184,7 +231,8 @@ export function errorsLog(maxLines = 5000): string {
       if (!line) continue;
       if (
         /\[(WARN|ERROR)\s*\]/.test(line) ||
-        /MARK:(TASK_FAIL|TASK_RETRY|HTTP_ERR|ERROR|PROC_EXIT|YTDLP_EXIT|BT_EVICT)\b/.test(line)
+        // BT 的关键节点大多是 INFO 级（挑片/备好/扫货/超时/清理），排障时必须能一眼看到
+        /MARK:(TASK_FAIL|TASK_RETRY|HTTP_ERR|ERROR|PROC_EXIT|YTDLP_EXIT|BT_EVICT|BT_SELECT|BT_PICK|BT_PREPARE|BT_SEED_DELETED|BT_EARLY|BT_HARVEST|BT_TIMEOUT_GRACE|BT_TIMEOUT_DROP|BT_CLEANUP|BT_CLEANUP_SHARED|SPACE_FREED)\b/.test(line)
       ) {
         lines.push(`[${f.name}] ${line}`);
       }
@@ -259,7 +307,8 @@ const README = (generatedAt: string): string => {
   3) 每个日志行都带标记 [MARK:XXX]，含义见 markers.json
 
 隐私：报告中的 token / 密码 / secret 等字段已自动替换为 ***；
-      日志里可能包含视频 URL、种子名称等，如介意可自行删除对应行。
+      BT 相关的种子名与内容文件名也不会出现在日志和任务清单里（统一显示为「${HIDDEN_NAME}」）。
+      日志里仍可能包含其它模块（在线视频/直链）的标题与 URL，如介意可自行删除对应行。
 `;
 };
 

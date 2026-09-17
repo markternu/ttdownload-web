@@ -19,18 +19,30 @@
 
 | 模块 | 入口 | 下载目录 | 完成后 |
 | --- | --- | --- | --- |
-| transmission（BT 种子） | 上传 zip（自动解压出 `.torrent`）/ 种子列表入队 | `transmission/downloads/<种子名>` | 只保留下载**视频+图片**，多文件打 zip，统一命名后归档 |
+| transmission（BT 种子） | 上传 zip（自动解压出 `.torrent`）/ 种子列表入队 | transmission 自己的 `downloads`（我们绝不覆盖它的 `download-dir`） | **只下视频**；下好的由「扫货」按 300MB 规则打包/单独走，删目录+删任务 |
 | aria2（URL 直链） | Web 文本框，一行一个 URL（可多行） | `downd_aria2_path` | 单文件直接归档（判定：任务完成且无 `.aria2` 控制文件） |
 | 公开视频URL（yt-dlp） | 粘贴视频链接 → 解析 → 选质量 → 加入队列 | `downd_web_tools` | 单文件归档 |
 
 统一的后续流水线：`归档(downd_ok_p2) → AES-256-CBC 加密 → 去后缀 → 发布(xiaofeizhe_downd)`，
 命名沿用老脚本规则（3 字母随机前缀 + 递增序号，V-L-T `FKY996` 标记保留原始文件名，PC 端可解密还原）。
 
-**BT 出清机制**：识别"永远下不完"的 BT 任务（① 完全无资源 ② 中途停滞 ③ 还有资源但极慢），
-按调度删除任务并清理 transmission incomplete 目录（默认 `/var/lib/transmission/incomplete`）；
-**硬门槛：只有实际下载尝试 ≥10 小时的任务才参与判断**（因空间不足暂停的时间不计入）；
-进度 ≥79% 的视频按"未下完但可播放"处理 —— 移交归档加密发布而**不删除**；
-每次出清都会**广播"空间已腾挪"**，等待队列立即重新评估。
+**BT 下载规则（只下视频 + 挑同类）**：加种子时先以**暂停**状态加入 transmission，只勾选视频
+（扩展名白名单，大小写不敏感），**不做任何"广告识别"**（那种猜测会把正片误杀）；一个种子里有多个
+视频时"**独树一帜下最大、相差无几一起下**"（最大的 ≥ 第二大的 5 倍就只下最大的；最大的本身不到
+200MB 而后面有一堆小文件时，改下那堆小的）。
+
+**BT 8 小时/4 小时超时策略**：种子交给 transmission 之后 **8 小时内只读进度、绝不干涉**（有的资源
+这会儿没速度，过一小时才上线）；满 8 小时进度仍 ≤60% → 清理；>60% → 再宽限 4 小时，到点还没完也清理。
+已经下完的由「扫货」拿走。每次清理都会**广播"空间已腾挪"**，等待队列立即重新评估。
+
+**BT 扫货（harvest）**：每 2 分钟扫 transmission 的 `downloads` / `incomplete` 两个目录 ——
+`downloads` 里 1 个视频就单独走、一堆小于 300MB 的合成一个 zip、有 ≥300MB 的各自单独走，发布成功后
+删目录 + 删 transmission 任务；`incomplete` 里只取**已经下完**的文件交出去，**绝不动目录和任务**。
+一个目录只建一个发布任务（内部带多个成品单元），避免先完成的任务把别人正在打包的源文件删掉。
+
+**BT 日志不含内容名**：种子名、视频文件名、以及带这些名字的路径，**一律不出现在日志里**
+（统一显示「（名称已隐藏）」；数据库和网页界面里的真实标题照旧）。排查用的标记见
+`docs/HANDOVER.md` §6，回归测试 `test/bt-log-redaction.test.mjs`。
 
 **自动化 cookies（不用人工天天导出）**：抖音/TikTok 这类站点要的是浏览器生成的「新鲜访客
 cookies」（几小时就过期），程序会**自动获取**（优先纯 HTTP 拿 `ttwid`，约 1 秒；失败退回无头
@@ -232,13 +244,15 @@ docker compose up -d
 | `ANDROID_TOKEN` | 无 | 安卓接口 Token；不配置则安卓接口关闭（401） |
 | `ARIA2_RPC_HOST/PORT/SECRET` | 127.0.0.1 / 6800 / 空 | aria2 RPC（应用会在未启动时自动拉起 aria2c） |
 | `TRANSMISSION_RPC_HOST/PORT/USER/PASSWORD` | 127.0.0.1 / 9091 / 空 | transmission RPC |
-| `TRANSMISSION_INCOMPLETE_DIR` | /var/lib/transmission/incomplete | BT 出清时一并删除该目录下对应任务的文件夹 |
-| `BT_EVICT_ENABLED` | 1 | 是否启用 BT 出清 |
-| `BT_EVICT_MIN_AGE_HOURS` | 10 | 硬门槛：实际下载尝试满多少小时才参与出清判断 |
-| `BT_EVICT_SALVAGE_PERCENT` | 79 | 进度达到该值且是视频 -> 按"可播放视为完整"移交归档 |
-| `BT_EVICT_STALL_MINUTES` | 30 | 速率 0 且停滞超过该时长 -> 判定无资源 |
-| `BT_EVICT_SLOW_KBPS` / `BT_EVICT_SLOW_ETA_HOURS` | 20 / 72 | 极慢判定：速率低于该值且预计剩余超过该时长 |
-| `BT_EVICT_CHECK_INTERVAL_MIN` | 5 | 出清检查周期（分钟） |
+| `TRANSMISSION_INCOMPLETE_DIR` | /var/lib/transmission/incomplete | transmission 的未完成目录（扫货只读它、只取已下完的文件） |
+| `BT_DOWNLOAD_DIR` | /var/lib/transmission/downloads | transmission 的完成目录（扫货的来源；**不能改成我们自己的目录**） |
+| `BT_CHECK_AFTER_HOURS` | 8 | 交给 transmission 多少小时后第一次判断超时 |
+| `BT_MIN_PROGRESS_PERCENT` | 60 | 到点时进度 ≤ 该值 -> 直接清理；> 该值 -> 进宽限期 |
+| `BT_GRACE_HOURS` | 4 | 宽限期时长（所以最晚 12 小时清理） |
+| `BT_SMALL_FILE_MAX` | 300MB | 扫货打包阈值：小于它的小文件合成一个 zip，≥ 它的各自单独走 |
+| `BT_BIG_RATIO` / `BT_SMALL_CEILING` | 5 / 200MB | "挑同类"：相差多少倍算异类 / "最大的太小、小的成堆"的绝对上限 |
+| `BT_HARVEST_INTERVAL_MS` / `BT_EVICT_INTERVAL_MS` | 120000 / 600000 | 扫货周期（2 分钟）/ 超时检查周期（10 分钟） |
+| `BT_EVICT_*`（`BT_EVICT_ENABLED`/`MIN_AGE_HOURS`/`SALVAGE_PERCENT`/`STALL_MINUTES`/`SLOW_KBPS`/`SLOW_ETA_HOURS`） | — | **已废弃**：旧的"停滞/极慢/挽救"出清机制被 8h/4h 策略取代，这些变量还在读但已无人使用（留着无害） |
 | `YTDLP_BIN` / `FFMPEG_BIN` / `OPENSSL_BIN` / `ZIP_BIN` / `UNZIP_BIN` | 同名命令 | 外部工具路径 |
 
 更多设置（默认质量/格式、限速、超时、重试、主题、模块并发等）可在 **Web 设置页** 在线修改（存 SQLite）。

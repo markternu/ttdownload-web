@@ -4,7 +4,6 @@ import { config } from '../core/config';
 import { logger, taskLog } from '../core/logger';
 import { runCommand } from '../services/archive';
 import { getSettings } from '../services/settings';
-import { createPublishTask } from '../services/pipeline';
 import { selectBtFiles, pickDominantVideos } from '../services/btSelect';
 import { anonFile, hideName, hidePath, hideText } from '../services/btAnon';
 import { seedsRepo, tasksRepo } from '../core/db';
@@ -63,11 +62,16 @@ export class TransmissionClient {
         try {
           json = JSON.parse(text);
         } catch {
-          throw new Error(`transmission 响应无法解析: ${text.slice(0, 160)}`);
+          // 不把响应原文拼进异常：反代/防火墙的错误页里可能带着含种子名的 URL，
+          // 而这个 message 会一路被调度器写进日志（只报长度，够定位"响应不是 JSON"）
+          throw new Error(`transmission 响应无法解析（非 JSON，http=${res.status}，${text.length} 字节；检查反代/防火墙是否拦了 9091）`);
         }
         if (json.result !== 'success') {
-          scoped.warn(`[MARK:TR_RPC] <- ${method} 失败 result=${json.result} http=${res.status}（${Date.now() - startedAt}ms）`, {
-            body: text.slice(0, 400),
+          // ⚠️ 不打印响应体：torrent-get 的响应里含种子名与全部文件名（用户要求日志里不出现）
+          // result 本身是协议字符串，仍过一遍脱敏兜底（万一它回显了路径）
+          scoped.warn(`[MARK:TR_RPC] <- ${method} 失败 result=${hideText(json.result)} http=${res.status}（${Date.now() - startedAt}ms）`, {
+            result: hideText(json.result),
+            httpStatus: res.status,
             authConfigured: !!(this.user || this.password),
           });
           throw new Error(`transmission 错误: ${json.result}`);
@@ -75,7 +79,7 @@ export class TransmissionClient {
         scoped.debug(`[MARK:TR_RPC] <- ${method} ok（${Date.now() - startedAt}ms）`);
         return (json.arguments ?? {}) as T;
       } catch (e) {
-        scoped.warn(`[MARK:TR_RPC] <- ${method} 异常（${Date.now() - startedAt}ms）: ${(e as Error).message}`);
+        scoped.warn(`[MARK:TR_RPC] <- ${method} 异常（${Date.now() - startedAt}ms）: ${hideText((e as Error).message)}`);
         throw e;
       } finally {
         clearTimeout(timer);
@@ -124,9 +128,14 @@ export async function scanZipUploads(): Promise<number> {
     if (!/\.zip$/i.test(name) || name.startsWith('.')) continue;
     const zipPath = path.join(config.dirs.btZip, name);
     const tmpDir = fs.mkdtempSync(path.join(config.dirs.btPending, '.unzip_'));
-    const res = await runCommand(config.bins.unzip, ['-o', '-q', '-j', zipPath, '-d', tmpDir]);
+    // hideArgs/hideOutput：argv 与 unzip 输出里可能带 zip 名、甚至包内 .torrent 名
+    const res = await runCommand(config.bins.unzip, ['-o', '-q', '-j', zipPath, '-d', tmpDir], undefined, {
+      hideArgs: true,
+      hideOutput: true,
+      label: '解压种子 zip',
+    });
     if (res.code !== 0) {
-      logger.child('transmission').error(`[MARK:ARCHIVE] 种子 zip 解压失败 ${hideName(name)}: ${res.stderr || res.stdout}`, { zip: config.bins.unzip });
+      logger.child('transmission').error(`[MARK:ARCHIVE] 种子 zip 解压失败（退出码 ${res.code}，名称与输出已隐藏）`, { bin: config.bins.unzip });
       fs.rmSync(tmpDir, { recursive: true, force: true });
       continue;
     }
@@ -269,7 +278,8 @@ export const transmissionModule: ModuleAdapter = {
         taskLog(task.id).mark('BT_SEED_DELETED',
           `transmission 已接管该种子，已删除种子文件（${hideName(seedPath)}）`, { torrentId });
       } catch (e) {
-        logger.child('transmission').warn(`删除种子文件失败（不影响下载）: ${(e as Error).message}`);
+        // e.message 里带的是种子文件完整路径（= 种子名）→ 必须脱敏
+        logger.child('transmission').warn(`删除种子文件失败（不影响下载）：${hideText((e as Error).message)}`);
       }
     }
 

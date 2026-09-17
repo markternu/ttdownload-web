@@ -5,7 +5,7 @@ import { bus } from '../core/events';
 import { logger } from '../core/logger';
 import { pathSizeBytes } from '../core/disk';
 import { tasksRepo } from '../core/db';
-import { hidePath } from './btAnon';
+import { hidePath, hidePathDeep, hideText } from './btAnon';
 import type { Task } from '../types';
 
 /**
@@ -141,6 +141,34 @@ function ownFilePaths(task: Task, dirs: string[]): string[] {
   return [...out];
 }
 
+/**
+ * **别的非终态任务**正在用的文件（绝对路径）。
+ *
+ * 血案：目录被判为"共用"后，旧代码只删"本任务自己的"文件 —— 而 BT 下载任务自己的文件清单
+ * （`meta.files` = 种子内相对名）恰好就是另一个 archiving 任务正在打包的源文件。
+ * 于是"只删自己的"把别人正在归档的文件删了 → 打包失败 / 内容丢失。
+ * 所以共用目录里，凡是别的活跃任务点了名的路径，一个都不许删。
+ */
+function otherTasksFilePaths(task: Task, dirs: string[]): Set<string> {
+  const mine = Number(task.id);
+  const others = tasksRepo.byStatus(ACTIVE_STATUSES as never).filter((t) => Number(t.id) !== mine);
+  const out = new Set<string>();
+  for (const o of others) {
+    const payload = (o as Task & { payload?: Record<string, unknown> }).payload ?? {};
+    const downloaded = Array.isArray(payload.downloadedPaths) ? (payload.downloadedPaths as string[]) : [];
+    for (const p of downloaded) if (p) out.add(path.resolve(String(p)));
+    const meta = (o as Task & { meta?: { files?: string[] } }).meta;
+    const rel = Array.isArray(meta?.files) ? meta?.files ?? [] : [];
+    for (const dir of dirs) {
+      for (const name of rel) {
+        if (!name) continue;
+        out.add(path.resolve(path.join(dir, String(name))));
+      }
+    }
+  }
+  return out;
+}
+
 /** 自底向上收掉空目录（只收白名单根目录之内的） */
 function pruneEmptyDirs(dirs: string[]): string[] {
   const removed: string[] = [];
@@ -203,7 +231,13 @@ export function cleanupBtTaskDirs(task: Task, torrentName: string, reason: strin
 
   // ② 被共用的目录：绝不整目录删，只删本任务自己的那些文件，再收掉空目录
   if (sharedDirs.length) {
+    const othersFiles = otherTasksFilePaths(t, sharedDirs);
     for (const file of ownFilePaths(t, sharedDirs)) {
+      // 别人正在用的文件一个都不许删（哪怕它在"我自己的清单"里）
+      if (othersFiles.has(path.resolve(file))) {
+        skipped.push(file);
+        continue;
+      }
       const safety = isSafeToDelete(file);
       if (!safety.ok) {
         if (safety.reason !== '不存在') skipped.push(file);
@@ -215,7 +249,7 @@ export function cleanupBtTaskDirs(task: Task, torrentName: string, reason: strin
         freedBytes += size;
         removed.push(file);
       } catch (e) {
-        logger.child('bt-cleanup').error(`[MARK:BT_CLEANUP] 删除失败 ${file}: ${(e as Error).message}`);
+        logger.child('bt-cleanup').error(`[MARK:BT_CLEANUP] 删除失败 ${hidePathDeep(file)}: ${hideText((e as Error).message)}`);
         skipped.push(file);
       }
     }
@@ -224,13 +258,16 @@ export function cleanupBtTaskDirs(task: Task, torrentName: string, reason: strin
 
   if (removed.length) {
     logger.child('bt-cleanup').mark('BT_CLEANUP',
-      `已清理 ${removed.length} 项，释放 ${(freedBytes / 1024 / 1024).toFixed(1)}MB`, { reason, taskId: t.id, removed: removed.slice(0, 20) });
+      `已清理 ${removed.length} 项，释放 ${(freedBytes / 1024 / 1024).toFixed(1)}MB`,
+      // 文件路径里可能同时带种子名与内容名 → 深层隐藏
+      { reason, taskId: t.id, removed: removed.slice(0, 20).map((p) => hidePathDeep(p)) });
   }
   if (freedBytes > 0) {
     bus.emitSpaceFreed({
       bytes: freedBytes,
       reason,
-      detail: { taskId: t.id, title: torrentName, removedFiles: removed.length, sharedSkipped },
+      // ⚠️ 这个 detail 会被调度器的 SPACE_FREED 日志整个打出来 → 不能带 torrentName / 原始路径
+      detail: { taskId: t.id, removedFiles: removed.length, sharedSkipped: sharedSkipped.map((p) => hidePathDeep(p)) },
     });
   }
   return freedBytes;

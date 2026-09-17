@@ -60,6 +60,7 @@ async function processArchiving(): Promise<void> {
       continue;
     }
     let failed: string | null = null;
+    const isBt = task.module === 'transmission';
     for (const u of units) {
       // 断点续跑：已经归档过的单元不重复做
       if (u.archivePath && fs.existsSync(u.archivePath)) continue;
@@ -68,7 +69,9 @@ async function processArchiving(): Promise<void> {
         title: task.title,
         multiFileHint: u.files.length > 1,
         // BT 日志里不出现内容名（用户要求）
-        logName: task.module === 'transmission' ? HIDDEN_NAME : undefined,
+        logName: isBt ? HIDDEN_NAME : undefined,
+        // argv/子进程输出里会带源文件名 → 隐藏
+        hideNames: isBt,
       });
       if (!res.ok) {
         failed = res.error ?? '未知错误';
@@ -100,7 +103,10 @@ async function processArchiving(): Promise<void> {
       },
     });
     taskLog(task.id, 'pipeline').mark('ARCHIVE', `归档完成 ${units.length} 个成品`, {
-      units: units.map((u) => ({ name: u.originalName, sizeBytes: u.archiveSize })),
+      // BT 的 originalName 就是内容名/种子文件夹名 → 只记数量与体积
+      units: units.map((u) => (isBt
+        ? { files: u.files.length, sizeBytes: u.archiveSize }
+        : { name: u.originalName, sizeBytes: u.archiveSize })),
     });
     bus.emitTask(tasksRepo.get(task.id));
   }
@@ -283,9 +289,11 @@ export function createPublishTask(opts: {
       ...(opts.harvest ? { harvest: opts.harvest } : { earlyHandoff: true }),
     },
   });
+  // ⚠️ 这个函数目前只有 BT 扫货会调用：opts.originalName / opts.files 都是内容名与完整路径，
+  //    日志里一律不出现（用户要求），只记数量与体积；真实标题照旧写进数据库/界面。
   taskLog(task.id, 'pipeline').mark('BT_EARLY',
-    `进入归档：${opts.originalName}（${(opts.units ?? [{ files: opts.files }]).length} 个成品）`,
-    { sizeBytes: opts.sizeBytes, parentTaskId: opts.parentTaskId, files: opts.files });
+    `进入归档：${HIDDEN_NAME}（${(opts.units ?? [{ files: opts.files }]).length} 个成品 / ${opts.files.length} 个文件，${(opts.sizeBytes / 1024 ** 2).toFixed(1)}MB）`,
+    { sizeBytes: opts.sizeBytes, parentTaskId: opts.parentTaskId, fileCount: opts.files.length });
   bus.emitTask(tasksRepo.get(task.id));
   return task.id;
 }
@@ -324,9 +332,11 @@ export function handoffToArchive(
   const task = tasksRepo.get(taskId);
   bus.emitTask(task);
   const unitCount = Array.isArray(payload.publishUnits) ? (payload.publishUnits as unknown[]).length : 1;
-  taskLog(taskId, 'pipeline').mark('PIPELINE', `下载完成，进入归档队列（${downloadedPaths.length} 个文件 / ${unitCount} 个成品）`, {
-    originalName,
-    sizeBytes,
-    files: downloadedPaths,
-  });
+  // BT：originalName 与 downloadedPaths 都是内容名/完整路径 → 只记数量与体积
+  const isBt = task?.module === 'transmission';
+  taskLog(taskId, 'pipeline').mark('PIPELINE',
+    `下载完成，进入归档队列（${downloadedPaths.length} 个文件 / ${unitCount} 个成品）`,
+    isBt
+      ? { sizeBytes, fileCount: downloadedPaths.length }
+      : { originalName, sizeBytes, files: downloadedPaths });
 }

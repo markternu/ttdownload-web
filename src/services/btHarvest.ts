@@ -25,10 +25,10 @@ import path from 'node:path';
 import { config } from '../core/config';
 import { bus } from '../core/events';
 import { logger, taskLog } from '../core/logger';
-import { tasksRepo } from '../core/db';
+import { tasksRepo, seedsRepo } from '../core/db';
 import { getSettings } from './settings';
 import { buildPublishUnits, extOfName } from './btSelect';
-import { anonFile, hidePath } from './btAnon';
+import { hidePath, hidePathDeep, hideText } from './btAnon';
 import { createPublishTask } from './pipeline';
 import { cleanupBtTaskDirs } from './btCleanup';
 import { transmissionClient } from '../modules/transmission';
@@ -41,6 +41,8 @@ interface HarvestInfo {
   torrentName?: string;
   downloadTaskId?: number;
   files?: string[];
+  /** 来自 incomplete 的交接：种子还在下 → 收尾阶段只记账，绝不删目录/删任务 */
+  keepTorrent?: boolean;
 }
 
 type TaskWithPayload = Task & { payload?: Record<string, unknown> };
@@ -129,6 +131,35 @@ function collectFiles(dir: string): string[] {
   return out;
 }
 
+/**
+ * 把"已经从 incomplete 里交出去"的文件在 transmission 里标成 unwanted。
+ *
+ * 为什么必须做：这些文件马上会被归档搬走/重命名，transmission 发现文件缺失会**重新下载**，
+ * 于是重复占空间带宽，而且下一轮扫货又会把它们当"新下完的"再发布一次。
+ * 只动勾选、不动任务、不动目录（种子该下的其它文件继续下）。
+ */
+async function markFilesUnwanted(torrent: TorrentLite, dir: string, files: string[]): Promise<void> {
+  const wanted = new Set(files.map((f) => path.resolve(f)));
+  const idx: number[] = [];
+  for (let i = 0; i < torrent.files.length; i += 1) {
+    const rel = String(torrent.files[i]?.name ?? '');
+    if (!rel) continue;
+    if (wanted.has(path.resolve(path.join(dir, rel)))) idx.push(i);
+  }
+  if (!idx.length) return;
+  try {
+    const client = transmissionClient();
+    if (!(await client.ping())) return;
+    await client.call('torrent-set', { ids: [torrent.id], 'files-unwanted': idx }).catch(() => undefined);
+    logger.child('bt-harvest').mark('BT_HARVEST', `已把 ${idx.length} 个已取走的文件在 transmission 里标为不再下载（防止重复下载）`, {
+      torrentId: torrent.id,
+      fileCount: idx.length,
+    });
+  } catch (e) {
+    logger.child('bt-harvest').warn(`标记 unwanted 失败（不影响已交接的货）：${hideText((e as Error).message)}`);
+  }
+}
+
 /** 已经有发布任务在处理的文件（防止每个 tick 重复交同一个文件） */
 function filesInFlight(): Set<string> {
   const out = new Set<string>();
@@ -136,6 +167,30 @@ function filesInFlight(): Set<string> {
   for (const t of active) {
     const paths = Array.isArray((t.payload ?? {}).downloadedPaths) ? ((t.payload ?? {}).downloadedPaths as string[]) : [];
     for (const f of paths) out.add(path.resolve(String(f)));
+  }
+  return out;
+}
+
+/**
+ * **已经交出去过**的文件（含已经发布完成的任务）。
+ *
+ * 为什么不能只看 filesInFlight：发布任务一旦 completed 就不在 in-flight 里了，
+ * 而 incomplete 分支的源文件是**留在原地**的（我们不删还在下的目录）——
+ * 只要 `downloadTask` 找不到（任务被界面删掉、种子是外部直接加进 transmission、
+ * 同名种子匹配到别的任务），每个 tick 都会把同一批文件重新发布一遍（重复成品 + 重复占空间）。
+ * 所以这里按"所有任务 payload.harvest.files"做文件级账本，谁交过就记谁。
+ */
+function filesAlreadyHandedOff(): Set<string> {
+  const out = new Set<string>();
+  for (const statuses of [
+    ['waiting', 'parsing', 'downloading', 'paused', 'archiving', 'encrypting'],
+    ['completed', 'failed', 'cancelled'],
+  ]) {
+    const items = tasksRepo.list({ statuses: statuses as never, pageSize: 500 }).items as TaskWithPayload[];
+    for (const t of items) {
+      const h = (t.payload ?? {}).harvest as HarvestInfo | undefined;
+      for (const f of h?.files ?? []) out.add(path.resolve(String(f)));
+    }
   }
   return out;
 }
@@ -220,9 +275,13 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
     });
     summary.published += units.length;
     summary.tasks.push(id);
+    // ⚠️ entry.name 就是种子名 / 内容文件夹名 → 日志只记目录（hidePath 隐藏最后一段）
     logger.child('bt-harvest').mark('BT_HARVEST',
-      `扫到货：${entry.name} → ${videos.length} 个视频 / ${units.length} 个成品（${(totalBytes / 1024 ** 2).toFixed(1)}MB）→ 任务 #${id}`, {
-        units: units.map((u) => ({ name: u.name, files: u.files.length })),
+      `扫到货（${hidePath(abs)}）：${videos.length} 个视频 / ${units.length} 个成品（${(totalBytes / 1024 ** 2).toFixed(1)}MB）→ 任务 #${id}`, {
+        torrentId: torrent?.id,
+        videoCount: videos.length,
+        unitSizes: units.map((u) => u.files.length),
+        totalBytes,
       });
   }
 
@@ -250,15 +309,23 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
       .filter((p) => fs.existsSync(p) && sizeOf(p) > 0);
     if (!doneVideos.length) continue;
 
-    // 已经交出去过的文件不再重复交（记在下载任务 payload.harvestedFiles 里）
+    // 已经交出去过的文件不再重复交（下载任务的 harvestedFiles + 全量文件级账本 + 在飞的）
     const downloadTask = (tasksRepo.list({ modules: ['transmission'], statuses: ['waiting', 'parsing', 'downloading', 'paused'], pageSize: 500 }).items as TaskWithPayload[])
       .find((t) => Number((t.payload ?? {}).torrentId ?? 0) === torrent.id);
     const doneList = downloadTask && Array.isArray((downloadTask.payload ?? {}).harvestedFiles)
       ? ((downloadTask.payload ?? {}).harvestedFiles as string[])
       : [];
     const inflight = filesInFlight();
-    const fresh = doneVideos.filter((p) => !doneList.includes(p) && !inflight.has(path.resolve(p)));
+    const handedOff = filesAlreadyHandedOff();
+    const fresh = doneVideos.filter(
+      (p) => !doneList.includes(p) && !inflight.has(path.resolve(p)) && !handedOff.has(path.resolve(p)),
+    );
     if (!fresh.length) continue;
+
+    // 交接前先在 transmission 里把这些文件标成 unwanted：
+    // 否则归档把它们搬走/重命名后，transmission 会认为文件缺失而**重新下载**一遍
+    // （重复占空间与带宽，而且下次扫货又会把它们当成"新下完的"再发布一次）。
+    await markFilesUnwanted(torrent, abs, fresh);
 
     const units = buildPublishUnits(fresh, maxSmall, sizeOf, baseName, entry.name);
     for (const u of units) {
@@ -276,7 +343,9 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
         sizeBytes,
         parentTaskId: downloadTask ? Number(downloadTask.id) : 0,
         harvest: {
-          // incomplete：不删目录、不删任务（还在下）
+          // incomplete：**绝不能删目录、绝不能删 transmission 任务**（它还在下）。
+          // keepTorrent 就是给收尾阶段（③）看的：它只做记账，不做任何清理。
+          keepTorrent: true,
           torrentId: torrent.id,
           torrentHash: torrent.hashString,
           torrentName: entry.name,
@@ -287,7 +356,7 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
       summary.published += 1;
       summary.tasks.push(id);
       logger.child('bt-harvest').mark('BT_HARVEST',
-        `incomplete 里发现已下完的视频（${hidePath(abs)}）：${u.files.length} 个文件 → 任务 #${id}`);
+        `incomplete 里发现已下完的视频（${hidePath(abs)}）：${u.files.length} 个文件 → 任务 #${id}（不动目录与任务）`);
     }
     if (downloadTask) {
       const prev = (downloadTask.payload ?? {}) as Record<string, unknown>;
@@ -302,8 +371,30 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
   for (const t of published) {
     const h = (t.payload ?? {}).harvest as HarvestInfo | undefined;
     if (!h || (t.payload ?? {}).harvestDone) continue;
+    if (dryRun) {
+      summary.finished += 1;
+      continue;
+    }
+
+    // 3-0) 来自 incomplete 的交接：只记账，**一个字节都不动**
+    //      （种子还在下、目录还是它的，删任务等于把还没下完的种子干掉）
+    if (h.keepTorrent) {
+      tasksRepo.update(t.id, { payload: { ...((t.payload ?? {}) as Record<string, unknown>), harvestDone: true } });
+      continue;
+    }
+
+    // 3-0b) 目录还有别的扫货任务在处理 → 整块推迟，**不能置 harvestDone**
+    //       （否则 transmission 任务被删了、目录却永远留在磁盘上没人管）
+    const dirBusy = h.dir
+      ? (tasksRepo.list({ statuses: ['waiting', 'parsing', 'downloading', 'archiving', 'encrypting', 'paused'], pageSize: 500 }).items as TaskWithPayload[])
+          .some((x) => Number(x.id) !== Number(t.id) && ((x.payload ?? {}).harvest as HarvestInfo | undefined)?.dir === h.dir)
+      : false;
+    if (h.dir && dirBusy) {
+      logger.child('bt-harvest').mark('BT_HARVEST', `还有别的扫货任务在处理 ${hidePath(h.dir)}，本次不清理（下轮再说）`);
+      continue;
+    }
+
     summary.finished += 1;
-    if (dryRun) continue;
 
     // 3a) 先删 transmission 任务（否则文件没了它会重新校验/重下）
     if (h.torrentId || h.torrentHash) {
@@ -312,22 +403,17 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
         if (await client.ping()) {
           const ids: (number | string)[] = h.torrentId ? [h.torrentId] : [String(h.torrentHash)];
           await client.call('torrent-remove', { ids, 'delete-local-data': false }).catch(() => undefined);
-          logger.child('bt-harvest').mark('BT_HARVEST', `已从 transmission 移除任务：${hidePath(h.torrentName ?? h.torrentHash)}`, { ids });
+          // torrentName 可能是异常/多段的名字 → 用深层隐藏，别只砍最后一段
+          logger.child('bt-harvest').mark('BT_HARVEST', `已从 transmission 移除任务：${hidePathDeep(h.torrentName ?? h.torrentHash ?? '')}`, { ids });
         }
       } catch (e) {
-        logger.child('bt-harvest').warn(`移除 transmission 任务失败：${(e as Error).message}`);
+        logger.child('bt-harvest').warn(`移除 transmission 任务失败：${hideText((e as Error).message)}`);
       }
     }
 
     // 3b) 再删掉对应的文件夹（只删这一个种子自己的目录，走白名单安全检查）
-    //     先确认"这个目录下没有别的活跃扫货任务"（防呆：一个目录本该只有一个任务）
-    const dirBusy = h.dir
-      ? (tasksRepo.list({ statuses: ['waiting', 'parsing', 'downloading', 'archiving', 'encrypting', 'paused'], pageSize: 500 }).items as TaskWithPayload[])
-          .some((x) => Number(x.id) !== Number(t.id) && ((x.payload ?? {}).harvest as HarvestInfo | undefined)?.dir === h.dir)
-      : false;
-    if (h.dir && dirBusy) {
-      logger.child('bt-harvest').mark('BT_HARVEST', `还有别的扫货任务在处理 ${hidePath(h.dir)}，暂不删目录`);
-    } else if (h.dir) {
+    //     "目录还有别的任务在用"的情况已经在 3-0b 提前挡掉了
+    if (h.dir) {
       const freed = cleanupBtTaskDirs(t as Task, h.torrentName ?? path.basename(h.dir), 'bt-harvest');
       logger.child('bt-harvest').mark('BT_HARVEST',
         `扫货完成，已清理 ${hidePath(h.dir)}${freed ? `（释放 ${(freed / 1024 ** 2).toFixed(1)}MB）` : ''}`, { freedBytes: freed });
@@ -346,10 +432,20 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
           error: null,
           payload: { ...((dt.payload ?? {}) as Record<string, unknown>), harvestedAt: new Date().toISOString() },
         });
+        // 种子记录也要收尾：以前只写 queued/downloading/failed，'done' 从来没被写过，
+        // 界面上种子永远显示"下载中"、按钮永久禁用。
+        const seedId = Number((dt.payload ?? {}).seedId ?? 0);
+        if (seedId) seedsRepo.update(seedId, { status: 'done' });
         taskLog(Number(h.downloadTaskId)).mark('BT_HARVEST', `货物已被扫走、文件夹与 transmission 任务已清理，任务收尾`);
       }
     }
 
+    // 只有**目录真的没了**才算收尾完成。清理被跳过/失败时留着 harvestDone=false，
+    // 下一轮还会再来（否则 transmission 任务删了、目录却永远留在磁盘上没人管）。
+    if (h.dir && fs.existsSync(h.dir)) {
+      logger.child('bt-harvest').warn(`目录还没能删掉（${hidePath(h.dir)}），保留收尾标记等下一轮重试`);
+      continue;
+    }
     tasksRepo.update(t.id, { payload: { ...((t.payload ?? {}) as Record<string, unknown>), harvestDone: true } });
   }
 

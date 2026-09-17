@@ -54,17 +54,28 @@
 
 ### 3.1 transmission（BT 种子）
 
+> ⚠️ 这一节在 BT 重构时改过：**只下视频**（不再保留图片）、加种子/选片/算大小全部提前到
+> `prepare()`、下载完成后交给**扫货**（§5.6）而不是"完成即归档"。
+
 1. **上传入口**：Web 上传 zip 到 `btzhongzi_zip`（也支持直接往该目录扔文件）。
 2. **解压**：定时扫描 zip → 解压出 `*.torrent` → 放到 `btzhongzi_nodownd` → 删除 zip。
-3. **入队**：扫描 `btzhongzi_nodownd` 的种子文件，读取种子元数据（transmission RPC
-   `torrent-add` + `torrent-get` 获取文件清单），**只保留视频/图片文件**，
-   计算这些文件的总大小 `btzhongdaxiao`。
-4. **磁盘门控**（见 §4）：`free - btzhongdaxiao >= 10G` 才允许下载。
-5. **下载**：调用 transmission 添加任务并只勾选视频/图片文件；成功后把种子文件从
-   `btzhongzi_nodownd` 里的 .torrent **直接删掉**（transmission 已保存元数据）。
-6. **完成**：transmission 报告完成 → 把对应下载目录内容移交归档区：
-   - 多文件 → 打 zip（名含 `zip`）；单文件 → 直接用该文件；统一按下文命名规则重命名；
-   - 然后 **删除 transmission 任务 + 删除其下载目录文件**。
+3. **入队**：扫描 `btzhongzi_nodownd` 的种子文件 → 登记 `seeds` 表 → 用户点"加入下载"或自动
+   入队成统一队列任务（`transmission` 模块）。
+4. **`prepare()`（放行前，关键）**：
+   - `torrent-add { metainfo, paused: true }` —— **暂停加入，一个字节都不下**；
+   - `torrent-get` 拿文件清单 → **只勾选视频**（扩展名白名单，大小写不敏感），其余标 unwanted；
+   - 多个视频再"**挑同类**"（独树一帜下最大 / 相差无几一起下 / 最大的太小且小的成堆则下小的）；
+   - 算出选中视频总字节写进 `expectBytes`（**磁盘准入就靠它**，见 §4）；
+   - 确认接管成功 → **删掉那个 `.torrent` 文件**（transmission 自己已存元数据）。
+   - **绝不传 `download-dir` / `incomplete-dir`**：transmission 以 `debian-transmission` 运行，
+     改成我们的目录会让它下完搬文件时 `Permission denied`（真机事故，见 HANDOVER §3.1）。
+5. **`start()`**：只做 `torrent-start`，并记下 `btHandedAt`（8 小时策略的起点）。
+6. **`poll()`**：**只读进度**，不干涉。下完的货由**扫货**（§5.6）交进归档 → 加密 → 发布；
+   超时的由**超时策略**（§5.5）清理。
+7. **入队逻辑为什么这么绕**：早期加种子/选片/算大小都在 `start()` 里，准入时 `expectBytes=0`
+   →"需要 0 字节"永远放行 → 十几个种子撑爆磁盘 → 触发全暂停死锁。所以现在
+   **`prepare` 必须在放行前算出真实大小**，且**幂等**（已有 `torrentId` 直接复用，这个判断要放在
+   "检查种子文件存在"之前 —— 种子文件 prepare 成功后就被删了）。
 
 ### 3.2 aria2（URL 直链下载）
 
@@ -138,36 +149,64 @@ usable      = free - reserved - RESERVE_FREE_BYTES(默认 10GiB)
 
 ---
 
-## 5.5 BT 出清机制（长时间无资源 / 停滞 / 极慢）
+## 5.5 BT 超时策略（8 小时 / 4 小时宽限）
 
-BT 下载经常遇到"永远下不完"的任务，必须主动出清，否则长期占用磁盘与下载队列：
+> ⚠️ 这里在 BT 重构时被**整段替换**过。旧文档写的"无资源/停滞/极慢 + `btEvict.*` 阈值 + 10 小时门槛"
+> **已经不存在了**（旧配置字段还留在 config 里，但没人读，无害）。现在只有一条规则：
 
-| 情况 | 判定条件（满足其一即出清） |
+| 阶段 | 规则 |
 | --- | --- |
-| ① 完全无资源 | 速率为 0、无 peer，且进度停滞 ≥ `stallMinutes`（默认 30 分钟） |
-| ② 中途停滞 | 曾经有进度，之后速率 0 且进度停滞 ≥ `stallMinutes` |
-| ③ 还有资源但极慢 | 速率 > 0 但 < `slowKbps`（默认 20KB/s），且预计剩余 > `slowEtaHours`（默认 72 小时） |
+| 交给 transmission 后 8 小时内 | **只读进度**（`poll`），不暂停、不删、不改勾选 —— 有的资源这会儿没速度，过一小时才上线，干涉只会把能下完的搞坏 |
+| 满 8 小时（`btPolicy.checkAfterHours`） | 进度 **≤ `minProgressPercent`（默认 60%）** → 直接清理 |
+| 进度 **> 60%** | 再宽限 `graceHours`（默认 4 小时，即最晚 12 小时）→ 到点还没下完也清理 |
+| 已经 100% | 不归这里管，由**扫货**（§3.1、`btHarvest`）拿走 |
 
-**安全前提（硬门槛）**：只有**实际下载尝试时间 ≥ `minAgeHours`（默认 10 小时）**的任务才参与判断。
-"实际尝试时间"按活跃下载状态累计（`payload.btActiveMs`），**因磁盘空间不足被自动暂停的时间不计入**，
-手动暂停的任务也不参与判断；服务重启不会清零，单次最多累计一个检查周期（防停机后一次跳满）。
+**计时起点**：`payload.btHandedAt`（`start()` 真正 `torrent-start` 的那一刻）。
+`prepare` 过但还在排队（等磁盘空间）的时间**不算**。
 
-**≥79% 的特殊处理（可播放视为完整）**：进度 ≥ `salvagePercent`（默认 79%）且存在视频文件时**不删除**，
-而是停止任务 → 把已存在的视频/图片（下载目录或 transmission incomplete 目录里都能找到）交给
-**归档 → 加密 → 发布**流水线；发布完成后再清理残留目录（含 incomplete 目录里的分片）。
+**清理动作**（`btEvict.dropTorrent` → `btCleanup.cleanupBtTaskDirs`）：
 
-**删除动作**：
-1. `torrent-remove`（`delete-local-data=true`）删除 transmission 任务与数据；
-2. 删除我们自己的下载目录 `transmission/downloads/<种子名>`；
-3. 删除 transmission incomplete 目录（默认 `/var/lib/transmission/incomplete`）下对应任务的文件夹；
-4. 任务状态置为 `failed` 并写明原因（"已出清（无资源/停滞无资源/资源过慢）：…"），种子记录同步标记；
-5. **广播"空间已腾挪"**（见 §6.1）。
+1. `torrent-remove`（`delete-local-data=true`）删掉 transmission 任务与数据；
+2. 删本任务占用的目录（**独占才整目录删**；被别的活跃任务共用 → 一个字节都不动，见 §5.6）；
+3. 任务状态置 `failed`，写明原因（"超时清理：已交给 transmission X 小时，进度只有 Y%"）；
+4. **广播"空间已腾挪"**（见 §6.1），调度器立刻重算等待队列。
 
-安全边界：只允许删除白名单根目录（`transmission/downloads`、`transmissionIncompleteDir`、`btPending`）
-内的普通目录，拒绝根目录、符号链接、隐藏目录与路径穿越。
+安全性：只允许删白名单根目录（`btDownload`、`transmissionIncompleteDir`、`btPending`）内的普通
+文件/目录，拒绝根目录、符号链接、隐藏目录与路径穿越；**不是自己的文件不删**。
 
 手动操作：`GET /api/bt/stale`（dry-run 预览）、`POST /api/bt/evict`（立即执行）；
-Web 端在「BT 种子」页有「出清预览 / 立即出清」按钮，在「设置」页可调全部阈值。
+Web 端「BT 种子」页有「出清预览 / 立即出清」按钮，「设置」页可调 `checkAfterHours` /
+`minProgressPercent` / `graceHours`。日志标记：`BT_TIMEOUT_GRACE` / `BT_TIMEOUT_DROP`。
+
+---
+
+## 5.6 BT 扫货（harvest：把下好的货交给流水线）
+
+与超时策略**完全独立**的 worker（`btHarvest`，每 2 分钟一轮），只管"目录里的好东西"：
+
+```
+扫 transmission 的两个目录：
+downloads（下完了的）：
+  · 1 个视频            → 单独走（直接改名加密归档）
+  · 多个但全都 <阈值     → 合成一个 zip 再走
+  · 有 ≥阈值(默认300MB)  → 大的各自单独，小的合成一个
+  · 一个目录只建一个任务（内部带多个"成品单元"）
+  发布成功后 → 删该目录 + 删 transmission 任务 + 下载任务收尾
+incomplete（还在下的）：
+  · 只有 1 个文件 → 跳过
+  · 多个且其中有下完的 → 只把下完的交出去（按同样规则）
+  · **绝不动目录、绝不动 transmission 任务**
+```
+
+为什么不在下载完成的瞬间处理：用户要求"扔给 transmission 就别管它，8 小时内不干涉"。
+扫货按目录独立判断，天然不会干扰 transmission。
+
+为什么一个目录只建一个任务：拆成多个任务时，先完成的那个收尾会删掉目录，而
+`archiveTaskFiles` 的 zip 分支**不删源文件** → 正在打包的那个任务源文件就没了。
+
+收尾时的共用判定（`btCleanup.findSharedDirs`）：还有别的非终态任务在用这个目录、
+或别的任务的文件还躺在里面 → **整块跳过**（宁可晚点释放空间，也不误删别人的文件）。
+日志标记：`BT_HARVEST` / `BT_CLEANUP` / `BT_CLEANUP_SHARED` / `BT_EARLY`。
 
 ---
 
@@ -179,11 +218,12 @@ Web 端在「BT 种子」页有「出清预览 / 立即出清」按钮，在「�
 | 触发点 | reason |
 | --- | --- |
 | 安卓上报下载完成、服务端删除文件 | `android-reported-done` |
-| BT 出清删除任务与目录 | `bt-evict` |
-| BT "可播放文件"归档发布后的残留目录清理 | `bt-salvage-cleanup` |
+| BT 超时清理删除任务与目录 | `bt-timeout` |
+| BT 扫货发布完成后的目录清理 | `bt-harvest` / `bt-cleanup` |
 | 手动取消 BT 任务并清理目录 | `bt-cancel` |
 
 事件载荷：`{ bytes, reason, at, detail }`；无论释放多少字节都会通知。
+⚠️ `detail` 会被调度器的 `SPACE_FREED` 日志**整段打出来** → 里面不许放种子名/原始路径（见 HANDOVER §6.1）。
 
 ---
 

@@ -50,9 +50,10 @@ sudo ./deploy.sh --collect                 # 服务起不来时离线打包日�
 
 ## 2. 当前状态
 
-- 后端 **221 项测试**、浏览器 **23 项**全绿；已在树莓派（Debian + transmission 4.x）实机部署验证。
+- 后端 **231 项测试**、浏览器 **23 项**全绿；已在树莓派（Debian + transmission 4.x）实机部署验证。
 - 安卓端 v1.4.1 已对接本服务端的 `/api/android/*`（多台服务器、自动扫描、下载后上报、SD 搬移）。
-- **本窗口刚做完的大改动：BT 模块整体重构**（第 3 节），以及磁盘准入、日志脱敏。
+- **本窗口刚做完的大改动：BT 模块整体重构**（第 3 节）、磁盘准入、
+  **BT 日志脱敏的全链路补齐**（§6.1），以及**部署前代码审查抓到的一批真 bug**（§8.1，都有回归测试）。
 
 ---
 
@@ -158,14 +159,44 @@ transmission 以 **`debian-transmission`** 用户运行，它的两个目录：
 
 ## 6. 日志与排障
 
-**BT 日志绝不出现种子名/文件名**（用户要求）。统一走 `services/btAnon.ts`：
-`anonFile(i)`=文件N、`hideName()`、`hidePath()`（只留目录）、`hideText()`。
-连 `TR_RPC` 的 `metainfo`（整颗种子的 base64，含全部文件名）也隐藏了。
-数据库/界面里的真实标题照旧，只有日志脱敏。
-`test/transmission-module.test.mjs` 有一条断言：跑完 prepare+start+poll 后翻整个 app.log，
-`SECRETMOVIE9377.mp4` 这类名字一个都不许出现。
+### 6.1 BT 日志脱敏（硬要求，别破）
 
-常用标记（`grep -aE 'MARK:(BT_|DISK_GATE|TASK_)' /ttdownload/state/app.log`）：
+**BT 相关日志里绝不出现种子名、内容文件名、以及带这些名字的完整路径**（用户要求）。
+数据库/网页界面里的真实标题照旧（用户自己要看到），**只脱敏日志**。
+
+实现都在 `src/services/btAnon.ts`：
+
+| 函数 | 用途 |
+| --- | --- |
+| `HIDDEN_NAME` | 统一占位「（名称已隐藏）」 |
+| `anonFile(i)` | 第 i 个文件的匿名标签（文件1/文件2…），同一任务内稳定 |
+| `hideName(x)` | 任何名字 → 统一占位 |
+| `hidePath(x)` | 只留目录、砍掉最后一段（用于"目录名才是种子名"的情形） |
+| `hidePathDeep(x)` | **文件级路径用这个**：`…/transmission/downloads/<种子名>/<文件名>.mp4` 里有两段名字，只砍最后一段不够；认得出 transmission 目录就只留到该目录，否则只留前两段 |
+| `hideText(x)` | 文本兜底：把 `/xxx` 形式的路径片段全换成占位（用于 `e.message`、`errorString`、RPC `result`） |
+
+几条**踩过才知道**的规则，改 BT 代码时必须守：
+
+1. **子进程调用的 argv 也是日志**。`runCommand(zip, [...源文件绝对路径])` 会让 `PROC_SPAWN` 把
+   所有内容文件名打出来；`unzip` 的输出可能回显包内 `.torrent` 名。所以这类调用必须传
+   `{ hideArgs: true, hideOutput: true, label: '…' }`（见 `archive.ts`）。
+2. **绝不打印 transmission 的响应体**。`torrent-get` 的响应含种子名 + 全部文件名；
+   失败时只记 `result` 与 http 状态（`TR_RPC`）。
+3. **space-freed 广播的 `detail` 会被调度器整个打进 `SPACE_FREED` 日志**，
+   所以那里不能带 `torrentName` / 原始路径（`btCleanup.ts`、`btEvict.ts` 都踩过）。
+4. **任务失败信息也要脱敏**：文件系统报错形如 `EACCES: … open '/…/名字.mp4'`，调度器
+   落日志前对 BT 过一遍 `hideText`（任务表里的 `error` 字段保留原文，界面要看）。
+5. **诊断报告（要发给开发者的那份）**：`report.ts` 的 `taskForExport()` 会把 BT 任务的
+   标题、`payload` 里的种子名/路径一并隐藏 —— 报告是分享物，不脱敏等于泄露内容。
+
+回归测试：**`test/bt-log-redaction.test.mjs`**（6 个阶段：上传/解压/选片/开下 → 扫货/归档/
+加密/发布/清理 → 超时清理 → RPC 失败 → 任务失败消息 → 诊断报告）。它跑完后翻**整个 app.log
++ 日志表**，任何隐藏名字不得出现，同时反过来断言"数据库里真实标题照旧"。
+改 BT 日志相关代码后必跑；可以故意把某处改回直接打名字来确认它真的会红。
+
+### 6.2 常用标记
+
+`grep -aE 'MARK:(BT_|DISK_GATE|TASK_)' /ttdownload/state/app.log`：
 
 | 标记 | 含义 |
 | --- | --- |
@@ -173,12 +204,18 @@ transmission 以 **`debian-transmission`** 用户运行，它的两个目录：
 | `BT_PICK` | 多视频挑同类（哪条规则、下几个） |
 | `BT_PREPARE` | 已备好（种子暂停中，等空间准入）+ 要下多少 |
 | `BT_SEED_DELETED` | transmission 已接管，种子文件已删 |
+| `BT_EARLY` | 大文件提前交付（先进入归档/加密/发布） |
 | `BT_HARVEST` | 扫货：扫到什么、交了什么、清理了什么 |
 | `BT_TIMEOUT_GRACE` / `BT_TIMEOUT_DROP` | 超时宽限中 / 已清理 |
 | `BT_CLEANUP` / `BT_CLEANUP_SHARED` | 目录清理 / 因为共用而跳过 |
 | `DISK_GATE` | 空间准入：谁被放行、谁被跳过、可用多少 |
 | `MODULE_GATE` | 模块并发满（默认 0=不限，一般不会出现） |
 | `SPACE_FREED` | 空间回血，立刻重算等待队列 |
+| `SETTINGS_MIGRATE` | 旧配置被自动修正（会写清改了哪一项） |
+
+这张表登记在 `src/core/logger.ts` 的 `MARKERS`，会出现在网页「日志」页的筛选下拉与诊断包的
+`markers.json` 里。**新增埋点时顺手登记**，否则用户按标记排查时查不到含义。
+`report.ts` 的 `errorsLog()` 也会把上面这些 BT 节点的 INFO 行收进 `errors.log`。
 
 排障手册（`docs/排查手册.md`）按现象分类，含 4.95「一堆任务全停住+磁盘满+零成品」那次的完整复盘。
 
@@ -194,6 +231,8 @@ npm run test:all       # 两个都跑
 
 - BT 相关测试：`test/transmission-module.test.mjs`、`test/bt-harvest.test.mjs`、
   `test/bt-select.test.mjs`、`test/bt-evict.test.mjs`、`test/bt-cleanup.test.mjs`
+- BT 日志脱敏（全链路）：`test/bt-log-redaction.test.mjs`
+- BT 流程安全（审查抓到的真 bug）：`test/bt-safety.test.mjs`
 - 队列/磁盘：`test/scheduler-space.test.mjs`、`test/disk-driven-admission.test.mjs`
 - 测试脚手架 `test/helpers.mjs`：`setupRuntime()` 会把 `DOWNLOAD_ROOT` 指到临时目录；
   **它的并发默认是 3（不是生产默认）**，要测"不限并发"得显式传 env。
@@ -206,15 +245,62 @@ ls -ld /var/lib/transmission/downloads /var/lib/transmission/incomplete
 grep -aE 'BT 扫货已启动|BT 超时策略已启动' /ttdownload/state/app.log | tail -2
 ```
 
+全新机器（尤其是**机器上已经有 transmission-daemon**、脚本因此跳过 `ubuntutr.sh` 的机器）
+再补这四条 —— BT 最容易"装好了但静默不工作"：
+
+```bash
+# ① 四个后台 worker 都起来了吗
+grep -aE '流水线已启动|调度器已启动|BT 超时策略已启动|BT 扫货已启动' /ttdownload/state/app.log | tail -4
+# ② transmission RPC 真通吗（409 = 正常；401/000 = 凭据或服务不对，BT 一定不可用）
+curl -s -o /dev/null -w 'tr rpc http=%{http_code}\n' http://127.0.0.1:9091/transmission/rpc
+# ③ transmission 实际用的下载目录 = .env 里的 BT_DOWNLOAD_DIR 吗（不一致就永远扫不到货）
+grep -h '"download-dir"' /etc/transmission-daemon/settings.json \
+  /var/lib/transmission/.config/transmission-daemon/settings.json 2>/dev/null
+# ④ 磁盘：/ttdownload 可用空间必须 > 预留（默认 10G），否则所有任务永远"空间不足"
+df -h /ttdownload 2>/dev/null || df -h /
+```
+
 ---
 
 ## 8. 已知/未完成
 
+### 8.1 本窗口修掉的（都配了会红的回归测试，别再退回去）
+
+一次"部署前代码审查"抓到的**会真出事**的行为，已修 + 有测试锁住：
+
+| # | 原来会怎样 | 修在哪 | 测试 |
+| --- | --- | --- | --- |
+| 1 | **incomplete（还在下的种子）交出去的文件发布完成后，收尾阶段把 transmission 任务删了、目录也清了** —— 种子还在下，删掉等于把没下完的部分永久干掉 | `btHarvest` 给 incomplete 来源的任务打 `keepTorrent`，③ 只记账不清理 | `bt-safety.test.mjs` 用例 1 |
+| 2 | "共用目录只删自己的"把**别的任务正在归档的源文件**删了（BT 下载任务的 `meta.files` 恰好就是那些文件）→ 打包失败/内容丢失 | `btCleanup.otherTasksFilePaths()`：共用目录里别的活跃任务点了名的路径一律不删 | `bt-safety.test.mjs` 用例 2 |
+| 3 | incomplete 重复发布：发布任务 completed 后不在 in-flight，找不到下载任务时每个 tick 重发一遍 | `btHarvest.filesAlreadyHandedOff()`：按 `payload.harvest.files` 做文件级账本 | `bt-safety.test.mjs` 用例 1 |
+| 4 | 空间回血时 `usable` 在循环里不递减 → 一次性放行所有暂停任务（合计远超可用空间）→ 抖动/撑爆磁盘 | `scheduler.resumeSpacePaused()` 放行一个就扣一个 | `bt-safety.test.mjs` 用例 3 |
+| 5 | incomplete 交接前不标 unwanted → 归档搬走后 transmission 重新下载（重复占空间+下次扫货又发一遍） | `btHarvest.markFilesUnwanted()` | `bt-safety.test.mjs` 用例 1 |
+| 6 | 同名视频（`CD1/movie.mp4` + `CD2/movie.mp4`）打 zip 直接 `cannot repeat names` 永久失败 → 每 2 分钟重建任务再失败 | `archive.stageForZip()`：只在真重名时硬链接暂存 + 改名 `_2` | `bt-safety.test.mjs` 用例 4 |
+| 7 | 种子记录永远停在 `downloading`（`'done'` 从没被写过）→ 界面永远"下载中"、按钮永久禁用 | `btHarvest` ③ 收尾时 `seedsRepo.update(seedId,{status:'done'})` | 随用例 1 |
+| 8 | `harvestDone` 无条件置位 → 清理被跳过/失败时目录永久残留且不再重试 | 只有目录真的没了才置位；目录还被别的任务占用时整块推迟 | 随用例 1 |
+| 9 | BT 日志里仍有多处会带出种子名/内容名（zip 的 argv、扫货日志、`removed` 列表、space-freed 的 detail、任务失败消息…） | 见 §6.1；`bt-log-redaction.test.mjs` 6 个阶段全链路锁住 | `bt-log-redaction.test.mjs` |
+| 10 | 全新机器上 transmission 的两个目录可能根本不存在（只有 `--update` 或 `ubuntutr.sh` 才建）→ BT 下完了永远扫不到货，界面看不出原因 | `deploy.sh` 新增 `ensure_transmission_dirs()`，首部署也执行，并核对 transmission 实际 `download-dir` 与 `.env` 是否一致 | 手工（见 §7 三条确认） |
+| 11 | 首次部署若 NodeSource 失败，发行版 `nodejs` 包**不带 npm** → 走到 `die 缺少必要命令: npm`；以及 root 建目录 + sudo 部署时 `npm ci` 写不进去 | `deploy.sh` 装 `nodejs npm`、补 npm 自愈；`REPO_OWNER` 加可写性判断 | `deploy-script.test.mjs` |
+
+### 8.2 还没做 / 需要你决定
+
 - **transmission 自己的队列**：它默认 `download-queue-size=5`（最多 5 个种子活跃下载）。
   我们这边放行了 10 个、界面显示"下载中"，transmission 实际只活跃 5 个。
   **用户还没决定要不要一起放开**（要放开就在 `start()` 里 `session-set`）。
-- **种子文件已删**：任务被超时清理后想重下，需要重新上传 .torrent
-  （可选改进：把元数据 base64 存库，支持从库重新丢给 transmission）。
+- **发布任务失败后没有重试/收尾路径**（`pipeline.ts` 失败就 `failed`）：父下载任务不会收尾，
+  源目录也不会被清理；用户点"重试"会走 `prepare` → 种子文件已删 → 永久失败。
+  建议：给发布任务加有限重试 + 失败后保留目录并明确提示。
+- **磁盘口径**：`disk.ts` 只测 `DOWNLOAD_ROOT` 所在分区，而 BT 数据写在 `BT_DOWNLOAD_DIR`；
+  两者不同分区时准入/预留会算错。归档/加密需要的额外空间（zip 要再占一份源文件大小）也没进准入。
+- **payload 读-改-写竞态**：`transmission.poll` / `btHarvest` / `btEvict` / `scheduler` 都是
+  "读旧快照 → await → 整体写回"，定时器并发时可能互相覆盖 `harvestedFiles`/`timedOutAt`/`pausedBySpace`。
+- **8 小时口径**：因空间不足被暂停的时间也计入 8 小时且不顺延（`btHandedAt` 不因暂停顺延）。
+- **完成判定只看"文件在 downloads 目录"**：没有校验 `percentDone`；若 transmission 关掉了
+  `incomplete-dir-enabled`，半成品会被当成品发布。部署默认开启，所以生产不触发，但代码不设防。
+- **`db.ts` 把 `pageSize` 截到 200**，而扫货/入队都传 500 → 任务数 >200 时去重与收尾会漏项。
 - 网页端的下载路由不支持 Range（安卓路由支持）—— 浏览器下载不能断点续传。
 - 老目录 `/ttdownload/transmission/downloads` 已弃用；升级上来的机器里若有遗留文件不会被扫到。
-- `btEvict` 的设置项 `btEvict.*` 已被 `btPolicy.*` 取代，旧字段留在配置里没清（无害）。
+- `btEvict` 的设置项 `btEvict.*` 已被 `btPolicy.*` 取代，旧字段留在配置里没清（无害）；
+  `BT_EVICT_*` 环境变量同理（README 的环境变量表已标注"已废弃"）。
+- `pipeline` 把归档文件 move 进 `downd_ok_p2_jiami_tmp` 之后、`fileId` 落库之前若崩溃，
+  该单元会丢且临时 `.data` 不会回收（没有清理任务）。

@@ -6,6 +6,7 @@ import { freeBytes } from './disk';
 import { getSettings } from '../services/settings';
 import { conflict, notFound } from '../utils/http';
 import { handoffToArchive } from '../services/pipeline';
+import { HIDDEN_NAME, hideText } from '../services/btAnon';
 import { aria2Module } from '../modules/aria2';
 import { transmissionModule } from '../modules/transmission';
 import { webvideoModule } from '../modules/webvideo';
@@ -37,6 +38,9 @@ function isPermanentError(msg: string): boolean {
 function failTask(task: TaskWithPayload, message: string): void {
   const settings = getSettings();
   const retryCount = Number(task.retryCount ?? 0);
+  // BT：错误信息可能来自文件系统/子进程，里面会带种子名或内容文件名 → 进日志前先脱敏
+  // （任务表里的 error 字段照旧保留原文，界面要能看到真正的原因）
+  const logMessage = task.module === 'transmission' ? hideText(message) : message;
   if (!isPermanentError(message) && retryCount < settings.autoRetry) {
     tasksRepo.update(task.id, {
       status: 'waiting',
@@ -44,12 +48,12 @@ function failTask(task: TaskWithPayload, message: string): void {
       error: `${message}（第 ${retryCount + 1} 次重试）`,
       speedBps: 0,
     });
-    taskLog(task.id).mark('TASK_RETRY', `失败，将自动重试(${retryCount + 1}/${settings.autoRetry})：${message}`);
+    taskLog(task.id).mark('TASK_RETRY', `失败，将自动重试(${retryCount + 1}/${settings.autoRetry})：${logMessage}`);
     logger.child('scheduler').mark('TASK_FAIL', `任务 #${task.id} 失败（可重试）`, {
       module: task.module,
       retryCount: retryCount + 1,
       autoRetry: settings.autoRetry,
-      message,
+      message: logMessage,
     });
   } else {
     tasksRepo.update(task.id, { status: 'failed', error: message, speedBps: 0, finishedAt: new Date().toISOString() });
@@ -58,10 +62,10 @@ function failTask(task: TaskWithPayload, message: string): void {
       retryCount,
       autoRetry: settings.autoRetry,
       permanent: isPermanentError(message),
-      message,
+      message: logMessage,
       url: task.url,
       // BT 的内容名不进日志（用户要求）；其它模块保留标题便于排查
-      title: task.module === 'transmission' ? '（已隐藏）' : task.title,
+      title: task.module === 'transmission' ? HIDDEN_NAME : task.title,
     });
   }
   emit(task.id);
@@ -104,7 +108,8 @@ async function pollRunning(): Promise<number> {
       }
       applyProgress(task.id, r);
     } catch (e) {
-      taskLog(task.id).error(`[MARK:ERROR] 轮询任务异常: ${(e as Error).stack ?? (e as Error).message}`);
+      const detail = (e as Error).stack ?? (e as Error).message;
+      taskLog(task.id).error(`[MARK:ERROR] 轮询任务异常: ${task.module === 'transmission' ? hideText(detail) : detail}`);
     }
   }
   return running.length;
@@ -157,12 +162,13 @@ async function resumeSpacePaused(freeMinusReserve: number): Promise<void> {
   const runningNow = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
   const reservedNow = runningNow.reduce((sum, t) => sum + Math.max(0, t.expectBytes || 0), 0);
   const usable = freeMinusReserve - reservedNow;
+  let spendable = usable;
   const nothingRunning = runningNow.length === 0;
   for (const task of paused) {
     if (!(task.payload ?? {}).pausedBySpace) continue;
     const need = Math.max(0, task.expectBytes || 0);
     // 防死锁：一个都没在跑时必须放行最老的（否则永远没人下完、空间永远回不来）
-    if (usable - need < 0 && !nothingRunning) continue;
+    if (spendable - need < 0 && !nothingRunning) continue;
     const adapter = adapters[task.module];
     try {
       await adapter.resume(task);
@@ -174,6 +180,10 @@ async function resumeSpacePaused(freeMinusReserve: number): Promise<void> {
       error: null,
       payload: { ...(task.payload ?? {}), pausedBySpace: false },
     });
+    // ⚠️ 放行一个就要把这一个的预留扣掉：以前整个循环用同一个 usable，
+    //    4 个各需"几乎全部可用空间"的任务会被一次性全部放行（合计 4 倍），
+    //    下一轮又因空间压力把它们暂停 → 来回抖动，而且真的会撑爆磁盘。
+    spendable -= need;
     emit(task.id);
     logger.info(`空间已释放，恢复任务 #${task.id}`);
   }

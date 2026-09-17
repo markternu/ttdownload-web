@@ -294,7 +294,9 @@ export const tasksRepo = {
     };
     const order = sortMap[opts.sort ?? 'created_desc'] ?? 'created_at DESC';
     const page = Math.max(1, opts.page ?? 1);
-    const pageSize = Math.min(200, Math.max(1, opts.pageSize ?? 20));
+    // 上限 1000：扫货/入队/收尾都要"一次拿到全部非终态任务"做去重（它们传 500）。
+    // 以前这里硬截 200 —— 任务数一多，去重与收尾就会漏项，从而产生重复的发布任务。
+    const pageSize = Math.min(1000, Math.max(1, opts.pageSize ?? 20));
     const rows = db
       .prepare(`SELECT * FROM tasks ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`)
       .all(...(args as never[]), pageSize, (page - 1) * pageSize) as TaskRow[];

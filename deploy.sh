@@ -55,7 +55,14 @@ SERVICE_NAME="ttdownload-web"
 # 仓库属主：sudo 部署时以它身份执行 git/npm/构建，避免产物变成 root 所有
 REPO_OWNER="$(stat -c '%U' "$PROJECT_DIR" 2>/dev/null || echo root)"
 if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" && -d "/home/${SUDO_USER}" ]]; then
-  REPO_OWNER="${SUDO_USER}"
+  # 只有目录确实属于该用户、或它真有写权限时才以它身份构建。
+  # 血案：`sudo git clone` / root 建目录后再 sudo ./deploy.sh 时目录是 root 所有，
+  # 而 SUDO_USER 是普通用户 → as_owner npm ci 往 root 目录里写 → EACCES，首次部署直接中断。
+  if [[ "$REPO_OWNER" == "${SUDO_USER}" ]] || sudo -u "${SUDO_USER}" test -w "$PROJECT_DIR" 2>/dev/null; then
+    REPO_OWNER="${SUDO_USER}"
+  else
+    printf '\033[1;33m[deploy]\033[0m %s\n' "项目目录 $PROJECT_DIR 属于 ${REPO_OWNER}（不是 ${SUDO_USER}）→ 以 ${REPO_OWNER} 身份构建，避免写入被拒"
+  fi
 fi
 as_owner() {
   if [[ "${REPO_OWNER}" != "root" ]] && id "${REPO_OWNER}" >/dev/null 2>&1; then
@@ -231,6 +238,43 @@ ensure_aria2() {
   fi
   log "aria2 安装完成：$(aria2c --version 2>/dev/null | head -1)"
   return 0
+}
+
+# 确保 transmission 自己的两个目录存在，并核对它实际用的目录和 .env 是否一致。
+#
+# 为什么必须做（真机坑）：这两个目录**不是我们的**（属主 debian-transmission），应用的
+# ensureDirs() 故意不创建它们；而它们只在「走 ubuntutr.sh 装 transmission」或「--update」时
+# 才会被建。如果机器上**已经有** transmission-daemon（镜像自带 / 用户先装过），脚本会跳过
+# ubuntutr.sh，于是 /var/lib/transmission/downloads 根本不存在，而 .env 写死指向它 →
+# BT 下完了也永远扫不到货、清理也删不到东西，界面上完全看不出原因。
+ensure_transmission_dirs() {
+  local d cfg actual want
+  for d in /var/lib/transmission/downloads /var/lib/transmission/incomplete; do
+    if [[ ! -d "$d" ]]; then
+      mkdir -p "$d" 2>/dev/null || true
+      if id debian-transmission >/dev/null 2>&1; then chown -R debian-transmission:debian-transmission "$d" 2>/dev/null || true; fi
+      log "已创建 transmission 目录: $d"
+    fi
+  done
+  # .env 里写的目录（这个函数可能在 source .env 之前被调用，所以直接读文件）
+  want="${BT_DOWNLOAD_DIR:-}"
+  if [[ -z "$want" && -f .env ]]; then
+    want="$(sed -n 's/^BT_DOWNLOAD_DIR=//p' .env | head -1)"
+  fi
+  [[ -n "$want" ]] || want="/var/lib/transmission/downloads"
+  for cfg in /etc/transmission-daemon/settings.json \
+             /var/lib/transmission/.config/transmission-daemon/settings.json \
+             /var/lib/transmission-daemon/.config/transmission-daemon/settings.json; do
+    [[ -f "$cfg" ]] || continue
+    actual="$(sed -n 's/.*"download-dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cfg" | head -1)"
+    if [[ -n "$actual" && "$actual" != "$want" ]]; then
+      warn "transmission 实际下载目录是 $actual，而 .env 的 BT_DOWNLOAD_DIR=$want —— 不一致会让「下完了但永远扫不到货」！"
+      warn "二选一：① 把 .env 改成 BT_DOWNLOAD_DIR=$actual 后重新部署；② 把 $cfg 的 download-dir 改成 $want 并重启 transmission-daemon"
+    elif [[ -n "$actual" ]]; then
+      log "transmission 下载目录与 .env 一致：$actual"
+    fi
+    break
+  done
 }
 
 # transmission：没装则必须用工程自带脚本安装（交互提示原样保留，供用户输入白名单/密码等）
@@ -568,14 +612,8 @@ case "$ACTION" in
     # 老部署升级时自愈：补 yt-dlp-ejs / JS 运行时（缺了 YouTube 一定失败）
     if [[ $SKIP_APT -eq 0 ]]; then ensure_ytdlp_stack; fi
     if [[ $SKIP_APT -eq 0 ]]; then ensure_cookie_browser; fi
-    # 确保 transmission 的两个目录存在（它自己会写；我们只读+搬走）。缺失时创建并交给 transmission 用户。
-  for d in /var/lib/transmission/downloads /var/lib/transmission/incomplete; do
-    if [[ ! -d "$d" ]]; then
-      mkdir -p "$d" 2>/dev/null || true
-      if id debian-transmission >/dev/null 2>&1; then chown -R debian-transmission:debian-transmission "$d" 2>/dev/null || true; fi
-      log "已创建 transmission 目录: $d"
-    fi
-  done
+    # 确保 transmission 的两个目录存在 + 核对它实际用的目录（缺失会让 BT 静默失效）
+    ensure_transmission_dirs
 
   # 老部署升级时把"写死的并发上限"改成 0=不限：准入只该由磁盘空间决定。
   # 注意：.env 的优先级高于代码里的默认值，所以光改代码对**已部署的机器无效**，
@@ -687,7 +725,7 @@ if [[ $SKIP_APT -eq 0 ]]; then
     if ! curl -fsSL "https://deb.nodesource.com/setup_${NODE_SETUP}.x" | bash -; then
       warn "NodeSource 源配置失败（该系统版本可能暂不支持），改用发行版仓库安装 nodejs"
     fi
-    apt-get install -y nodejs || warn "NodeSource 的 nodejs 安装失败，尝试发行版仓库"
+    apt-get install -y nodejs npm || warn "NodeSource 的 nodejs 安装失败，尝试发行版仓库"
     if ! command -v node >/dev/null 2>&1 || [[ "$(detect_node_major || echo 0)" -lt 18 ]]; then
       warn "当前 Node 仍不可用或版本过低（$(node -v 2>/dev/null || echo 未安装)），改用发行版仓库重试"
       apt-get update -y >/dev/null 2>&1 || true
@@ -704,6 +742,13 @@ if [[ $SKIP_APT -eq 0 ]]; then
   ensure_cookie_browser
 else
   warn "按参数要求跳过 apt 安装"
+fi
+
+# npm 不一定随 nodejs 一起装上（Debian/Ubuntu 的 nodejs 包历来不带 npm，npm 是独立包）
+# → 这里单独补一次，别等到下面那个 for 循环直接 die 掉整个部署
+if [[ $SKIP_APT -eq 0 ]] && ! command -v npm >/dev/null 2>&1; then
+  warn "未检测到 npm，单独安装（发行版仓库的 nodejs 包不包含 npm）"
+  apt-get install -y npm || warn "npm 安装失败，请手动 apt install npm"
 fi
 
 for c in node npm openssl; do
@@ -728,6 +773,10 @@ mkdir -p \
   "$DOWNLOAD_ROOT/xiaofeizhe_downd" \
   "$DOWNLOAD_ROOT/state"
 chmod -R 755 "$DOWNLOAD_ROOT"
+
+# transmission 自己的两个目录不在 $DOWNLOAD_ROOT 下（属主 debian-transmission），
+# 必须在首次部署时就确认存在、且和 .env 指向一致 —— 否则 BT 下载完永远扫不到货（见函数注释）。
+ensure_transmission_dirs
 
 # ---------------------------------------------------------------- 3. 依赖与构建
 cd "$PROJECT_DIR"

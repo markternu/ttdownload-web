@@ -38,7 +38,8 @@ btRouter.post(
   upload.single('file'),
   asyncHandler(async (req, res) => {
     if (!req.file) throw badRequest('未收到上传文件（字段名应为 file）');
-    logger.info(`收到种子 zip 上传: ${req.file.filename}（${req.file.size} 字节）`);
+    // 上传的 zip 名往往就是资源名 → 日志脱敏（用户要求 BT 日志不出现名字）
+    logger.info(`收到种子 zip 上传（名称已隐藏，${req.file.size} 字节）`);
     const extracted = await scanZipUploads();
     registerPendingSeeds();
     const seeds = seedsRepo.all();

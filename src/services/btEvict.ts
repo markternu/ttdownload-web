@@ -104,15 +104,22 @@ async function dropTorrent(task: TaskWithPayload, name: string, reason: string):
     }
   }
   const freed = cleanupBtTaskDirs(task as Task, name, 'bt-timeout');
-  if (freed > 0) bus.emitSpaceFreed({ bytes: freed, reason: 'bt-timeout', detail: { taskId: task.id, name, reason } });
+  // ⚠️ detail 会被调度器的 SPACE_FREED 日志整个打出来 → 不能带种子名
+  if (freed > 0) bus.emitSpaceFreed({ bytes: freed, reason: 'bt-timeout', detail: { taskId: task.id, reason: hideText(reason) } });
   return freed;
 }
 
 export async function runBtEvict({ dryRun = false } = {}): Promise<EvictSummary> {
   const policy = getSettings().btPolicy;
-  const checkAfterMs = Math.max(1, Number(policy.checkAfterHours) || 8) * 3600 * 1000;
-  const graceMs = Math.max(1, Number(policy.graceHours) || 4) * 3600 * 1000;
-  const minPercent = Math.max(0, Math.min(100, Number(policy.minProgressPercent) || 60));
+  // ⚠️ 别用 `Number(x) || 默认值`：那样 minProgressPercent=0（"到点就清，不看进度"）会被
+  //    悄悄换成 60，用户在设置页填 0 却怎么都不生效。
+  const numOr = (v: unknown, d: number): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : d;
+  };
+  const checkAfterMs = Math.max(1, numOr(policy.checkAfterHours, 8)) * 3600 * 1000;
+  const graceMs = Math.max(1, numOr(policy.graceHours, 4)) * 3600 * 1000;
+  const minPercent = Math.max(0, Math.min(100, numOr(policy.minProgressPercent, 60)));
 
   const summary: EvictSummary = {
     checked: 0, evicted: 0, salvaged: 0, kept: 0, freedBytes: 0, candidates: [],
