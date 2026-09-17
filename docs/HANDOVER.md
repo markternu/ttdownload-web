@@ -285,6 +285,46 @@ cd <项目目录> && sudo ./deploy.sh --update
 
 ---
 
+## 7.5 真机测试（局域网树莓派）—— 改完先在这儿验，再推 main
+
+局域网里有一台树莓派 `mypi@192.168.2.163`（Debian 13 / aarch64 / 4 核 / 20G 可用），
+已经部署着本项目，**用它做"真机验证"**（本机 macOS 绿 ≠ 真机绿，这轮就抓出一堆环境差异）。
+
+```bash
+ssh mypi@192.168.2.163            # 已配免密（本机 ~/.ssh/id_ed25519 已加入它的 authorized_keys）
+cd ~/ttdownload-web
+
+# ① 拿待验证的代码（推荐先推临时分支，别直接动 main）
+git fetch origin -q && git checkout -q <分支> && git pull -q origin <分支>
+
+# ② 部署（重建前后端 + 重启 + 健康检查；约 1~2 分钟）
+sudo ./deploy.sh --update
+
+# ③ 跑测试：**必须给 TTDL_TEST_ROOT**（树莓派的 /tmp 是 1.9G 的 tmpfs，
+#    而磁盘准入用例要摆布 6G 空间；不给就只跑单元、空间类用例会自动跳过）
+TTDL_TEST_ROOT=$HOME/.ttdl-test node --test $(ls test/*.test.mjs \
+  | grep -vE 'logging-diagnostics|webvideo-module|webvideo-formats')
+```
+
+> 排除的那 3 个文件是**真连外网/需要 YouTube CDN** 的用例，在真机上会因网络环境红/卡，
+> 属既有情况（本机也这样）。
+
+**推荐流程：临时分支验证 → 通过才推 main**
+
+```bash
+git push origin HEAD:refs/heads/pi-verify      # ① 推临时分支（main 不动）
+# ② 树莓派上 checkout pi-verify → deploy → 跑测试
+git push origin HEAD:main                      # ③ 绿了才推 main
+git push origin --delete pi-verify             # ④ 删临时分支
+```
+
+**这轮为了"能在真机上跑"修掉的测试环境假设**（都不是产品 bug，但都会让真机一片红）：
+`setupRuntime()` 会让测试读到**部署机的生产 `.env`**（→ 全量 401 / bt 目录 EACCES）、
+部署测试的假 PATH 里含 `/usr/bin`（真机上有真 aria2c/transmission-daemon/node → "未安装"模拟失效）、
+`/tmp` 是 tmpfs、缺 `xxd`、真机装了 chromium 导致"没有浏览器"的前提不成立。
+
+---
+
 ## 8. 已知/未完成
 
 ### 8.1 本窗口修掉的（都配了会红的回归测试，别再退回去）
