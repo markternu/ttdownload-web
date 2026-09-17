@@ -6,6 +6,7 @@ import { initNamePrefix } from './services/crypto';
 import { recoverTasks, startScheduler, stopScheduler, kickScheduler } from './core/scheduler';
 import { startPipeline, stopPipeline } from './services/pipeline';
 import { startBtEvictWorker, stopBtEvictWorker } from './services/btEvict';
+import { applyNoLimitPolicy } from './modules/transmission';
 import { startBtHarvestWorker, stopBtHarvestWorker } from './services/btHarvest';
 import { ensureAria2Daemon } from './modules/aria2Client';
 import { logAuthBootState } from './services/auth';
@@ -52,6 +53,8 @@ async function main(): Promise<void> {
   void ensureAria2Daemon()
     .then((r) => logger.mark('BOOT', `aria2 RPC 自检：${r.message}`))
     .catch((e) => logger.child('aria2').warn(`[MARK:ARIA2_DAEMON] 启动时拉起 aria2 失败：${(e as Error).message}`));
+  // 「绝不限速」：开机就把 transmission 的速率限制/队列/缓存闸门全部打开（用户要求带宽拉满）
+  void applyNoLimitPolicy().catch(() => undefined);
   startPipeline();
   startScheduler();
   startBtEvictWorker();

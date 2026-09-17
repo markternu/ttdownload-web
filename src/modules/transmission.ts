@@ -133,6 +133,42 @@ export class TransmissionClient {
   }
 }
 
+/**
+ * 「绝不限速」策略：开机（或第一次连上 transmission）时把它的速率/队列闸门全部打开。
+ *
+ * 用户明确要求：**不能有任何下载限速，部署环境有多少带宽就用多少**。
+ * transmission 出厂/安装脚本可能带着限速或龟速模式（alt-speed 默认 50KB/s）、
+ * 队列只有 5 个种子活跃、写盘缓存只有 4MB（SD 卡/慢盘上会直接拖慢下载）。
+ * 这些都不是我们代码限的，但用户看到的就是"慢" —— 所以这里统一关掉/放宽。
+ *
+ * 幂等；失败只告警（不影响下载）。
+ */
+export async function applyNoLimitPolicy(): Promise<void> {
+  const client = transmissionClient();
+  const probe = await client.probe();
+  if (!probe.ok) return; // 连不上就先算了，下次再说
+  const wanted: Record<string, unknown> = {
+    // —— 速率：全关（不是设成 0 而是 enabled=false，双保险）——
+    'speed-limit-down-enabled': false,
+    'speed-limit-up-enabled': false,
+    'alt-speed-enabled': false,
+    'alt-speed-time-enabled': false,
+    // —— 队列：不因为"同时活跃的种子太多"而排队 ——
+    'download-queue-enabled': false,
+    'seed-queue-enabled': false,
+    // —— 缓存与连接数：给足，避免慢盘/少 peer 成为瓶颈 ——
+    'cache-size-mb': 64,
+    'peer-limit-global': 500,
+    'peer-limit-per-torrent': 100,
+  };
+  try {
+    await client.call('session-set', wanted);
+    logger.child('transmission').mark('TASK_STATE', '已声明「绝不限速」：transmission 速率限制全关、队列不排队、缓存 64MB', wanted);
+  } catch (e) {
+    logger.child('transmission').warn(`设置 transmission 不限速失败（不影响下载）：${hideText((e as Error).message)}`);
+  }
+}
+
 export function transmissionClient(): TransmissionClient {
   return new TransmissionClient();
 }

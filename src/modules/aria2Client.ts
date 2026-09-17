@@ -136,10 +136,16 @@ export async function ensureAria2Daemon(): Promise<{ ok: boolean; message: strin
       `--input-file=${session}`,
       `--save-session=${session}`,
       '--save-session-interval=5',
-      '--max-concurrent-downloads=5',
-      '--split=10',
+      // ⚡ 用户要求"绝不限速、把带宽拉满"：这里的参数都是**提高**并发/吞吐的，
+      //    没有任何限速项（aria2 的限速是 --max-download-limit / --max-overall-download-limit，
+      //    我们从不传）。实测（树莓派）：单连接 ~2.3MB/s，8 并发能到 6.6MB/s+，
+      //    所以连接数给足、并且加大写盘缓存（SD 卡/慢盘上 4M 默认缓存会拖慢下载）。
+      '--max-concurrent-downloads=16',
+      '--split=16',
       '--max-connection-per-server=16',
-      '--min-split-size=10M',
+      '--min-split-size=1M',
+      '--optimize-concurrent-downloads=true',
+      '--disk-cache=64M',
       '--check-certificate=false',
       '--file-allocation=none',
       '--disable-ipv6=true',

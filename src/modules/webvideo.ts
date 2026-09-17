@@ -742,6 +742,45 @@ export function isRateLimitError(raw: string): boolean {
 }
 
 /** 读可配置毫秒数：**未设置/为空时必须用默认值**（Number('') === 0 曾把阈值误设成 0） */
+/**
+ * 下载带宽相关的旋钮（用户要求：**绝不限速**，把部署环境的带宽拉满）。
+ *
+ * 为什么需要它们：yt-dlp 默认 `--concurrent-fragments 1` —— HLS/DASH（YouTube 等）
+ * 一次只取一个分片；直链 MP4 更是纯单连接。实测（树莓派）：单连接 ~2.3MB/s，
+ * 8 并发聚合能到 6.6MB/s+，也就是说**不加并发就永远顶在单连接上限**。
+ */
+const envInt = (name: string, def: number): number => {
+  const n = Number(process.env[name] ?? def);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : def;
+};
+
+/** 这个可执行文件在不在 PATH 上（用于决定要不要用 aria2c 当外部下载器） */
+function binOnPath(bin: string): boolean {
+  if (!bin) return false;
+  if (bin.includes('/')) {
+    try {
+      return fs.existsSync(bin);
+    } catch {
+      return false;
+    }
+  }
+  return String(process.env.PATH ?? '')
+    .split(path.delimiter)
+    .some((d) => {
+      if (!d) return false;
+      try {
+        return fs.existsSync(path.join(d, bin));
+      } catch {
+        return false;
+      }
+    });
+}
+
+/** 分片并发数（0 = 不传，交给 yt-dlp 默认） */
+export const YTDLP_CONCURRENT_FRAGMENTS = envInt('YTDLP_CONCURRENT_FRAGMENTS', 16);
+/** 单文件多连接数（aria2c 外部下载器；0 = 不用外部下载器） */
+export const YTDLP_ARIA2_CONNECTIONS = envInt('YTDLP_ARIA2_CONNECTIONS', 16);
+
 const envMs = (name: string, def: number): number => {
   const raw = process.env[name];
   if (raw === undefined || String(raw).trim() === '') return def;
@@ -1107,6 +1146,20 @@ export const webvideoModule: ModuleAdapter = {
       path.join(config.dirs.webTools, '%(title).150B [%(id)s].%(ext)s'),
     ];
     if (settings.maxSpeedBps > 0) commonArgs.push('-r', String(settings.maxSpeedBps));
+    // ⚡ 把带宽拉满：分片并发（HLS/DASH 默认只下 1 个分片 = 单连接速度）
+    if (YTDLP_CONCURRENT_FRAGMENTS > 0) {
+      commonArgs.push('--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS));
+    }
+    // ⚡ 直链文件用 aria2c 做多连接下载（yt-dlp 自身单连接，永远吃不满链路）
+    if (YTDLP_ARIA2_CONNECTIONS > 0 && binOnPath(config.bins.aria2)) {
+      const n = String(YTDLP_ARIA2_CONNECTIONS);
+      commonArgs.push(
+        '--downloader', config.bins.aria2,
+        // 注意：**不要**加 --console-log-level=warn —— yt-dlp 靠 aria2c 的控制台输出解析进度，
+        // 屏蔽了就会"下载在跑但界面一直 0%"
+        '--downloader-args', `aria2c:-x${n} -s${n} -k1M --file-allocation=none --disk-cache=64M`,
+      );
+    }
     if (config.bins.ffmpeg) commonArgs.push('--ffmpeg-location', config.bins.ffmpeg);
     const extraArgs = parseExtraArgs(String(settings.webvideoExtraArgs ?? ''));
     if (extraArgs.length) commonArgs.push(...extraArgs);
