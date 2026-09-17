@@ -83,6 +83,13 @@ export const config = {
   btSelect: {
     /** 单个文件小于它：多个小文件合成一个 zip；大于等于它：一个一个单独走 */
     smallFileMaxBytes: num(process.env.BT_SMALL_FILE_MAX, 300 * 1024 ** 2),
+    // 多个视频时"挑同类"：独树一帜下最大，相差无几一起下
+    /** 体积相差多少倍就算"异类" */
+    bigRatio: num(process.env.BT_BIG_RATIO, 5),
+    /** 情况3：最大的不到这个字节数时，"一堆小文件"优先（默认 200MB） */
+    smallCeilingBytes: num(process.env.BT_SMALL_CEILING, 200 * 1024 ** 2),
+    /** 情况3：小文件至少几个（默认 3） */
+    manySmallCount: num(process.env.BT_MANY_SMALL_COUNT, 3),
   },
   // BT 种子超时策略：扔给 transmission 后只读进度，8 小时内不干涉
   btPolicy: {

@@ -5,7 +5,7 @@ import { logger, taskLog } from '../core/logger';
 import { runCommand } from '../services/archive';
 import { getSettings } from '../services/settings';
 import { createPublishTask } from '../services/pipeline';
-import { selectBtFiles } from '../services/btSelect';
+import { selectBtFiles, pickDominantVideos } from '../services/btSelect';
 import { seedsRepo, tasksRepo } from '../core/db';
 import { cleanupBtTaskDirs } from '../services/btCleanup';
 import type { SeedItem } from '../types';
@@ -433,19 +433,44 @@ async function syncBtVideoSelection(task: TaskWithPayload, torrentId: number): P
   const torrent = info.torrents?.[0];
   if (!torrent) throw new Error('无法读取种子信息');
   const files = torrent.files ?? [];
-  const picked = selectBtFiles(
-    files.map((f) => ({ name: f?.name ?? '', length: f?.length ?? 0 })),
-    { videoExts: config.videoExts },
-  );
-  const wantedIdx = picked.keep;
-  const selectedBytes = picked.keptBytes;
-
+  const entries = files.map((f) => ({ name: f?.name ?? '', length: f?.length ?? 0 }));
+  const picked = selectBtFiles(entries, { videoExts: config.videoExts });
   taskLog(task.id).mark('BT_SELECT',
-    `只挑视频：保留 ${wantedIdx.length} 个（${(selectedBytes / 1024 ** 2).toFixed(1)}MB），排除 ${picked.dropped.length} 个非视频`,
-    { keep: wantedIdx.map((i) => files[i]?.name ?? '').slice(0, 30) });
+    `只挑视频：${picked.keep.length} 个（${(picked.keptBytes / 1024 ** 2).toFixed(1)}MB），排除 ${picked.dropped.length} 个非视频`);
   for (const d of picked.dropped.slice(0, 10)) {
     taskLog(task.id).info(`不下载: ${d.name}（${(d.sizeBytes / 1024 ** 2).toFixed(1)}MB）—— ${d.reason}`);
   }
+
+  // 多个视频时再挑"同类"：独树一帜下最大，相差无几一起下（用户要求）
+  const videos = picked.keep.map((i) => entries[i]);
+  const btSel = getSettings().btSelect;
+  const dominant = pickDominantVideos(videos, {
+    bigRatio: btSel.bigRatio,
+    smallCeilingBytes: btSel.smallCeilingBytes,
+    manySmallCount: btSel.manySmallCount,
+  });
+  const wantedIdx = dominant.keep.map((k) => picked.keep[k]);
+  const droppedByPick = dominant.dropped.map((d) => ({ ...d, index: picked.keep[d.index] }));
+
+  if (videos.length > 1) {
+    const ruleText = {
+      'single': '只有一个视频，直接下',
+      'unique-biggest': '独树一帜：只下最大的',
+      'many-smalls-over-weak-big': '最大的太小、小的成堆：下同类小文件',
+      'similar-group': '相差无几：同类的都下',
+    }[dominant.rule];
+    taskLog(task.id).mark('BT_PICK',
+      `视频挑同类（${ruleText}）：下 ${wantedIdx.length} 个 / 共 ${videos.length} 个`, {
+        rule: dominant.rule,
+        biggestBytes: dominant.biggestBytes,
+        keep: wantedIdx.map((i) => files[i]?.name ?? ''),
+      });
+    for (const d of droppedByPick) {
+      taskLog(task.id).info(`不下（异类）: ${d.name}（${(d.sizeBytes / 1024 ** 2).toFixed(1)}MB）—— ${d.reason}`);
+    }
+  }
+
+  const selectedBytes = wantedIdx.reduce((sum, i) => sum + Math.max(0, Number(files[i]?.length ?? 0) || 0), 0);
 
   if (wantedIdx.length === 0) {
     await client.call('torrent-remove', { ids: [torrentId], 'delete-local-data': true }).catch(() => undefined);

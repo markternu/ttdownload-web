@@ -94,3 +94,70 @@ test('有文件 >= 300MB -> 大文件一个一个单独走，小的合成一个'
   assert.deepEqual(batch.files.sort(), ['/d/small1.mp4', '/d/small2.mp4']);
   assert.equal(units.length, 3);
 });
+
+// ================= "独树一帜，下最大；相差无几，一起下" =================
+import { pickDominantVideos } from '../dist/services/btSelect.js';
+
+const MB2 = 1024 ** 2;
+const vids = (arr) => arr.map(([name, mb]) => ({ name, length: Math.round(mb * MB2) }));
+const keepNames2 = (files, res) => res.keep.map((i) => files[i].name).sort();
+
+test('只有一个视频：没得判断，直接下', () => {
+  const files = vids([['only.mp4', 800]]);
+  const res = pickDominantVideos(files);
+  assert.deepEqual(keepNames2(files, res), ['only.mp4']);
+  assert.equal(res.rule, 'single');
+});
+
+test('情况1：一个特别大、其他都很小 -> 只下最大的', () => {
+  // 2G / 200MB / 150MB
+  const files = vids([['big.mp4', 2048], ['s1.mp4', 200], ['s2.mp4', 150]]);
+  const res = pickDominantVideos(files);
+  assert.deepEqual(keepNames2(files, res), ['big.mp4'], '只下最大的');
+  assert.equal(res.rule, 'unique-biggest');
+  assert.equal(res.dropped.length, 2);
+});
+
+test('情况2：几个大的 + 几个很小的 -> 下大的那几个（同类）', () => {
+  // 2G / 1G / 160MB / 100MB
+  const files = vids([['a.mp4', 2048], ['b.mp4', 1024], ['c.mp4', 160], ['d.mp4', 100]]);
+  const res = pickDominantVideos(files);
+  assert.deepEqual(keepNames2(files, res), ['a.mp4', 'b.mp4'], '两个大的是同类，小的排除');
+  assert.equal(res.rule, 'similar-group');
+});
+
+test('情况3：那个"大"的其实不到 200MB，而小的成堆 -> 下那堆小的', () => {
+  // 190MB + 4 个小文件
+  const files = vids([['weakbig.mp4', 190], ['s1.mp4', 30], ['s2.mp4', 25], ['s3.mp4', 20], ['s4.mp4', 15]]);
+  const res = pickDominantVideos(files);
+  assert.deepEqual(keepNames2(files, res), ['s1.mp4', 's2.mp4', 's3.mp4', 's4.mp4'].sort(), '下同类小文件，排除那个"伪大的"');
+  assert.equal(res.rule, 'many-smalls-over-weak-big');
+});
+
+test('相差无几 -> 一起下（体积接近的都不排除）', () => {
+  const files = vids([['e1.mp4', 500], ['e2.mp4', 480], ['e3.mp4', 460], ['e4.mp4', 430]]);
+  const res = pickDominantVideos(files);
+  assert.equal(res.keep.length, 4, '四个体积接近，全部下');
+  assert.equal(res.rule, 'similar-group');
+});
+
+test('边界：最大的确实是最大的、但没到"很多倍" -> 不排除第二大的', () => {
+  // 4 倍 < 默认 5 倍阈值
+  const files = vids([['a.mp4', 400], ['b.mp4', 100]]);
+  const res = pickDominantVideos(files);
+  assert.deepEqual(keepNames2(files, res), ['a.mp4', 'b.mp4'].sort(), '只差 4 倍算相差无几');
+});
+
+test('倍数阈值可配：把 bigRatio 调成 3，4 倍就会被判成异类', () => {
+  const files = vids([['a.mp4', 400], ['b.mp4', 100]]);
+  const res = pickDominantVideos(files, { bigRatio: 3 });
+  assert.deepEqual(keepNames2(files, res), ['a.mp4']);
+});
+
+test('情况3 的参数可配：小文件不够多时，仍然下那个大的', () => {
+  // 190MB + 只有 2 个小文件（manySmallCount=3）-> 不触发"下小的"例外
+  const files = vids([['weakbig.mp4', 190], ['s1.mp4', 30], ['s2.mp4', 25]]);
+  const res = pickDominantVideos(files);
+  assert.deepEqual(keepNames2(files, res), ['weakbig.mp4'], '小文件不够多时按"独树一帜"下最大的');
+  assert.equal(res.rule, 'unique-biggest');
+});

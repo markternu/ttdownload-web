@@ -1022,6 +1022,50 @@ export default function SettingsPage() {
               大小写不敏感）。<b>不做任何"广告识别"</b> —— 那套判断会把正片误判成广告。
               种子里若一个视频都没有，任务会被直接跳过。
             </p>
+            <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800/50">
+              <p className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                多个视频时的挑法：<b>独树一帜，下最大；相差无几，一起下</b>
+              </p>
+              <div className="mt-2 grid grid-cols-3 gap-3">
+                <Field label="相差多少倍算异类" hint="比如设 5：最大的比第二名大 5 倍以上就只下最大的。默认 5">
+                  <Input
+                    type="number"
+                    min={2}
+                    max={100}
+                    step={1}
+                    value={String(draft.btSelect.bigRatio)}
+                    onChange={(event) => patch('btSelect', { ...draft.btSelect, bigRatio: Number(event.target.value) })}
+                  />
+                </Field>
+                <Field label="“伪大”的上限（MB）" hint="最大的不到这个大小、而后面有一堆小文件时，改下那堆小的（那大的通常是片头/预告）。默认 200MB">
+                  <Input
+                    type="number"
+                    min={0}
+                    step={10}
+                    value={String(Math.round(draft.btSelect.smallCeilingBytes / 1024 ** 2))}
+                    onChange={(event) =>
+                      patch('btSelect', {
+                        ...draft.btSelect,
+                        smallCeilingBytes: Math.max(0, Number(event.target.value)) * 1024 ** 2,
+                      })
+                    }
+                  />
+                </Field>
+                <Field label="“一堆小的”至少几个" hint="要触发上面那条，小文件至少要有这么多个。默认 3">
+                  <Input
+                    type="number"
+                    min={2}
+                    max={50}
+                    value={String(draft.btSelect.manySmallCount)}
+                    onChange={(event) => patch('btSelect', { ...draft.btSelect, manySmallCount: Number(event.target.value) })}
+                  />
+                </Field>
+              </div>
+              <p className="mt-1.5 text-[11px] leading-4 text-slate-400">
+                例：[2G, 200M, 150M] → 只下 2G；[1G, 2G, 100M, 160M] → 下 1G 和 2G；
+                [190M, 30M, 25M, 20M, 15M] → 下那四个小的。
+              </p>
+            </div>
             <Field
               label="小文件打包阈值（MB）"
               hint="小于它的多个视频会等全部下完后合成一个 zip；大于等于它的一个一个单独走（各自一个成品）。默认 300MB"

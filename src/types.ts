@@ -113,10 +113,16 @@ export interface Settings {
   theme: 'light' | 'dark' | 'system';
   encryptPassword: string;
   moduleConcurrency: { transmission: number; aria2: number; webvideo: number };
-  /** BT：只挑视频；小文件打包阈值 */
+  /** BT：只挑视频 + 多视频挑同类 + 小文件打包阈值 */
   btSelect: {
     /** 单个文件小于它 -> 多个小文件合成一个 zip；大于等于它 -> 一个一个单独走 */
     smallFileMaxBytes: number;
+    /** 体积相差多少倍就算"异类"（独树一帜下最大 / 相差无几一起下） */
+    bigRatio: number;
+    /** 情况3：最大的不到这个字节数时，"一堆小文件"优先 */
+    smallCeilingBytes: number;
+    /** 情况3：小文件至少几个 */
+    manySmallCount: number;
   };
   /** BT 种子超时策略（交给 transmission 后只读进度，8 小时内不干涉） */
   btPolicy: {
