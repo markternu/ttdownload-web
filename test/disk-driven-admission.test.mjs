@@ -40,6 +40,16 @@ test.after(async () => {
 });
 
 const GB = 1024 ** 3;
+
+// 这个文件要"摆布"约 6~8G 的可用空间。若测试根目录所在分区不够（典型：树莓派 /tmp 是
+// 1.9G tmpfs），断言会变成毫无意义的失败 —— 明确跳过并告诉怎么修。
+const NEEDED = 8 * GB;
+const enoughSpace = freeBytes() >= NEEDED;
+const spaceHint =
+  `本机可用于测试的空间不足（需要 ~${NEEDED / GB}G，当前 ${(freeBytes() / GB).toFixed(1)}G）。` +
+  '真机上请把测试根目录指到大分区：TTDL_TEST_ROOT=/home/<user>/.ttdl-test npm run test:only';
+/** 空间不足时自动跳过（skip 而不是 fail） */
+const testWithSpace = (name, fn) => test(name, { skip: enoughSpace ? false : spaceHint }, fn);
 const MB = 1024 ** 2;
 
 /** 把"可用空间"设成指定值：usable = freeBytes() - reserve - reserved，这里只调 reserve */
@@ -70,7 +80,7 @@ const waitingTitles = () =>
     .map((t) => t.title)
     .sort();
 
-test('默认就是"不限并发"：磁盘够就把等待队列里的任务全部放行', () => {
+testWithSpace('默认就是"不限并发"：磁盘够就把等待队列里的任务全部放行', () => {
   reset();
   const d = defaultSettings();
   assert.equal(d.maxConcurrent, 0, '全局并发默认 0=不限');
@@ -81,7 +91,7 @@ test('默认就是"不限并发"：磁盘够就把等待队列里的任务全部
 
 // 注意：本文件用真实磁盘可用空间做基准，而 node --test 会并行跑其它测试文件（也在写文件），
 // 可用空间会有几百 MB 的漂移。所以下面每处的取值都刻意留了 ≥500MB 的余量，不卡在边界上。
-test('空间驱动的准入：一直放行到装不下为止（先进先出，不跳过）', async () => {
+testWithSpace('空间驱动的准入：一直放行到装不下为止（先进先出，不跳过）', async () => {
   reset();
   // 排队：1G / 2G / 3G / 3.5G —— 可用 5G
   waitTask('t1-1G', 1 * GB);
@@ -102,7 +112,7 @@ test('空间驱动的准入：一直放行到装不下为止（先进先出，�
   assert.ok(runningTitles().includes('t3-3G'), '空间够了以后 3G 起来');
 });
 
-test('装不下的跳过，让后面装得下的先跑（不浪费空间）', async () => {
+testWithSpace('装不下的跳过，让后面装得下的先跑（不浪费空间）', async () => {
   reset();
   waitTask('big-3G', 3 * GB);
   waitTask('small-100M', 100 * MB);
@@ -118,7 +128,7 @@ test('装不下的跳过，让后面装得下的先跑（不浪费空间）', as
   assert.deepEqual(runningTitles(), ['big-3G', 'small-100M'].sort(), '回血后 3G 也能起来');
 });
 
-test('回血后自动继续：任务完成腾出空间 -> 排队的任务被放行', async () => {
+testWithSpace('回血后自动继续：任务完成腾出空间 -> 排队的任务被放行', async () => {
   reset();
   const a = waitTask('a-2G', 2 * GB);
   const b = waitTask('b-2G', 2 * GB);
@@ -134,7 +144,7 @@ test('回血后自动继续：任务完成腾出空间 -> 排队的任务被放�
   assert.equal(waitingTitles().length, 0, '等待队列清空');
 });
 
-test('多个模块一起排队时也只看空间，不按模块卡', async () => {
+testWithSpace('多个模块一起排队时也只看空间，不按模块卡', async () => {
   reset();
   const bt = tasksRepo.create({ module: 'transmission', title: 'bt-1G', platform: 'BT', expectBytes: 1 * GB });
   const ar = waitTask('aria2-2G', 2 * GB);
@@ -150,7 +160,7 @@ test('多个模块一起排队时也只看空间，不按模块卡', async () =>
   assert.ok(bt.id > 0 && ar.id > 0 && wv.id > 0);
 });
 
-test('显式设了并发上限才限制（0 以外才有意义）', async () => {
+testWithSpace('显式设了并发上限才限制（0 以外才有意义）', async () => {
   reset();
   updateSettings({ maxConcurrent: 2, moduleConcurrency: { transmission: 0, aria2: 0, webvideo: 0 } });
   for (let i = 0; i < 4; i += 1) waitTask(`c${i}-1G`, 1 * GB);

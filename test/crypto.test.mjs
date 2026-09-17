@@ -17,8 +17,8 @@ test('deriveKeyIv 与老脚本一致（sha256/md5 hex）', () => {
   assert.equal(key.length, 64);
   assert.equal(iv.length, 32);
   // 与 openssl 命令行计算一致
-  const k = execFileSync('bash', ['-c', "printf '%s' ec3e458fcde2582e079f19368abc780f | openssl dgst -sha256 -binary | xxd -p -c 256"]).toString().trim();
-  const i = execFileSync('bash', ['-c', "printf '%s' ec3e458fcde2582e079f19368abc780f | openssl dgst -md5 -binary | xxd -p -c 256"]).toString().trim();
+  const k = execFileSync('bash', ['-c', "printf '%s' ec3e458fcde2582e079f19368abc780f | openssl dgst -sha256 -binary | od -An -tx1 | tr -d ' \n'"]).toString().trim();
+  const i = execFileSync('bash', ['-c', "printf '%s' ec3e458fcde2582e079f19368abc780f | openssl dgst -md5 -binary | od -An -tx1 | tr -d ' \n'"]).toString().trim();
   assert.equal(key, k);
   assert.equal(iv, i);
 });

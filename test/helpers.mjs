@@ -8,7 +8,12 @@ import http from 'node:http';
 
 /** 创建独立运行目录并设置环境变量（必须在 import dist 之前调用） */
 export function setupRuntime(extra = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ttdl-test-'));
+  // 测试根目录：默认系统临时目录，可用 TTDL_TEST_ROOT 覆盖。
+  // ⚠️ 真机坑：树莓派的 /tmp 是 **1.9G 的 tmpfs**，而磁盘准入用例要摆布 6G 空间 →
+  //    必须在真机上把 TTDL_TEST_ROOT 指到大分区（例：/home/mypi/.ttdl-test）。
+  const baseDir = process.env.TTDL_TEST_ROOT || os.tmpdir();
+  fs.mkdirSync(baseDir, { recursive: true });
+  const root = fs.mkdtempSync(path.join(baseDir, 'ttdl-test-'));
   process.env.DOWNLOAD_ROOT = root;
   process.env.RESERVE_FREE_BYTES = String(extra.reserveFreeBytes ?? 1024 * 1024);
   process.env.ANDROID_TOKEN = extra.androidToken ?? 'test-token';
