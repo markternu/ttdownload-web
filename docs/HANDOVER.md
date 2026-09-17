@@ -22,7 +22,7 @@
 | --- | --- | --- | --- |
 | 服务端（本工程） | `github/ttdownload-web` | `markternu/ttdownload-web` | Node 服务端 + 网页 |
 | 安卓 App | `github/AriaNgGUI_AutoDL_Android` | `markternu/AriaNgGUI_AutoDL_Android` | 二次开发版：自动下载列表、SD 卡搬移、aria2 调优 |
-| 安卓解密 App | `VltRestore` | （见其 README） | 纯 Java、零依赖，把服务端加密的 `.data` 还原 |
+| 安卓解密 App | `github/VltRestore` | `markternu/VltRestore` | 纯 Java、零依赖，把服务端加密的 `.data` 还原 |
 
 ---
 
