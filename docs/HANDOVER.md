@@ -154,6 +154,12 @@ transmission 以 **`debian-transmission`** 用户运行，它的两个目录：
 8. `.env` 优先级高于代码默认值 —— 改默认值必须同时改 `deploy.sh` 的模板 + 自愈逻辑。
 9. 全仓库 shell 脚本里 **`$VAR` 后面不能紧跟全角字符**（bash 在 C locale 下会把它当成变量名的一部分 →
    `unbound variable`）。已经全仓库扫过一遍。
+10. **装 Node 时 `nodejs` 和 `npm` 绝不能写进同一条 apt 命令**。NodeSource 的 `nodejs` 包
+    **自带 npm**，且与发行版的 `npm` 互斥（发行版 npm 依赖发行版 nodejs）→ 两个一起点名，
+    apt 直接甩 `E: Unable to correct problems, you have held broken packages.`，
+    全新 Ubuntu 上部署就卡死在 Node 这步（**真机事故，见 §8.1 第 12 条**）。
+    只有**发行版仓库**（NodeSource 的源已摘掉）里，`nodejs` + `npm` 才是配套的、才能一起装。
+    回归测试：`test/deploy-script.test.mjs` 的【血案回归】两条（用假 apt 复现了这个冲突）。
 
 ---
 
@@ -260,6 +266,23 @@ grep -h '"download-dir"' /etc/transmission-daemon/settings.json \
 df -h /ttdownload 2>/dev/null || df -h /
 ```
 
+**如果 Node 那一步报 `E: Unable to correct problems, you have held broken packages.`**
+（老版本脚本的 `nodejs npm` 一起装导致的，见 §8.1 第 12 条），在服务器上按这个顺序恢复：
+
+```bash
+# ① 看清楚冲突是谁跟谁
+apt-cache policy nodejs npm | head -20
+# ② 只装 NodeSource 的 nodejs —— 它**自带 npm**，不要点名 npm
+sudo apt-get install -y nodejs
+node -v && npm -v          # 期望 v20.x / 10.x
+# ③ 若 ② 仍失败：把发行版的 nodejs/npm 让位（NodeSource 自带 npm，不需要发行版那个）
+sudo apt-get remove -y npm nodejs
+sudo apt-get install -y nodejs
+# ④ 拉最新代码重跑（Node 已就绪会被跳过）
+cd <项目目录> && sudo ./deploy.sh --update
+#    也可以用仓库自带的修复脚本：sudo bash deploy/scripts/fix-node20.sh
+```
+
 ---
 
 ## 8. 已知/未完成
@@ -281,6 +304,7 @@ df -h /ttdownload 2>/dev/null || df -h /
 | 9 | BT 日志里仍有多处会带出种子名/内容名（zip 的 argv、扫货日志、`removed` 列表、space-freed 的 detail、任务失败消息…） | 见 §6.1；`bt-log-redaction.test.mjs` 6 个阶段全链路锁住 | `bt-log-redaction.test.mjs` |
 | 10 | 全新机器上 transmission 的两个目录可能根本不存在（只有 `--update` 或 `ubuntutr.sh` 才建）→ BT 下完了永远扫不到货，界面看不出原因 | `deploy.sh` 新增 `ensure_transmission_dirs()`，首部署也执行，并核对 transmission 实际 `download-dir` 与 `.env` 是否一致 | 手工（见 §7 三条确认） |
 | 11 | 首次部署若 NodeSource 失败，发行版 `nodejs` 包**不带 npm** → 走到 `die 缺少必要命令: npm`；以及 root 建目录 + sudo 部署时 `npm ci` 写不进去 | `deploy.sh` 装 `nodejs npm`、补 npm 自愈；`REPO_OWNER` 加可写性判断 | `deploy-script.test.mjs` |
+| 12 | **全新 Ubuntu 上部署直接卡死在 Node 这一步**：`apt-get install -y nodejs npm` → `E: Unable to correct problems, you have held broken packages.`（第 11 条那次"顺手补 npm"引入的回归 —— NodeSource 的 nodejs 自带 npm 且与发行版 npm 互斥） | `deploy.sh` 抽出 `ensure_node()`：NodeSource 那步**只装 nodejs**；真要回退发行版仓库时**先摘掉 NodeSource 的源**再 `nodejs npm` 一起装。`deploy/scripts/fix-node20.sh` 同一处隐患一并修掉 | `deploy-script.test.mjs` 两条【血案回归】（假 apt 复现冲突：写回错误版本会 2 项报红） |
 
 ### 8.2 还没做 / 需要你决定
 

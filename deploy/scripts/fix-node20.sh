@@ -81,8 +81,13 @@ else
   apt-get install -y nodejs || BAD "从当前源安装 nodejs 失败，稍后尝试发行版仓库"
   NEW_MAJ="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)"
   if [ "${NEW_MAJ:-0}" -lt 20 ]; then
-    INFO "当前仍为 $(node -v 2>/dev/null || echo '未安装')，尝试发行版仓库"
-    apt-get install -y --reinstall nodejs npm || true
+    INFO "当前仍为 $(node -v 2>/dev/null || echo '未安装')，改用发行版仓库"
+    # ⚠️ 先摘掉 NodeSource 的源：它的 nodejs 包自带 npm，并与发行版的 npm 互斥；
+    #    源还在时把 nodejs 和 npm 写在一起装，apt 会直接甩
+    #    "E: Unable to correct problems, you have held broken packages."（真机踩过）
+    rm -f /etc/apt/sources.list.d/nodesource.list /etc/apt/sources.list.d/nodesource.sources
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y nodejs npm || true
     NEW_MAJ="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)"
   fi
   command -v node >/dev/null 2>&1 || die "Node 安装失败，请检查网络与 apt 源"

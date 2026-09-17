@@ -481,6 +481,75 @@ ensure_ytdlp_stack() {
   fi
 }
 
+# Node.js（目标 20）。抽成函数是为了能被 test/deploy-script.test.mjs 用假 apt 跑到。
+#
+# ⚠️⚠️ 这里有一条血案换来的铁律：**安装命令里绝不能同时点名 `nodejs` 和 `npm`**。
+#   NodeSource 的 `nodejs` 包**自带 npm**，并与发行版的 `npm` 互斥
+#   （发行版 npm 依赖发行版 nodejs，而 NodeSource 的 nodejs 与它冲突）。
+#   两个一起写，apt 会直接甩：
+#       E: Unable to correct problems, you have held broken packages.
+#   全新 Ubuntu 上部署就卡死在 Node 这一步（见 HANDOVER 已知问题）。
+#   只有在**发行版仓库**（NodeSource 源已摘掉）里，`nodejs` + `npm` 才是配套的、可以一起装。
+ensure_node() {
+  local NODE_WANT_MAJOR=20 NEED_NODE=1 MAJ OS_ID OS_VER OS_MAJ NODE_SETUP
+  if command -v node >/dev/null 2>&1; then
+    MAJ="$(detect_node_major || echo 0)"
+    [[ "${MAJ:-0}" -ge "$NODE_WANT_MAJOR" ]] && NEED_NODE=0
+  fi
+  if [[ $NEED_NODE -eq 0 ]]; then
+    log "Node 已就绪：$(node -v 2>/dev/null) / npm $(npm -v 2>/dev/null)"
+    return 0
+  fi
+
+  # 只有确实跑不了 Node 20 的老系统才退回 18：Ubuntu 18.04（glibc 2.27）。
+  # 注意：树莓派 OS / Debian 的 VERSION_ID 是 12/13 这类数字，不能被当成"Ubuntu 13 < 20"。
+  OS_ID="$(. /etc/os-release 2>/dev/null && echo "${ID:-}")"
+  OS_VER="$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-0}")"
+  OS_MAJ="${OS_VER%%.*}"
+  NODE_SETUP="$NODE_WANT_MAJOR"
+  if [[ "$OS_ID" == "ubuntu" ]] && [[ "${OS_MAJ:-0}" =~ ^[0-9]+$ ]] && (( OS_MAJ < 20 )); then
+    NODE_SETUP="18"
+    warn "检测到 Ubuntu ${OS_VER}（glibc 较老），退回 Node 18.x"
+  fi
+
+  # ① 首选 NodeSource（它的 nodejs 自带 npm，所以**只装 nodejs 这一个包**）
+  log "安装 Node.js ${NODE_SETUP}.x（NodeSource）；当前：$(node -v 2>/dev/null || echo '未安装')，系统：${OS_ID:-未知} ${OS_VER:-}"
+  if ! curl -fsSL "https://deb.nodesource.com/setup_${NODE_SETUP}.x" | bash -; then
+    warn "NodeSource 源配置失败（该系统版本可能暂不支持），改用发行版仓库安装 nodejs"
+  fi
+  apt-get install -y nodejs || warn "NodeSource 的 nodejs 安装失败，尝试发行版仓库"
+
+  # ② 仍然没有可用的 node → 摘掉 NodeSource 源，改用发行版仓库。
+  #    ⚠️ 必须先摘源：NodeSource 的 nodejs 还在的话，发行版的 npm 依旧和它冲突（held broken packages）
+  if ! command -v node >/dev/null 2>&1 || [[ "$(detect_node_major || echo 0)" -lt 18 ]]; then
+    warn "当前 Node 仍不可用或版本过低（$(node -v 2>/dev/null || echo 未安装)），改用发行版仓库重试"
+    # 目录可被 APT_SOURCES_DIR 覆盖：测试里指向临时目录，免得真去动服务器的 /etc/apt
+    rm -f "${APT_SOURCES_DIR:-/etc/apt/sources.list.d}/nodesource.list" \
+          "${APT_SOURCES_DIR:-/etc/apt/sources.list.d}/nodesource.sources"
+    apt-get update -y >/dev/null 2>&1 || true
+    # 发行版仓库里 nodejs 不带 npm，这俩是配套的 → 可以（也必须）一起装
+    apt-get install -y nodejs npm || true
+  fi
+
+  command -v node >/dev/null 2>&1 || die "Node 安装失败：请手动安装 Node 20 后重试（https://nodejs.org 或 nvm）"
+  [[ "$(detect_node_major || echo 0)" -ge 18 ]] || die "Node 版本仍然过低：$(node -v)（需要 >= 18.17）"
+
+  # ③ 最后一个兜底：node 有了但没有 npm（个别发行版的包装方式）
+  #    仍然**不能**和 nodejs 一起点名；装不上就明确告诉用户怎么办
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "检测到 node 但缺少 npm，尝试补装 ..."
+    if apt-get install -y npm; then
+      :
+    elif command -v node >/dev/null 2>&1 && [[ -d "$(dirname "$(readlink -f "$(command -v node)")")/../lib/node_modules/npm" ]]; then
+      warn "npm 其实随 node 装好了（只是没进 PATH）：试试 sudo ln -sf /usr/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm"
+    else
+      warn "补装 npm 失败：可执行 sudo apt-get install --reinstall -y nodejs（NodeSource 的 nodejs 自带 npm），或用 nvm 装 Node"
+    fi
+  fi
+  log "Node 已就绪：$(node -v 2>/dev/null) / npm $(npm -v 2>/dev/null)"
+  warn "Node 大版本变化后需要重建原生模块（better-sqlite3）——下面的 npm ci 会重新编译，属正常现象"
+}
+
 # ---------------------------------------------------------------- 已部署后的管理动作
 case "$ACTION" in
   check-deps)
@@ -703,52 +772,14 @@ if [[ $SKIP_APT -eq 0 ]]; then
   apt-get install -y curl ca-certificates gnupg openssl zip unzip ffmpeg jq build-essential python3 || true
 
   # Node.js：目标 Node 20（package.json 要求 >=18.17，但 18 已 EOL 且部分依赖要求 20）
-  #   只有确实跑不了 Node 20 的老系统才退回 18：Ubuntu 18.04（glibc 2.27）。
-  #   注意：树莓派 OS / Debian 的 VERSION_ID 是 12/13 这类数字，不能被当成“Ubuntu 13 < 20”。
-  NODE_WANT_MAJOR=20
-  NEED_NODE=1
-  if command -v node >/dev/null 2>&1; then
-    MAJ="$(detect_node_major || echo 0)"
-    [[ "${MAJ:-0}" -ge "$NODE_WANT_MAJOR" ]] && NEED_NODE=0
-  fi
-  if [[ $NEED_NODE -eq 1 ]]; then
-    OS_ID="$(. /etc/os-release 2>/dev/null && echo "${ID:-}")"
-    OS_VER="$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-0}")"
-    OS_MAJ="${OS_VER%%.*}"
-    NODE_SETUP="$NODE_WANT_MAJOR"
-    if [[ "$OS_ID" == "ubuntu" ]] && [[ "${OS_MAJ:-0}" =~ ^[0-9]+$ ]] && (( OS_MAJ < 20 )); then
-      NODE_SETUP="18"
-      warn "检测到 Ubuntu ${OS_VER}（glibc 较老），退回 Node 18.x"
-    fi
-    log "安装 Node.js ${NODE_SETUP}.x（NodeSource）；当前：$(node -v 2>/dev/null || echo '未安装')，系统：${OS_ID:-未知} ${OS_VER:-}"
-    # NodeSource 不一定支持所有新发行版（如 Debian 13），失败就退化为发行版仓库的 nodejs
-    if ! curl -fsSL "https://deb.nodesource.com/setup_${NODE_SETUP}.x" | bash -; then
-      warn "NodeSource 源配置失败（该系统版本可能暂不支持），改用发行版仓库安装 nodejs"
-    fi
-    apt-get install -y nodejs npm || warn "NodeSource 的 nodejs 安装失败，尝试发行版仓库"
-    if ! command -v node >/dev/null 2>&1 || [[ "$(detect_node_major || echo 0)" -lt 18 ]]; then
-      warn "当前 Node 仍不可用或版本过低（$(node -v 2>/dev/null || echo 未安装)），改用发行版仓库重试"
-      apt-get update -y >/dev/null 2>&1 || true
-      apt-get install -y nodejs npm || true
-    fi
-    command -v node >/dev/null 2>&1 || die "Node 安装失败：请手动安装 Node 20 后重试（https://nodejs.org 或 nvm）"
-    [[ "$(detect_node_major || echo 0)" -ge 18 ]] || die "Node 版本仍然过低：$(node -v)（需要 >= 18.17）"
-    log "Node 已就绪：$(node -v 2>/dev/null) / npm $(npm -v 2>/dev/null)"
-    warn "Node 大版本变化后需要重建原生模块（better-sqlite3）——下面的 npm ci 会重新编译，属正常现象"
-  fi
+  #   逻辑全在 ensure_node() 里（放在上面的函数区，测试脚手架能用假 apt 跑到它）
+  ensure_node
 
   # yt-dlp 全家桶（本体 + ejs + JS 运行时），多重兜底
   ensure_ytdlp_stack
   ensure_cookie_browser
 else
   warn "按参数要求跳过 apt 安装"
-fi
-
-# npm 不一定随 nodejs 一起装上（Debian/Ubuntu 的 nodejs 包历来不带 npm，npm 是独立包）
-# → 这里单独补一次，别等到下面那个 for 循环直接 die 掉整个部署
-if [[ $SKIP_APT -eq 0 ]] && ! command -v npm >/dev/null 2>&1; then
-  warn "未检测到 npm，单独安装（发行版仓库的 nodejs 包不包含 npm）"
-  apt-get install -y npm || warn "npm 安装失败，请手动 apt install npm"
 fi
 
 for c in node npm openssl; do
