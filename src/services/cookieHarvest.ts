@@ -331,8 +331,14 @@ export function harvestEnabled(): boolean {
 
 /** 找系统里的 chromium（树莓派/Debian: apt install -y chromium） */
 export function chromiumPath(): string | null {
-  const env = String(process.env.CHROMIUM_PATH ?? '').trim();
-  if (env && fs.existsSync(env)) return env;
+  // CHROMIUM_PATH 显式指定就**认它**（包括指向一个不存在的路径 = 明确表示"这台机器没有
+  // chromium"）。以前只在路径存在时才认，于是"想指定/想禁用"都做不到，测试也没法模拟
+  // "没有 chromium" 的机器（真机上恰好装了 chromium 就会测不了那条路径）。
+  const raw = process.env.CHROMIUM_PATH;
+  if (raw !== undefined && String(raw).trim() !== '') {
+    const env = String(raw).trim();
+    return fs.existsSync(env) ? env : null;
+  }
   const candidates = [
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',

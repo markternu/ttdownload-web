@@ -200,7 +200,7 @@ test('★回归：「需要新鲜 cookies」不能被当成「被限流」（否
 test('★抖音：纯 HTTP 拿 ttwid（不需要浏览器、不需要 chromium）', async () => {
   // 清掉浏览器路径，证明「没装 chromium 也能自动获取」
   const savedChromium = process.env.CHROMIUM_PATH;
-  delete process.env.CHROMIUM_PATH;
+  process.env.CHROMIUM_PATH = '/nonexistent/no-chromium-installed'; // 显式表示：这台机器没有 chromium
   cookies.__setHarvesterLauncher(null);
 
   const realFetch = globalThis.fetch;
@@ -221,7 +221,11 @@ test('★抖音：纯 HTTP 拿 ttwid（不需要浏览器、不需要 chromium�
   };
 
   try {
-    assert.equal(cookies.chromiumPath(), null, '前提：这台机器上探测不到 chromium');
+    assert.equal(
+      cookies.chromiumPath(),
+      null,
+      '前提：显式把 CHROMIUM_PATH 指到不存在的路径 → 等价于这台机器没有 chromium',
+    );
     const meta = await cookies.harvestNow('douyin');
     assert.ok(meta, '应成功');
     assert.equal(meta.via, 'http', '应走 HTTP 途径（不是浏览器）');
@@ -242,7 +246,7 @@ test('★抖音：纯 HTTP 拿 ttwid（不需要浏览器、不需要 chromium�
 
 test('★没有 chromium 时，有 HTTP 途径的站点（抖音）依然能自动获取', async () => {
   const savedChromium = process.env.CHROMIUM_PATH;
-  delete process.env.CHROMIUM_PATH;
+  process.env.CHROMIUM_PATH = '/nonexistent/no-chromium-installed'; // 显式表示：这台机器没有 chromium
   const realFetch = globalThis.fetch;
   globalThis.fetch = async () => ({
     status: 200,
@@ -252,7 +256,7 @@ test('★没有 chromium 时，有 HTTP 途径的站点（抖音）依然能自�
     },
   });
   try {
-    assert.equal(cookies.chromiumPath(), null);
+    assert.equal(cookies.chromiumPath(), null, '显式指定不存在的 CHROMIUM_PATH → 视为没有 chromium');
     const r = await cookies.cookiesForUrl('https://v.douyin.com/abc/', null, { forceHarvest: true });
     assert.equal(r.harvested, true, '没装浏览器也该能自动获取（抖音走 HTTP）');
     assert.ok(r.cookiesFile);
@@ -284,7 +288,7 @@ test('HTTP 途径失败时会退回无头浏览器（两条腿走路）', async 
     assert.equal(cookies.readCookieFile(meta.file)[0].name, '__ac_signature');
   } finally {
     globalThis.fetch = realFetch;
-    delete process.env.CHROMIUM_PATH;
+    process.env.CHROMIUM_PATH = '/nonexistent/no-chromium-installed'; // 显式表示：这台机器没有 chromium
     cookies.__setHarvesterLauncher(null);
   }
 });
@@ -354,6 +358,11 @@ test('★B站 412 的错误提示必须指向「出口 IP 归属」，而不是�
 });
 
 test('★回归：yt-dlp 会回写 cookies 文件 —— 所以只能给它副本，用户原件必须毫发无损', async () => {
+  // 这条测的是"给 yt-dlp 的一定是副本"。真机上装了 chromium 时 YouTube 也会走
+  // 自动抓取 + 合并那条路径，测到的就变成"合并缓存"了 → 先显式声明"没有浏览器"，
+  // 把这条用例隔离在"保护原件"这一件事上。
+  const savedChromium = process.env.CHROMIUM_PATH;
+  process.env.CHROMIUM_PATH = '/nonexistent/no-chromium-installed';
   const dir = path.join(root, 'state');
   const userFile = path.join(dir, 'user-original.txt');
   const original = [
@@ -377,4 +386,7 @@ test('★回归：yt-dlp 会回写 cookies 文件 —— 所以只能给它副�
   const again = await cookies.cookiesForUrl('https://www.youtube.com/watch?v=x', userFile);
   assert.equal(fs.readFileSync(again.cookiesFile, 'utf8'), original, '下一次应重新从原件拷贝');
   assert.equal(fs.readFileSync(userFile, 'utf8'), original, '原件依然不能被动');
+
+  if (savedChromium === undefined) delete process.env.CHROMIUM_PATH;
+  else process.env.CHROMIUM_PATH = savedChromium;
 });
