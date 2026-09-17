@@ -170,12 +170,23 @@ export interface Settings {
 
 export interface Stats {
   todayTasks: number;
+  /** 今天完成的**下载**任务（不含扫货产生的归档发布子任务，否则一个种子下完会算成 2） */
   todayCompleted: number;
+  /** 今天完成的归档发布子任务 */
+  todayPublished: number;
+  /** 真·下载中（downloading/parsing）；归档/加密属于 publishing */
   downloading: number;
+  /** 正在归档 → 加密 → 发布（BT 扫货的子任务） */
+  publishing: number;
   waiting: number;
   failed: number;
   totalDownloadedBytes: number;
+  /** 所有任务行数（含发布子任务）；界面要显示"我有多少任务"请用 downloadTasks */
   totalTasks: number;
+  /** 种子/直链/视频**下载**任务数（= 用户心里的"任务数"） */
+  downloadTasks: number;
+  /** 扫货产生的归档发布子任务数 */
+  publishTasks: number;
   successRate: number;
   perPlatform: { platform: string; count: number }[];
   daily: { date: string; count: number; bytes: number }[];

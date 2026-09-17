@@ -536,19 +536,31 @@ export function computeStats(): import('../types').Stats {
   const one = (sql: string, ...args: unknown[]): number =>
     ((db.prepare(sql).get(...(args as never[])) as { c: number } | undefined)?.c ?? 0) as number;
 
-  const todayTasks = one('SELECT COUNT(*) c FROM tasks WHERE created_at >= ?', todayIso);
-  const todayCompleted = one("SELECT COUNT(*) c FROM tasks WHERE status='completed' AND finished_at >= ?", todayIso);
-  const downloading = one("SELECT COUNT(*) c FROM tasks WHERE status IN ('downloading','parsing','archiving','encrypting')");
+  // ⚠️ BT 的「扫货 → 归档 → 加密 → 发布」会为每个目录**再建一个任务**（module 同样是
+  //    transmission，payload.harvest 标记它）。所有统计都必须把这两类分开，否则：
+  //      · 14 个种子会统计成 23 个任务
+  //      · 一个种子下完 + 发布完会被算成"完成 2 个"
+  //      · 归档中的子任务会被算进"下载中"
+  //    （用户报的"两个数字对不上、总量虚高"就是这个原因）
+  const IS_PUBLISH = "(json_extract(payload_json,'$.harvest') IS NOT NULL OR json_extract(payload_json,'$.earlyHandoff') IS NOT NULL)";
+  const NOT_PUBLISH = `NOT ${IS_PUBLISH}`;
+  const todayTasks = one(`SELECT COUNT(*) c FROM tasks WHERE created_at >= ? AND ${NOT_PUBLISH}`, todayIso);
+  const todayCompleted = one(`SELECT COUNT(*) c FROM tasks WHERE status='completed' AND finished_at >= ? AND ${NOT_PUBLISH}`, todayIso);
+  const todayPublished = one(`SELECT COUNT(*) c FROM tasks WHERE status='completed' AND finished_at >= ? AND ${IS_PUBLISH}`, todayIso);
+  const downloading = one("SELECT COUNT(*) c FROM tasks WHERE status IN ('downloading','parsing')");
+  const publishing = one("SELECT COUNT(*) c FROM tasks WHERE status IN ('archiving','encrypting')");
   const waiting = one("SELECT COUNT(*) c FROM tasks WHERE status IN ('waiting','paused')");
   const failed = one("SELECT COUNT(*) c FROM tasks WHERE status='failed'");
   const totalTasks = one('SELECT COUNT(*) c FROM tasks');
+  const downloadTasks = one(`SELECT COUNT(*) c FROM tasks WHERE ${NOT_PUBLISH}`);
+  const publishTasks = one(`SELECT COUNT(*) c FROM tasks WHERE ${IS_PUBLISH}`);
   const completedAll = one("SELECT COUNT(*) c FROM tasks WHERE status='completed'");
   const totalDownloadedBytes = ((db.prepare('SELECT COALESCE(SUM(size_bytes),0) s FROM published_files').get() as { s: number }).s ?? 0) as number;
 
   const perPlatform = db
     .prepare(
       `SELECT COALESCE(platform,'未知') platform, COUNT(*) count FROM tasks
-       WHERE status='completed' GROUP BY platform ORDER BY count DESC LIMIT 10`,
+       WHERE status='completed' AND ${NOT_PUBLISH} GROUP BY platform ORDER BY count DESC LIMIT 10`,
     )
     .all() as { platform: string; count: number }[];
 
@@ -571,11 +583,15 @@ export function computeStats(): import('../types').Stats {
   return {
     todayTasks,
     todayCompleted,
+    todayPublished,
     downloading,
+    publishing,
     waiting,
     failed,
     totalDownloadedBytes,
     totalTasks,
+    downloadTasks,
+    publishTasks,
     successRate: totalTasks > 0 ? completedAll / totalTasks : 0,
     perPlatform,
     daily: dailyRows.map((r) => ({ date: r.date, count: r.count, bytes: bytesMap.get(r.date) ?? 0 })),

@@ -69,3 +69,19 @@ test('GET /api/tasks 返回 summary（页面头部就靠它解释 total）', asy
     server.close();
   }
 });
+
+test('computeStats 也不能把发布子任务混进"任务数/完成数/下载中"', async () => {
+  const { computeStats } = await import('../dist/core/db.js');
+  const s = computeStats();
+  assert.equal(s.downloadTasks, 14, '下载任务数 = 种子数');
+  assert.equal(s.publishTasks, 9, '发布子任务单独统计');
+  assert.equal(s.downloadTasks + s.publishTasks, s.totalTasks, '两类相加 = 总行数（口径自洽）');
+  // 归档/加密中的任务不能算进"下载中"
+  const { tasksRepo: repo } = await import('../dist/core/db.js');
+  const arch = repo.list({ pageSize: 500 }).items.find((x) => (x.payload ?? {}).harvest);
+  repo.update(arch.id, { status: 'archiving' });
+  const s2 = computeStats();
+  assert.equal(s2.publishing, 1, '归档中的发布子任务算 publishing');
+  assert.equal(s2.downloading, 4, '不能把归档中的算成"下载中"（以前这里会变成 5）');
+  repo.update(arch.id, { status: 'completed' });
+});

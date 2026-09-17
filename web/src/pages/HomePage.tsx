@@ -377,7 +377,7 @@ export default function HomePage() {
         <StatCard
           label="累计下载"
           value={formatBytes(stats?.totalDownloadedBytes ?? 0, '0 B')}
-          hint={`任务总数 ${stats?.totalTasks ?? 0}`}
+          hint={`下载任务 ${stats?.downloadTasks ?? 0}${stats?.publishTasks ? ` · 发布 ${stats.publishTasks}` : ''}`}
           tone="neutral"
           icon={<Layers className="h-4 w-4" />}
         />

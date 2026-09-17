@@ -19,6 +19,7 @@ import {
   UserRound,
   Video,
   Wrench,
+  Archive,
   X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -162,17 +163,25 @@ function SidebarContent({ onClose }: { onClose: () => void }) {
           整盘已用 {diskPercent}% · 已扣预留 {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'}
         </p>
         <div className="flex items-center gap-3 border-t border-slate-200 pt-2.5 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
-          <span className="inline-flex items-center gap-1">
+          <span className="inline-flex items-center gap-1" title="正在下载的种子/直链/视频任务">
             <Download className="h-3 w-3" />
             下载中 {stats?.downloading ?? 0}
           </span>
-          <span className="inline-flex items-center gap-1">
+          {stats?.publishing ? (
+            <span className="inline-flex items-center gap-1" title="扫货后的归档 → 加密 → 发布（子任务，不是种子下载）">
+              <Archive className="h-3 w-3" />
+              发布中 {stats.publishing}
+            </span>
+          ) : null}
+          <span className="inline-flex items-center gap-1" title="今天完成的下载任务（不含归档发布子任务）">
             <CheckCircle2 className="h-3 w-3" />
             完成 {stats?.todayCompleted ?? 0}
+            {stats?.todayPublished ? <span className="text-slate-400">（+发布 {stats.todayPublished}）</span> : null}
           </span>
-          <span className="inline-flex items-center gap-1">
+          <span className="inline-flex items-center gap-1" title="下载任务数（不含归档发布子任务）">
             <Database className="h-3 w-3" />
-            任务 {stats?.totalTasks ?? 0}
+            任务 {stats?.downloadTasks ?? 0}
+            {stats?.publishTasks ? <span className="text-slate-400">（发布 {stats.publishTasks}）</span> : null}
           </span>
         </div>
       </div>

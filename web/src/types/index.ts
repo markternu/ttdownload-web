@@ -225,12 +225,23 @@ export interface BtEvictSummary {
 
 export interface Stats {
   todayTasks: number
+  /** 今天完成的**下载**任务（不含扫货产生的归档发布子任务） */
   todayCompleted: number
+  /** 今天完成的归档发布子任务 */
+  todayPublished: number
+  /** 真·下载中（downloading/parsing）；归档/加密算在 publishing */
   downloading: number
+  /** 正在归档 → 加密 → 发布（BT 扫货的子任务） */
+  publishing: number
   waiting: number
   failed: number
   totalDownloadedBytes: number
+  /** 所有任务行数（含发布子任务）；显示"我有多少任务"请用 downloadTasks */
   totalTasks: number
+  /** 下载任务数（不含归档发布子任务） */
+  downloadTasks: number
+  /** 归档发布子任务数 */
+  publishTasks: number
   successRate: number // 0-1
   perPlatform: { platform: string; count: number }[]
   daily: { date: string; count: number; bytes: number }[]

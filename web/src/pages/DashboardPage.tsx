@@ -38,7 +38,10 @@ export default function DashboardPage() {
 
   const finished = useMemo(() => {
     if (!stats) return 0
-    return Math.max(0, stats.totalTasks - stats.downloading - stats.waiting - stats.failed)
+    // 只按**下载任务**这个口径算"已完成"，并且把"归档/发布中"也算进未完成 ——
+    // 否则（用 totalTasks 且把 publishing 漏在外面）会把正在归档的任务误算成已完成
+    const unfinished = stats.downloading + stats.publishing + stats.waiting + stats.failed
+    return Math.max(0, stats.downloadTasks - unfinished)
   }, [stats])
 
   if (loading && !stats) return <LoadingBlock text="正在加载统计数据…" />
@@ -101,8 +104,8 @@ export default function DashboardPage() {
         />
         <StatCard
           label="累计任务"
-          value={stats?.totalTasks ?? 0}
-          hint={`成功 ${finished}`}
+          value={stats?.downloadTasks ?? 0}
+          hint={`成功 ${finished}${stats?.publishTasks ? ` · 发布子任务 ${stats.publishTasks}` : ''}`}
           tone="neutral"
           icon={<Database className="h-4 w-4" />}
         />
