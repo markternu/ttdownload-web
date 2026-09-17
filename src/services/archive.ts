@@ -50,7 +50,7 @@ export interface ArchiveResult {
  */
 export async function archiveTaskFiles(
   files: string[],
-  opts: { originalName: string; multiFileHint?: boolean; title?: string },
+  opts: { originalName: string; multiFileHint?: boolean; title?: string; logName?: string },
 ): Promise<ArchiveResult> {
   const existing = files.filter((f) => {
     try {
@@ -93,7 +93,7 @@ export async function archiveTaskFiles(
       return { ok: false, error: '写入 V-L-T 标记失败' };
     }
     const sizeBytes = fs.statSync(target).size;
-    logger.child('archive').mark('ARCHIVE', `归档完成: ${originalName} -> ${publishedName}`, {
+    logger.child('archive').mark('ARCHIVE', `归档完成: ${opts.logName ?? originalName} -> ${publishedName}`, {
       sizeBytes,
       archivePath: target,
       publishedName,

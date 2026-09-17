@@ -146,3 +146,39 @@ test('【事故回归】空间不够时：备好但一个字节都不下，且 e
   assert.equal(tasksRepo.get(task.id).status, 'downloading', '空间够了应放行');
   assert.equal(mock.state.running, true);
 });
+
+test('【脱敏】日志里绝不出现种子名和文件名', async () => {
+  // 用一眼能认出来的名字；跑完 prepare + poll 后翻整个 app.log，不该出现它们
+  const TORRENT = 'SECRETTORRENT9377';
+  const FILE1 = 'SECRETMOVIE9377.mp4';
+  const FILE2 = 'SECRETAD9377.jpg';
+  mock.state.torrents = [];
+  mock.state.name = TORRENT;
+  mock.state.complete = false;
+  mock.state.percent = 0.5;
+  mock.state.files = [
+    { name: FILE1, length: 1000, bytesCompleted: 500 },
+    { name: FILE2, length: 100, bytesCompleted: 0 },
+  ];
+  mock.state.wanted = [1, 1];
+  for (const t of tasksRepo.list({ pageSize: 500 }).items) tasksRepo.delete(t.id);
+
+  const fakeTorrent = tmpFile(root, `src/${TORRENT}.torrent`, 'd8:announce11:http://x/ye');
+  fs.copyFileSync(fakeTorrent, path.join(config.dirs.btPending, `${TORRENT}.torrent`));
+  bt.registerPendingSeeds();
+  const seed = seedsRepo.all().find((s) => s.name === `${TORRENT}.torrent`);
+  const task = bt.enqueueSeed(seed);
+  await bt.transmissionModule.prepare(tasksRepo.get(task.id));
+  await bt.transmissionModule.start(tasksRepo.get(task.id));
+  await bt.transmissionModule.poll(tasksRepo.get(task.id));
+  await new Promise((r) => setTimeout(r, 300)); // 等日志落盘
+
+  const logPath = process.env.LOG_PATH;
+  const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
+  assert.ok(log.length > 0, '应该有日志');
+  assert.equal(log.includes(TORRENT), false, `日志里不该出现种子名 ${TORRENT}`);
+  assert.equal(log.includes('SECRETMOVIE9377'), false, '日志里不该出现视频文件名');
+  assert.equal(log.includes('SECRETAD9377'), false, '日志里不该出现图片文件名');
+  // 但该有的诊断信息（大小/数量/规则）要还在
+  assert.match(log, /BT_SELECT|BT_PREPARE/, '挑片/准备阶段的日志应该在');
+});

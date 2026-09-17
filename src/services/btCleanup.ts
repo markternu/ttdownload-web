@@ -5,6 +5,7 @@ import { bus } from '../core/events';
 import { logger } from '../core/logger';
 import { pathSizeBytes } from '../core/disk';
 import { tasksRepo } from '../core/db';
+import { hidePath } from './btAnon';
 import type { Task } from '../types';
 
 /**
@@ -154,10 +155,10 @@ function pruneEmptyDirs(dirs: string[]): string[] {
       if (fs.readdirSync(resolved).length === 0) {
         fs.rmdirSync(resolved);
         removed.push(resolved);
-        logger.child('bt-cleanup').mark('BT_CLEANUP', `空目录已回收: ${resolved}`);
+        logger.child('bt-cleanup').mark('BT_CLEANUP', `空目录已回收: ${hidePath(resolved)}`);
       } else {
         const left = fs.readdirSync(resolved).length;
-        logger.child('bt-cleanup').mark('BT_CLEANUP', `目录非空，保留（可能是别的任务的资源）: ${resolved}`, { leftEntries: left });
+        logger.child('bt-cleanup').mark('BT_CLEANUP', `目录非空，保留（可能是别的任务的资源）: ${hidePath(resolved)}`, { leftEntries: left });
       }
     } catch {
       /* ignore */
@@ -180,7 +181,7 @@ export function cleanupBtTaskDirs(task: Task, torrentName: string, reason: strin
 
   if (sharedSkipped.length) {
     for (const [dir, ids] of shared) {
-      logger.child('bt-cleanup').mark('BT_CLEANUP_SHARED', `目录被其它任务共用，本次不删: ${dir}`, {
+      logger.child('bt-cleanup').mark('BT_CLEANUP_SHARED', `目录被其它任务共用，本次不删: ${hidePath(dir)}`, {
         reason,
         taskId: t.id,
         sharedWith: ids,
@@ -243,7 +244,7 @@ export function removeDirs(dirs: string[]): RemoveDirsResult {
   for (const dir of dirs) {
     const safety = isSafeToDelete(dir);
     if (!safety.ok) {
-      if (safety.reason !== '不存在') logger.warn(`目录清理跳过 ${dir}: ${safety.reason}`);
+      if (safety.reason !== '不存在') logger.warn(`目录清理跳过 ${hidePath(dir)}: ${safety.reason}`);
       skipped.push(dir);
       continue;
     }
@@ -252,9 +253,9 @@ export function removeDirs(dirs: string[]): RemoveDirsResult {
       fs.rmSync(dir, { recursive: true, force: true });
       freedBytes += size;
       removed.push(dir);
-      logger.child('bt-cleanup').mark('BT_CLEANUP', `目录清理已删除: ${dir}`, { freedBytes: size });
+      logger.child('bt-cleanup').mark('BT_CLEANUP', `目录清理已删除: ${hidePath(dir)}`, { freedBytes: size });
     } catch (e) {
-      logger.child('bt-cleanup').error(`[MARK:BT_CLEANUP] 目录清理删除失败 ${dir}: ${(e as Error).message}`);
+      logger.child('bt-cleanup').error(`[MARK:BT_CLEANUP] 目录清理删除失败 ${hidePath(dir)}: ${(e as Error).message}`);
       skipped.push(dir);
     }
   }

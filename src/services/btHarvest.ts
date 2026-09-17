@@ -28,6 +28,7 @@ import { logger, taskLog } from '../core/logger';
 import { tasksRepo } from '../core/db';
 import { getSettings } from './settings';
 import { buildPublishUnits, extOfName } from './btSelect';
+import { anonFile, hidePath } from './btAnon';
 import { createPublishTask } from './pipeline';
 import { cleanupBtTaskDirs } from './btCleanup';
 import { transmissionClient } from '../modules/transmission';
@@ -286,9 +287,7 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
       summary.published += 1;
       summary.tasks.push(id);
       logger.child('bt-harvest').mark('BT_HARVEST',
-        `incomplete 里发现已下完的视频：${entry.name} → ${u.files.length} 个文件 → 任务 #${id}`, {
-          files: u.files.map((f) => path.basename(f)),
-        });
+        `incomplete 里发现已下完的视频（${hidePath(abs)}）：${u.files.length} 个文件 → 任务 #${id}`);
     }
     if (downloadTask) {
       const prev = (downloadTask.payload ?? {}) as Record<string, unknown>;
@@ -313,7 +312,7 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
         if (await client.ping()) {
           const ids: (number | string)[] = h.torrentId ? [h.torrentId] : [String(h.torrentHash)];
           await client.call('torrent-remove', { ids, 'delete-local-data': false }).catch(() => undefined);
-          logger.child('bt-harvest').mark('BT_HARVEST', `已从 transmission 移除任务：${h.torrentName ?? h.torrentHash}`, { ids });
+          logger.child('bt-harvest').mark('BT_HARVEST', `已从 transmission 移除任务：${hidePath(h.torrentName ?? h.torrentHash)}`, { ids });
         }
       } catch (e) {
         logger.child('bt-harvest').warn(`移除 transmission 任务失败：${(e as Error).message}`);
@@ -327,11 +326,11 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
           .some((x) => Number(x.id) !== Number(t.id) && ((x.payload ?? {}).harvest as HarvestInfo | undefined)?.dir === h.dir)
       : false;
     if (h.dir && dirBusy) {
-      logger.child('bt-harvest').mark('BT_HARVEST', `还有别的扫货任务在处理 ${h.dir}，暂不删目录`);
+      logger.child('bt-harvest').mark('BT_HARVEST', `还有别的扫货任务在处理 ${hidePath(h.dir)}，暂不删目录`);
     } else if (h.dir) {
       const freed = cleanupBtTaskDirs(t as Task, h.torrentName ?? path.basename(h.dir), 'bt-harvest');
       logger.child('bt-harvest').mark('BT_HARVEST',
-        `扫货完成，已清理 ${h.dir}${freed ? `（释放 ${(freed / 1024 ** 2).toFixed(1)}MB）` : ''}`, { freedBytes: freed });
+        `扫货完成，已清理 ${hidePath(h.dir)}${freed ? `（释放 ${(freed / 1024 ** 2).toFixed(1)}MB）` : ''}`, { freedBytes: freed });
       if (freed > 0) bus.emitSpaceFreed({ bytes: freed, reason: 'bt-harvest', detail: { taskId: t.id } });
     }
 

@@ -6,6 +6,7 @@ import { runCommand } from '../services/archive';
 import { getSettings } from '../services/settings';
 import { createPublishTask } from '../services/pipeline';
 import { selectBtFiles, pickDominantVideos } from '../services/btSelect';
+import { anonFile, hideName, hidePath, hideText } from '../services/btAnon';
 import { seedsRepo, tasksRepo } from '../core/db';
 import { cleanupBtTaskDirs } from '../services/btCleanup';
 import type { SeedItem } from '../types';
@@ -42,7 +43,11 @@ export class TransmissionClient {
     const body = JSON.stringify({ method, arguments: args });
     const startedAt = Date.now();
     const scoped = logger.child('transmission');
-    scoped.debug(`[MARK:TR_RPC] -> ${method}`, { args, hasAuth: !!(this.user || this.password) });
+    // ⚠️ 绝不打印原始 args：torrent-add 的 metainfo 是整颗种子的 base64，
+    //    里面就含种子名和所有文件名（用户要求日志里不能出现这些）。
+    const safeArgs: Record<string, unknown> = { ...(args as Record<string, unknown>) };
+    if ('metainfo' in safeArgs) safeArgs.metainfo = '（已隐藏：种子元数据）';
+    scoped.debug(`[MARK:TR_RPC] -> ${method}`, { args: safeArgs, hasAuth: !!(this.user || this.password) });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), timeoutMs);
@@ -121,7 +126,7 @@ export async function scanZipUploads(): Promise<number> {
     const tmpDir = fs.mkdtempSync(path.join(config.dirs.btPending, '.unzip_'));
     const res = await runCommand(config.bins.unzip, ['-o', '-q', '-j', zipPath, '-d', tmpDir]);
     if (res.code !== 0) {
-      logger.child('transmission').error(`[MARK:ARCHIVE] 种子 zip 解压失败 ${name}: ${res.stderr || res.stdout}`, { zip: config.bins.unzip });
+      logger.child('transmission').error(`[MARK:ARCHIVE] 种子 zip 解压失败 ${hideName(name)}: ${res.stderr || res.stdout}`, { zip: config.bins.unzip });
       fs.rmSync(tmpDir, { recursive: true, force: true });
       continue;
     }
@@ -141,7 +146,7 @@ export async function scanZipUploads(): Promise<number> {
     fs.rmSync(tmpDir, { recursive: true, force: true });
     fs.rmSync(zipPath, { force: true });
     extracted += moved;
-    logger.child('transmission').mark('ARCHIVE', `种子 zip 解压完成: ${name} → ${moved} 个种子`, { outputDir: config.dirs.btQueued });
+    logger.child('transmission').mark('ARCHIVE', `种子 zip 解压完成: ${moved} 个种子`, { outputDir: config.dirs.btQueued });
   }
   return extracted;
 }
@@ -262,7 +267,7 @@ export const transmissionModule: ModuleAdapter = {
         const p2 = (tasksRepo.get(task.id) as TaskWithPayload).payload ?? {};
         tasksRepo.update(task.id, { payload: { ...p2, seedPathDeleted: true } });
         taskLog(task.id).mark('BT_SEED_DELETED',
-          `transmission 已接管该种子，已删除种子文件: ${path.basename(seedPath)}`, { torrentId });
+          `transmission 已接管该种子，已删除种子文件（${hideName(seedPath)}）`, { torrentId });
       } catch (e) {
         logger.child('transmission').warn(`删除种子文件失败（不影响下载）: ${(e as Error).message}`);
       }
@@ -309,7 +314,7 @@ export const transmissionModule: ModuleAdapter = {
     logger.child('transmission').mark('TASK_STATE', `BT 任务已放行开下 #${task.id}`, {
       torrentId,
       selectedBytes,
-      downloadDir: String(payload.downloadDir ?? ''),
+      downloadDir: hidePath(payload.downloadDir),
     });
   },
 
@@ -348,7 +353,7 @@ export const transmissionModule: ModuleAdapter = {
 
     // transmission 自己报错时如实转达，但**不**擅自删任务 —— 交给 8 小时策略
     if (torrent.error && torrent.error !== 0) {
-      const msg = torrent.errorString || `错误码 ${torrent.error}`;
+      const msg = hideText(torrent.errorString || `错误码 ${torrent.error}`);
       taskLog(task.id).warn(`transmission 报告错误（继续观察，按 8 小时策略处理）: ${msg}`);
     }
 
@@ -438,7 +443,7 @@ async function syncBtVideoSelection(task: TaskWithPayload, torrentId: number): P
   taskLog(task.id).mark('BT_SELECT',
     `只挑视频：${picked.keep.length} 个（${(picked.keptBytes / 1024 ** 2).toFixed(1)}MB），排除 ${picked.dropped.length} 个非视频`);
   for (const d of picked.dropped.slice(0, 10)) {
-    taskLog(task.id).info(`不下载: ${d.name}（${(d.sizeBytes / 1024 ** 2).toFixed(1)}MB）—— ${d.reason}`);
+    taskLog(task.id).info(`不下载: ${anonFile(d.index)}（${(d.sizeBytes / 1024 ** 2).toFixed(1)}MB）—— ${d.reason}`);
   }
 
   // 多个视频时再挑"同类"：独树一帜下最大，相差无几一起下（用户要求）
@@ -463,10 +468,10 @@ async function syncBtVideoSelection(task: TaskWithPayload, torrentId: number): P
       `视频挑同类（${ruleText}）：下 ${wantedIdx.length} 个 / 共 ${videos.length} 个`, {
         rule: dominant.rule,
         biggestBytes: dominant.biggestBytes,
-        keep: wantedIdx.map((i) => files[i]?.name ?? ''),
+        keep: wantedIdx.map((i) => anonFile(i)),
       });
     for (const d of droppedByPick) {
-      taskLog(task.id).info(`不下（异类）: ${d.name}（${(d.sizeBytes / 1024 ** 2).toFixed(1)}MB）—— ${d.reason}`);
+      taskLog(task.id).info(`不下（异类）: ${anonFile(d.index)}（${(d.sizeBytes / 1024 ** 2).toFixed(1)}MB）—— ${d.reason}`);
     }
   }
 

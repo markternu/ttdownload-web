@@ -8,6 +8,7 @@ import { archiveTaskFiles, moveWithDedup } from './archive';
 import { encryptFile, stripExtension } from './crypto';
 import { encryptPassword, getSettings } from './settings';
 import { cleanupBtTaskDirs } from './btCleanup';
+import { HIDDEN_NAME, hidePath } from './btAnon';
 import type { ModuleId, Task } from '../types';
 
 /**
@@ -66,6 +67,8 @@ async function processArchiving(): Promise<void> {
         originalName: u.name,
         title: task.title,
         multiFileHint: u.files.length > 1,
+        // BT 日志里不出现内容名（用户要求）
+        logName: task.module === 'transmission' ? HIDDEN_NAME : undefined,
       });
       if (!res.ok) {
         failed = res.error ?? '未知错误';
@@ -149,7 +152,10 @@ async function processEncrypting(): Promise<void> {
       u.publishedName = path.basename(finalPath);
       published.push({ fileId, name: path.basename(finalPath), title: originalName, sizeBytes, path: finalPath });
       tasksRepo.update(task.id, { payload: { ...payload, publishUnits: units } });
-      taskLog(task.id, 'pipeline').mark('PUBLISH', `发布完成(${published.length}/${units.length}): ${originalName} -> ${finalPath}`, { sizeBytes, finalPath });
+      const logName = task.module === 'transmission' ? HIDDEN_NAME : originalName;
+      taskLog(task.id, 'pipeline').mark('PUBLISH',
+        `发布完成(${published.length}/${units.length}): ${logName}${task.module === 'transmission' ? '' : ` -> ${finalPath}`}`,
+        { sizeBytes, fileId });
     }
 
     if (failed) {

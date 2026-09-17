@@ -60,7 +60,8 @@ function failTask(task: TaskWithPayload, message: string): void {
       permanent: isPermanentError(message),
       message,
       url: task.url,
-      title: task.title,
+      // BT 的内容名不进日志（用户要求）；其它模块保留标题便于排查
+      title: task.module === 'transmission' ? '（已隐藏）' : task.title,
     });
   }
   emit(task.id);

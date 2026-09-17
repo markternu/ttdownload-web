@@ -19,6 +19,7 @@ import { tasksRepo } from '../core/db';
 import { bus } from '../core/events';
 import { getSettings } from './settings';
 import { cleanupBtTaskDirs } from './btCleanup';
+import { hideText } from './btAnon';
 import { transmissionClient } from '../modules/transmission';
 import type { Task } from '../types';
 
@@ -178,7 +179,7 @@ export async function runBtEvict({ dryRun = false } = {}): Promise<EvictSummary>
       detail: reason,
     });
     logger.child('bt-evict').mark(action === 'drop' ? 'BT_TIMEOUT_DROP' : 'BT_TIMEOUT_GRACE',
-      `任务 #${task.id}（${name}）：${reason}`, { progress, ageHours, action });
+      `任务 #${task.id}：${reason}`, { progress, ageHours, action });
 
     if (action !== 'drop') {
       tasksRepo.update(task.id, { payload: { ...payload, btLastProgress: progress, btLastCheckAt: new Date().toISOString() } });
@@ -197,7 +198,7 @@ export async function runBtEvict({ dryRun = false } = {}): Promise<EvictSummary>
       error: `超时清理：${reason}${freed > 0 ? `（已释放 ${(freed / 1024 ** 2).toFixed(1)}MB）` : ''}`,
       payload: { ...payload, timedOutAt: new Date().toISOString(), timedOutReason: reason },
     });
-    taskLog(task.id).mark('BT_TIMEOUT_DROP', `已清理：${reason}`, { freedBytes: freed });
+    taskLog(task.id).mark('BT_TIMEOUT_DROP', `已清理：${hideText(reason)}`, { freedBytes: freed });
     logger.child('bt-evict').warn(`任务 #${task.id} 超时清理完成（释放 ${(freed / 1024 ** 2).toFixed(1)}MB）`);
   }
 
