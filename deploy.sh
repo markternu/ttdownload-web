@@ -277,6 +277,29 @@ ensure_transmission_dirs() {
   done
 }
 
+# 拥塞控制：优先启用 BBR（跨国/跨洲链路上单连接吞吐提升最明显；旧内核不支持就跳过）。
+# 用户要求"部署环境有多少带宽就给多少"，而默认的 cubic 在长肥管道上跑不满。
+enable_bbr() {
+  local cur
+  cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+  if [[ "$cur" == "bbr" ]]; then
+    log "拥塞控制：已是 bbr"
+    return 0
+  fi
+  modprobe tcp_bbr 2>/dev/null || true
+  if ! sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+    warn "内核不支持 BBR（当前 ${cur}）—— 跳过（升级内核后可再跑一次 deploy.sh）"
+    return 0
+  fi
+  cat > /etc/sysctl.d/99-ttdownload-bbr.conf <<'CONF'
+# 由 ttdownload-web 的 deploy.sh 写入：跨国链路下载提速（用户要求不限制带宽）
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+CONF
+  sysctl -p /etc/sysctl.d/99-ttdownload-bbr.conf >/dev/null 2>&1 || true
+  log "拥塞控制已启用 BBR（原 ${cur}）"
+}
+
 # transmission：没装则必须用工程自带脚本安装（交互提示原样保留，供用户输入白名单/密码等）
 ensure_transmission() {
   if transmission_installed; then
@@ -939,29 +962,6 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
     warn "ufw 放行 ${PORT}/tcp 失败，如外网访问不了请手动执行：ufw allow ${PORT}/tcp"
   fi
 fi
-
-# 拥塞控制：优先启用 BBR（跨国/跨洲链路上单连接吞吐提升最明显；旧内核不支持就跳过）。
-# 用户要求"部署环境有多少带宽就给多少"，而默认的 cubic 在长肥管道上跑不满。
-enable_bbr() {
-  local cur
-  cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
-  if [[ "$cur" == "bbr" ]]; then
-    log "拥塞控制：已是 bbr"
-    return 0
-  fi
-  modprobe tcp_bbr 2>/dev/null || true
-  if ! sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
-    warn "内核不支持 BBR（当前 ${cur}）—— 跳过（升级内核后可再跑一次 deploy.sh）"
-    return 0
-  fi
-  cat > /etc/sysctl.d/99-ttdownload-bbr.conf <<'CONF'
-# 由 ttdownload-web 的 deploy.sh 写入：跨国链路下载提速（用户要求不限制带宽）
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-CONF
-  sysctl -p /etc/sysctl.d/99-ttdownload-bbr.conf >/dev/null 2>&1 || true
-  log "拥塞控制已启用 BBR（原 ${cur}）"
-}
 
 # ---------------------------------------------------------------- 6.5 网络调优（不限速）
 enable_bbr || true
