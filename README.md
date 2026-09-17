@@ -1,5 +1,9 @@
 # ttdownload-web —— 统一下载管理器（Node.js + React）
 
+> 🤖 **接手开发 / 新对话请先读 [`docs/HANDOVER.md`](docs/HANDOVER.md)**
+> —— 当前状态、BT 模块的完整流程、不能破的规矩（都是真事故换来的）、怎么测怎么部署、已知未完成项。
+> 另外还有 [`排查手册.md`](docs/排查手册.md)（按现象查）和 [`ARCHITECTURE.md`](docs/ARCHITECTURE.md)（代码地图）。
+
 > 把老脚本（`video_auto.sh` / `all1.sh`）的「扫描→加密→归档→清单→下载→上报删除」整条链路，
 > 改造成一个**前后端 Web 应用**：三大下载模块（BT 种子 / aria2 URL / 公开视频URL）统一入队，
 > 由**唯一调度器**做并发与磁盘空间（默认保留 10GiB）门控，完成后**归档 + AES 加密 + 发布**，
