@@ -268,7 +268,9 @@ test('阶段5：BT 任务失败消息带路径 —— 日志脱敏，任务表�
     };
   });
   try {
-    config.transmissionRpc.port = boom.port;
+    // ⚠️ 端口要写进**设置**：BT 客户端现在「设置页优先、回落 .env」，
+    //    只改 config（env）是覆盖不掉的（这正是修好的那个 bug）
+    updateSettings({ transmissionRpc: { host: '127.0.0.1', port: boom.port, user: 'u', password: 'p' } });
     const task = tasksRepo.create({
       module: 'transmission',
       title: SECRET_TORRENT,
@@ -289,7 +291,7 @@ test('阶段5：BT 任务失败消息带路径 —— 日志脱敏，任务表�
     assert.match(readLog(), /TASK_RETRY|TASK_FAIL/, '任务失败日志要保留');
     assertNoSecrets('阶段5-任务失败');
   } finally {
-    config.transmissionRpc.port = oldPort;
+    updateSettings({ transmissionRpc: { host: '127.0.0.1', port: oldPort, user: '', password: '' } });
     await boom.close();
   }
 });

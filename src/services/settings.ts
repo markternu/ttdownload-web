@@ -126,10 +126,22 @@ export function reloadSettings(): Settings {
   return getSettings();
 }
 
-/** 返回给前端的设置（密码掩码） */
+/**
+ * 返回给前端 / 诊断包的设置（密钥类一律掩码）。
+ *
+ * ⚠️ 血案：这里以前只掩 `encryptPassword`，于是 aria2 的 secret 与 transmission 的
+ * RPC 密码**明文**出现在「设置」接口和要发给开发者的诊断包里。
+ */
+export const MASK = '******';
+
 export function getSettingsPublic(): Settings {
   const s = getSettings();
-  return { ...s, encryptPassword: s.encryptPassword ? '******' : '' };
+  return {
+    ...s,
+    encryptPassword: s.encryptPassword ? MASK : '',
+    aria2Rpc: { ...s.aria2Rpc, secret: s.aria2Rpc.secret ? MASK : '' },
+    transmissionRpc: { ...s.transmissionRpc, password: s.transmissionRpc.password ? MASK : '' },
+  };
 }
 
 export function updateSettings(patch: Partial<Settings>): Settings {
@@ -144,11 +156,52 @@ export function updateSettings(patch: Partial<Settings>): Settings {
     btSelect: { ...current.btSelect, ...(patch.btSelect ?? {}) },
     btPolicy: { ...current.btPolicy, ...(patch.btPolicy ?? {}) },
   };
-  // 密码掩码回传时保持原值
-  if (patch.encryptPassword === '******') next.encryptPassword = current.encryptPassword;
+  // 掩码回传时保持原值（前端拿到的就是掩码，原样提交回来不能把密码清成 "******"）
+  if (patch.encryptPassword === MASK) next.encryptPassword = current.encryptPassword;
+  if (patch.transmissionRpc?.password === MASK) next.transmissionRpc.password = current.transmissionRpc.password;
+  if (patch.aria2Rpc?.secret === MASK) next.aria2Rpc.secret = current.aria2Rpc.secret;
   cached = next;
   settingsRepo.setMany({ [KEY]: JSON.stringify(next) });
   return next;
+}
+
+/**
+ * **真正生效**的 transmission RPC 连接信息：设置页（DB）优先，为空/未填时回落到 `.env`。
+ *
+ * ⚠️ 血案：BT 模块以前直接用 `config.transmissionRpc`（= 只读 `.env`），于是用户在
+ * 网页「设置 → 网络设置 → transmission RPC」里填的用户名/密码**完全不起作用** ——
+ * 而部署脚本和网络自检的提示都叫用户去那里填，结果怎么填都还是 HTTP 401。
+ */
+export function transmissionRpc(): { host: string; port: number; user: string; password: string } {
+  let s: Partial<Settings['transmissionRpc']> = {};
+  try {
+    s = getSettings().transmissionRpc ?? {};
+  } catch {
+    /* 设置还没就绪（极少见）→ 回落 env */
+  }
+  const env = config.transmissionRpc;
+  return {
+    host: String(s.host ?? '') || env.host,
+    port: Number(s.port) > 0 ? Number(s.port) : env.port,
+    user: String(s.user ?? '') || env.user,
+    password: String(s.password ?? '') || env.password,
+  };
+}
+
+/** 真正生效的 aria2 RPC 连接信息（同上：设置页优先，回落 .env） */
+export function aria2Rpc(): { host: string; port: number; secret: string } {
+  let s: Partial<Settings['aria2Rpc']> = {};
+  try {
+    s = getSettings().aria2Rpc ?? {};
+  } catch {
+    /* ignore */
+  }
+  const env = config.aria2Rpc;
+  return {
+    host: String(s.host ?? '') || env.host,
+    port: Number(s.port) > 0 ? Number(s.port) : env.port,
+    secret: String(s.secret ?? '') || env.secret,
+  };
 }
 
 /** 加密密码（真实值） */

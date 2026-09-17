@@ -8,6 +8,7 @@ import { kickScheduler } from '../core/scheduler';
 import { logger } from '../core/logger';
 import { enqueueSeed, registerPendingSeeds, scanZipUploads, transmissionClient } from '../modules/transmission';
 import { runBtEvict } from '../services/btEvict';
+import { transmissionRpc } from '../services/settings';
 import { disableBtProxy, enableBtProxy, getBtProxyStatus, originFromRequest, previewBtProxy } from '../services/btProxy';
 import { asyncHandler, badRequest, notFound } from '../utils/http';
 
@@ -99,7 +100,7 @@ btRouter.get(
     }
     res.json({
       running: version !== null,
-      rpc: { host: config.transmissionRpc.host, port: config.transmissionRpc.port },
+      rpc: { host: transmissionRpc().host, port: transmissionRpc().port },
       version,
       pendingSeeds: seedsRepo.all().filter((s) => s.status === 'pending').length,
       dirs: { zip: config.dirs.btZip, pending: config.dirs.btPending, queued: config.dirs.btQueued },

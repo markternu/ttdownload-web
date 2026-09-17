@@ -1,13 +1,19 @@
 import net from 'node:net';
 import { config } from '../core/config';
 import { logger } from '../core/logger';
+import { aria2Rpc } from '../services/settings';
 
-/** 极简 aria2 JSON-RPC 客户端（HTTP POST，支持 token） */
+/**
+ * 极简 aria2 JSON-RPC 客户端（HTTP POST，支持 token）。
+ *
+ * 默认值走 aria2Rpc()（**设置页优先、回落 .env**）：以前直接绑 config.aria2Rpc，
+ * 于是网页「设置 → aria2 RPC」里改的 host/port/secret 完全不生效（和 transmission 同一处血案）。
+ */
 export class Aria2Client {
   constructor(
-    private readonly host = config.aria2Rpc.host,
-    private readonly port = config.aria2Rpc.port,
-    private readonly secret = config.aria2Rpc.secret,
+    private readonly host = aria2Rpc().host,
+    private readonly port = aria2Rpc().port,
+    private readonly secret = aria2Rpc().secret,
   ) {}
 
   get url(): string {
@@ -113,6 +119,8 @@ export async function ensureAria2Daemon(): Promise<{ ok: boolean; message: strin
   const { spawn } = await import('node:child_process');
   const fs = await import('node:fs');
   const path = await import('node:path');
+  // 用"设置页优先"的 RPC 参数拉起守护进程，保证监听端口/secret 与调用侧一致
+  const rpc = aria2Rpc();
   fs.mkdirSync(config.dirs.aria2, { recursive: true });
   const session = path.join(config.dirs.state, 'aria2.session');
   const pidFile = path.join(config.dirs.state, 'aria2.pid');
@@ -121,7 +129,7 @@ export async function ensureAria2Daemon(): Promise<{ ok: boolean; message: strin
     const args = [
       '--enable-rpc',
       '--rpc-listen-all=false',
-      `--rpc-listen-port=${config.aria2Rpc.port}`,
+      `--rpc-listen-port=${rpc.port}`,
       '--continue=true',
       '--rpc-allow-origin-all=true',
       `--dir=${config.dirs.aria2}`,
@@ -136,7 +144,7 @@ export async function ensureAria2Daemon(): Promise<{ ok: boolean; message: strin
       '--file-allocation=none',
       '--disable-ipv6=true',
       '--quiet=true',
-      ...(config.aria2Rpc.secret ? [`--rpc-secret=${config.aria2Rpc.secret}`] : []),
+      ...(rpc.secret ? [`--rpc-secret=${rpc.secret}`] : []),
     ];
     let spawnError: string | null = null;
     logger.child('aria2').mark('ARIA2_DAEMON', '拉起 aria2c 守护进程', { bin: config.bins.aria2, args });
@@ -161,11 +169,11 @@ export async function ensureAria2Daemon(): Promise<{ ok: boolean; message: strin
       }
     }
     lastSpawnError =
-      `aria2 已尝试启动（${config.bins.aria2}）但 RPC ${config.aria2Rpc.host}:${config.aria2Rpc.port} 仍未监听` +
+      `aria2 已尝试启动（${config.bins.aria2}）但 RPC ${rpc.host}:${rpc.port} 仍未监听` +
       `（常见原因：端口被占用、二进制不可执行、${config.dirs.state} 不可写、aria2c 立即退出）`;
     logger.child('aria2').error(`[MARK:ARIA2_DAEMON] ${lastSpawnError}`, {
       bin: config.bins.aria2,
-      port: config.aria2Rpc.port,
+      port: rpc.port,
       stateDir: config.dirs.state,
     });
     return { ok: false, message: lastSpawnError };

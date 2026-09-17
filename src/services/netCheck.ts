@@ -10,7 +10,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { config } from '../core/config';
 import { logger } from '../core/logger';
 import { toolStatus } from '../core/disk';
-import { getSettings } from './settings';
+import { getSettings, transmissionRpc } from './settings';
 import { parseExtraArgs, resolveCookiesFile } from '../modules/webvideo';
 
 export type CheckStatus = 'ok' | 'fail' | 'skip' | 'running';
@@ -533,18 +533,22 @@ async function runChecks(): Promise<NetworkReport> {
     try {
       const { transmissionClient } = await import('../modules/transmission');
       const started = Date.now();
-      const ok = await transmissionClient().ping();
+      // 用 probe() 而不是 ping()：要拿到**真实原因**（401 凭据不对 / 连接被拒 / 超时），
+      // 否则页面只会说"不可用"，用户以为服务没装（血案：浏览器能开 9091，这里却说不可用）
+      const probe = await transmissionClient().probe();
+      const rpc = transmissionRpc();
       out.push({
         id: 'transmission-rpc',
         label: 'transmission RPC（BT 模块）',
-        status: ok ? 'ok' : 'fail',
+        status: probe.ok ? 'ok' : 'fail',
         latencyMs: Date.now() - started,
-        detail: ok
-          ? `可用（${config.transmissionRpc.host}:${config.transmissionRpc.port}）`
-          : `不可用（${config.transmissionRpc.host}:${config.transmissionRpc.port}）`,
-        hint: ok
+        detail: probe.ok
+          ? `可用（${rpc.host}:${rpc.port}${probe.version ? `，transmission ${probe.version}` : ''}）`
+          : `不可用（${rpc.host}:${rpc.port}）：${probe.reason}`,
+        hint: probe.ok
           ? undefined
-          : 'transmission 未装/未启动，或 RPC 需要认证：用 deploy/ubuntutr.sh 安装并设置密码，然后在「设置 → transmission RPC」填 用户 opengl + 密码',
+          : '凭据不对的话可以直接在「设置 → 网络设置 → transmission RPC」里改（改完立即生效，不用重启服务）：'
+            + '用户名填 transmission 的 rpc-username（一般是 opengl），密码填 ubuntutr.sh 里设的那个。',
         group: 'local',
       });
     } catch (e) {

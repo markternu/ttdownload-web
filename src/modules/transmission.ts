@@ -3,7 +3,7 @@ import path from 'node:path';
 import { config } from '../core/config';
 import { logger, taskLog } from '../core/logger';
 import { runCommand } from '../services/archive';
-import { getSettings } from '../services/settings';
+import { getSettings, transmissionRpc } from '../services/settings';
 import { selectBtFiles, pickDominantVideos } from '../services/btSelect';
 import { anonFile, hideName, hidePath, hideText } from '../services/btAnon';
 import { seedsRepo, tasksRepo } from '../core/db';
@@ -15,14 +15,26 @@ import type { ModuleAdapter, PollResult, TaskWithPayload } from './types';
 /* Transmission RPC 客户端（带 409 session-id 自动重试）                */
 /* ------------------------------------------------------------------ */
 
+/** RPC 不通时的排查步骤：把用户往对的方向引，别再说"是不是没装"（那句会把人带偏） */
+const RPC_HINT =
+  '｜依次排查：① transmission-daemon 是否在运行（systemctl status transmission-daemon）'
+  + '② RPC 用户名/密码是否与 transmission 的 rpc-username/rpc-password 一致'
+  + '（可在网页「设置 → 网络设置 → transmission RPC」里填，改完立即生效）'
+  + '③ transmission 的 IP 白名单是否放行 127.0.0.1';
+
 export class TransmissionClient {
   private sessionId = '';
 
+  /**
+   * 默认从**设置页优先级解析**（见 settings.transmissionRpc()）：设置页填了就用设置页的，
+   * 没填才回落 `.env`。以前这里直接绑 `config.transmissionRpc`（= 只读 .env），
+   * 导致用户在网页「设置 → transmission RPC」里填的账号密码完全不起作用（血案）。
+   */
   constructor(
-    private readonly host = config.transmissionRpc.host,
-    private readonly port = config.transmissionRpc.port,
-    private readonly user = config.transmissionRpc.user,
-    private readonly password = config.transmissionRpc.password,
+    private readonly host = transmissionRpc().host,
+    private readonly port = transmissionRpc().port,
+    private readonly user = transmissionRpc().user,
+    private readonly password = transmissionRpc().password,
   ) {}
 
   get url(): string {
@@ -57,6 +69,16 @@ export class TransmissionClient {
           scoped.debug(`[MARK:TR_RPC] 409 会话协商，拿到 session-id=${this.sessionId ? '是' : '否'}（第 ${attempt + 1} 次）`);
           continue;
         }
+        // ⚠️ 401/403 必须**单独**判、并且说清楚：以前它掉进下面的"响应无法解析"，
+        //    最终被 prepare() 统一翻译成"transmission 不可用：请确认已安装并启动 transmission-daemon"
+        //    —— 用户明明能用浏览器打开 9091，却被这句误导去查安装（血案）。
+        if (res.status === 401 || res.status === 403) {
+          const why = res.status === 401
+            ? 'HTTP 401 未授权：RPC 用户名/密码不对，或 IP 白名单没放行 127.0.0.1'
+            : 'HTTP 403 被拒绝：多半是 RPC 白名单没放行 127.0.0.1';
+          scoped.warn(`[MARK:TR_RPC] <- ${method} ${why}`, { httpStatus: res.status, rpcUser: this.user || '(空)' });
+          throw new Error(why);
+        }
         const text = await res.text();
         let json: { result?: string; arguments?: T };
         try {
@@ -90,11 +112,23 @@ export class TransmissionClient {
   }
 
   async ping(): Promise<boolean> {
+    return (await this.probe()).ok;
+  }
+
+  /**
+   * 探活并**把真实原因带出来**（401 凭据不对 / 连接被拒 / 超时 / 响应不是 JSON）。
+   *
+   * 血案：以前 ping() 把所有异常都吞成 false，prepare() 再统一翻译成
+   * "transmission 不可用：请确认已安装并启动 transmission-daemon" ——
+   * 用户明明能在浏览器里打开 9091（服务好得很），却被这句误导去查安装，
+   * 而真正的原因是 RPC 凭据不匹配（HTTP 401）。
+   */
+  async probe(): Promise<{ ok: boolean; reason: string; version?: string }> {
     try {
       const s = await this.call<{ version?: string }>('session-get', {}, 4000);
-      return !!s;
-    } catch {
-      return false;
+      return { ok: true, reason: 'ok', version: s?.version };
+    } catch (e) {
+      return { ok: false, reason: (e as Error).message || '未知错误' };
     }
   }
 }
@@ -235,8 +269,10 @@ export const transmissionModule: ModuleAdapter = {
     const payload = task.payload ?? {};
 
     const client = transmissionClient();
-    if (!(await client.ping())) {
-      throw new Error('transmission 不可用：请确认已安装并启动 transmission-daemon');
+    const probe = await client.probe();
+    if (!probe.ok) {
+      // 把真实原因（401 / 连接被拒 / 超时…）如实带出来，别再让用户去查"是不是没装"
+      throw new Error(`transmission RPC 不可用：${probe.reason}${RPC_HINT}`);
     }
 
     // 已经加过（空间不够被退回等待 / 服务重启重新排队）→ 复用，保持暂停。
@@ -297,8 +333,9 @@ export const transmissionModule: ModuleAdapter = {
     const torrentId = Number(payload.torrentId ?? 0);
     if (!torrentId) throw new Error('任务未准备（缺 transmission 任务 id）：应先调用 prepare');
     const client = transmissionClient();
-    if (!(await client.ping())) {
-      throw new Error('transmission 不可用：请确认已安装并启动 transmission-daemon（sudo apt install -y torrent-daemon 或 transmission-daemon）');
+    const probe2 = await client.probe();
+    if (!probe2.ok) {
+      throw new Error(`transmission RPC 不可用：${probe2.reason}${RPC_HINT}`);
     }
     const selectedBytes = Math.max(0, Number(payload.selectedBytes ?? task.expectBytes ?? 0) || 0);
     await client.call('torrent-start', { ids: [torrentId] });

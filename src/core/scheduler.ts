@@ -32,7 +32,10 @@ function emit(taskId: number): void {
  * 属于「尽力重试」范围，交给各模块的策略阶梯与自动重试处理。
  */
 function isPermanentError(msg: string): boolean {
-  return /URL 格式错误|不支持该链|没有视频或图片|DRM|种子文件不存在|未安装|不可用：请|找不到文件/.test(msg);
+  // ⚠️ 不要把「RPC 不通/凭据不对」算成永久错误：用户改对密码或把 transmission 起起来之后
+  //    重试就能成功（血案：以前 `不可用：请` 命中这里 → 任务直接 failed、不自动重试，
+  //    用户改好了凭据也只能手动点「继续」）。
+  return /URL 格式错误|不支持该链|没有视频或图片|DRM|种子文件不存在|未安装|找不到文件/.test(msg);
 }
 
 function failTask(task: TaskWithPayload, message: string): void {

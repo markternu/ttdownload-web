@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { config } from '../core/config';
+import { transmissionRpc } from './settings';
 import { logger } from '../core/logger';
 import { transmissionClient } from '../modules/transmission';
 import { HttpError } from '../utils/http';
@@ -101,7 +102,7 @@ export function btProxySubPath(): string {
 }
 
 export function btProxyTarget(): string {
-  return process.env.BT_PROXY_TARGET || `127.0.0.1:${config.transmissionRpc.port}`;
+  return process.env.BT_PROXY_TARGET || `127.0.0.1:${transmissionRpc().port}`;
 }
 
 /** 脚本位置：dist/services → ../../deploy/scripts（开发态 src/services → 同样相对路径） */
@@ -200,9 +201,9 @@ async function transmissionInfo(): Promise<BtProxyTransmissionInfo> {
   const info: BtProxyTransmissionInfo = {
     reachable: false,
     version: null,
-    rpcHost: config.transmissionRpc.host,
-    rpcPort: config.transmissionRpc.port,
-    rpcUser: config.transmissionRpc.user,
+    rpcHost: transmissionRpc().host,
+    rpcPort: transmissionRpc().port,
+    rpcUser: transmissionRpc().user,
     authRequired: null,
     authRequiredSource: 'unknown',
     whitelistEnabled: null,
