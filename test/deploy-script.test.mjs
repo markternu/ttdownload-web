@@ -272,6 +272,23 @@ ensure_node
   assert.match(sb.calls(), /apt-get install -y nodejs npm/, '发行版仓库里 nodejs+npm 是配套的，应一起装');
 });
 
+test('【血案回归】--update 分支也必须保证 Node 就绪（否则没 Node 的机器上 npm ci 直接 command not found）', () => {
+  const a = deploySrc.indexOf('\n  update)');
+  const b = deploySrc.indexOf('\n  status)');
+  assert.ok(a > 0 && b > a, '应能从 deploy.sh 里切出 update 分支');
+  const updateBlock = deploySrc.slice(a, b);
+  assert.match(updateBlock, /ensure_node/, '--update 分支应调用 ensure_node（否则全新机器上更新必失败）');
+  // 比顺序时要**去掉注释行**：注释里也会出现 "npm ci" 字样，否则比的是注释不是代码
+  const code = updateBlock
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .join('\n');
+  assert.ok(
+    code.indexOf('ensure_node') < code.indexOf('npm ci'),
+    'ensure_node 必须排在 npm ci 之前，否则等不到它就已经 command not found 了',
+  );
+});
+
 test('--check-deps 能正确识别 node 版本（回归：辅助函数必须定义在提前退出之前）', () => {
   const out = execFileSync('bash', [path.join(projectRoot, 'deploy.sh'), '--check-deps'], { encoding: 'utf8' });
   assert.match(out, /依赖检查结果/);

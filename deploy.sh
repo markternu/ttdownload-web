@@ -678,6 +678,10 @@ case "$ACTION" in
       export DEPLOY_REEXEC
       exec bash "${PROJECT_DIR}/deploy.sh" "${ORIGINAL_ARGS[@]}"
     fi
+    # 老部署升级时也要保证 Node 就绪：机器上没 Node（或版本 < 18）时，下面那句 npm ci
+    # 会直接 "npm: command not found" 中断更新（真机踩过：全新机器 Node 没装上，
+    # update 分支不装 Node，只会在这里失败）。放在 re-exec 之后 → 用的是刚拉下来的新逻辑。
+    if [[ $SKIP_APT -eq 0 ]]; then ensure_node; fi
     # 老部署升级时自愈：补 yt-dlp-ejs / JS 运行时（缺了 YouTube 一定失败）
     if [[ $SKIP_APT -eq 0 ]]; then ensure_ytdlp_stack; fi
     if [[ $SKIP_APT -eq 0 ]]; then ensure_cookie_browser; fi
