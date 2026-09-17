@@ -318,10 +318,26 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     }
   });
 
-  test('首页：网络自检面板显示各项检测结果', async (t) => {
+  test('网络自检已提级为独立页面（不再堆在首页），侧边栏有入口且能硬打开', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     const page = await newPage();
+
+    // ① 首页不再有网络自检面板
     await page.goto(base, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(800);
+    // 注意：侧边栏现在有「网络自检」入口，所以不能拿整页文本判断 —— 只看主内容区，
+    // 并且用面板独有的元素（重新检测按钮 / 分组标题）来确认它确实不在首页了
+    assert.equal(
+      await page.getByRole('button', { name: /重新检测/ }).count(),
+      0,
+      '首页不应再有「重新检测」按钮（面板已移走）',
+    );
+    const homeMain = (await page.locator('main').first().innerText()).replace(/\s+/g, ' ');
+    assert.equal(homeMain.includes('基础网络'), false, '首页主内容区不应再有网络自检分组');
+
+    // ② 侧边栏有平级入口，点进去就是独立页面
+    await page.getByRole('link', { name: '网络自检' }).first().click();
+    await page.waitForURL(/\/network$/, { timeout: 15000 });
     await page.waitForSelector('text=网络自检', { timeout: 15000 });
     // 结论徽标：正常/部分可用/异常 三者之一
     await page.waitForSelector('text=/网络正常|部分可用|网络异常/', { timeout: 30000 });
@@ -332,6 +348,11 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.getByRole('button', { name: /重新检测/ }).first().click();
     await page.waitForTimeout(1500);
     assert.deepEqual(pageErrors, [], `重新检测不应报错：${pageErrors.join('; ')}`);
+
+    // ③ 直接刷新（硬打开 /network）不能白屏 —— 相对资源路径的老坑
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForSelector('text=网络自检', { timeout: 15000 });
+    assert.deepEqual(pageErrors, [], `硬打开 /network 不应报错：${pageErrors.join('; ')}`);
     await page.close();
   });
 

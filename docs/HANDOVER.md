@@ -306,6 +306,9 @@ cd <项目目录> && sudo ./deploy.sh --update
 | 11 | 首次部署若 NodeSource 失败，发行版 `nodejs` 包**不带 npm** → 走到 `die 缺少必要命令: npm`；以及 root 建目录 + sudo 部署时 `npm ci` 写不进去 | `deploy.sh` 装 `nodejs npm`、补 npm 自愈；`REPO_OWNER` 加可写性判断 | `deploy-script.test.mjs` |
 | 12 | **全新 Ubuntu 上部署直接卡死在 Node 这一步**：`apt-get install -y nodejs npm` → `E: Unable to correct problems, you have held broken packages.`（第 11 条那次"顺手补 npm"引入的回归 —— NodeSource 的 nodejs 自带 npm 且与发行版 npm 互斥） | `deploy.sh` 抽出 `ensure_node()`：NodeSource 那步**只装 nodejs**；真要回退发行版仓库时**先摘掉 NodeSource 的源**再 `nodejs npm` 一起装。`deploy/scripts/fix-node20.sh` 同一处隐患一并修掉 | `deploy-script.test.mjs` 两条【血案回归】（假 apt 复现冲突：写回错误版本会 2 项报红） |
 
+| 13 | **前端两段式路由会白屏**：index.html 用相对资源路径（Vite `base: './'`，为兼容子路径部署），像 `/tasks/waiting` 这种两段式 URL 会把 `./assets/*.js` 解析成 `/tasks/assets/*.js` → SPA 回退返回 index.html → "Expected a JavaScript module but got text/html" → **直接刷新/收藏该页就是白屏**（只有两段以上路径会中招） | 路由一律**单段**（`/tasks-waiting`、`/tasks-publish`、`/tasks-other`、`/network`），并同步登记进 `web/src/lib/basePath.ts` 的 `APP_ROUTES` | `test/basepath.test.mjs` 的守卫用例（断言所有前端路由单段 + 必须登记）+ 浏览器用例硬打开新页 |
+| 14 | 任务页把「种子下载任务」和「扫货归档发布子任务」混在一起数/排（14 个种子显示成 23 个任务、总量虚高、侧边栏与页面数字不一致） | 统计口径全部拆分（`db.ts` 的 `summary`/`computeStats` + `/api/tasks?kind=`），界面按口径分开展示；任务区拆成一级页 + 三个独立列表页 | `test/task-count.test.mjs` + 浏览器用例 |
+
 ### 8.2 还没做 / 需要你决定
 
 - **transmission 自己的队列**：它默认 `download-queue-size=5`（最多 5 个种子活跃下载）。

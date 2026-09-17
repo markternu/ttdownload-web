@@ -10,6 +10,7 @@ import LoginPage from './pages/LoginPage'
 // 首屏之外的页面按需加载，减小首包体积
 const TasksPage = lazy(() => import('./pages/TasksPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
+const NetworkPage = lazy(() => import('./pages/NetworkPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const Aria2Page = lazy(() => import('./pages/Aria2Page'))
 const BtPage = lazy(() => import('./pages/BtPage'))
@@ -78,6 +79,14 @@ export default function App() {
                 }
               />
             ))}
+            <Route
+              path="/network"
+              element={
+                <Suspense fallback={<LoadingBlock text="正在检测网络…" />}>
+                  <NetworkPage />
+                </Suspense>
+              }
+            />
             <Route
               path="/history"
               element={

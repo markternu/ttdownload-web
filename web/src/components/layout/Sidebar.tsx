@@ -23,6 +23,7 @@ import {
   X,
   Clock,
   AlertTriangle,
+  Activity,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '../../lib/cn'
@@ -43,6 +44,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/tasks-waiting', label: '排队下载', icon: Clock, description: '等待磁盘空间或并发名额' },
   { to: '/tasks-publish', label: '归档发布', icon: Archive, description: '扫货子任务：归档 → 加密 → 发布' },
   { to: '/tasks-other', label: '其它任务', icon: AlertTriangle, description: '失败 / 已取消' },
+  { to: '/network', label: '网络自检', icon: Activity, description: '服务端出网自检：先分清网络问题还是工具问题' },
   { to: '/history', label: '历史', icon: History, description: '检索、筛选与删除历史记录' },
   { to: '/dashboard', label: 'Dashboard', icon: BarChart3, description: '数据统计与趋势图表' },
   { to: '/aria2', label: 'URL 直链', icon: Link2, description: '批量提交直链下载任务' },

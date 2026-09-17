@@ -27,6 +27,7 @@ export const APP_ROUTES = [
   'tasks-waiting',
   'tasks-publish',
   'tasks-other',
+  'network',
   'history',
   'dashboard',
   'aria2',
