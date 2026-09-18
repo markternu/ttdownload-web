@@ -91,7 +91,7 @@ testWithSpace('默认就是"不限并发"：磁盘够就把等待队列里的任
 
 // 注意：本文件用真实磁盘可用空间做基准，而 node --test 会并行跑其它测试文件（也在写文件），
 // 可用空间会有几百 MB 的漂移。所以下面每处的取值都刻意留了 ≥500MB 的余量，不卡在边界上。
-testWithSpace('空间驱动的准入：每个任务只要「可用于下载 ≥ 它自己」就放行（不再累加扣减）', async () => {
+testWithSpace('空间驱动的准入：严格先进先出，放行一个扣一个，装不下就停（不许插队）', async () => {
   reset();
   // 排队：1G / 2G / 3G / 3.5G —— 可用 5.5G
   waitTask('t1-1G', 1 * GB);
@@ -102,51 +102,42 @@ testWithSpace('空间驱动的准入：每个任务只要「可用于下载 ≥ 
 
   await schedulerTick();
 
-  // 用户规则：每个任务独立判断「可用于下载 − 它自己 ≥ 0」，不累加扣减。
-  // 5.5G 下 1G/2G/3G/3.5G 每一个都装得下 → 全部放行。
-  assert.deepEqual(runningTitles(), ['t1-1G', 't2-2G', 't3-3G', 't4-35G'].sort(), '每个都 ≤ 可用 → 全放行');
-  assert.equal(waitingTitles().length, 0, '没有等待');
+  // 1G 起（剩 4.5G）→ 2G 起（剩 2.5G）→ 3G 装不下 → 停在这里，3.5G 也不许插队
+  assert.deepEqual(runningTitles(), ['t1-1G', 't2-2G'].sort(), '起了 1G 和 2G（共 3G，剩 2.5G）');
+  assert.deepEqual(waitingTitles(), ['t3-3G', 't4-35G'].sort(), '3G 装不下，后面的 3.5G 一起等');
 });
 
-testWithSpace('装不下的跳过，让后面装得下的先跑（不浪费空间）', async () => {
+testWithSpace('严格先进先出：队首装不下，后面小的也不许插队先跑', async () => {
   reset();
   waitTask('big-3G', 3 * GB);
   waitTask('small-100M', 100 * MB);
-  setUsable(1 * GB); // 只够 100M
+  setUsable(1 * GB); // 只够 100M，不够 3G
 
   await schedulerTick();
-  assert.deepEqual(runningTitles(), ['small-100M'], '3G 装不下就跳过它，让后面 100M 先跑（空间不许空着）');
-  assert.deepEqual(waitingTitles(), ['big-3G'], '3G 继续等回血');
+  // 队首 3G 装不下 → 后面的 100M 也不许先跑（严格 FIFO）
+  assert.deepEqual(runningTitles(), [], '3G 装不下，100M 不许插队先跑');
+  assert.deepEqual(waitingTitles(), ['big-3G', 'small-100M'].sort(), '两个都一起等');
 
-  // 回血到 3.5G：大任务也能起来了
+  // 回血到 3.5G：3G 起来，100M 跟着（3.5 − 3 = 0.5 还够 100M）
   setUsable(3.5 * GB);
   await schedulerTick();
-  assert.deepEqual(runningTitles(), ['big-3G', 'small-100M'].sort(), '回血后 3G 也能起来');
+  assert.deepEqual(runningTitles(), ['big-3G', 'small-100M'].sort(), '回血后按顺序都起来');
 });
 
-testWithSpace('「已自动暂停」只在可用于下载 = 0 时出现，回血后自动恢复', async () => {
+testWithSpace('回血后自动继续：任务完成腾出空间 -> 排队的任务被放行', async () => {
   reset();
   waitTask('a-2G', 2 * GB);
   waitTask('b-2G', 2 * GB);
-  setUsable(5 * GB); // 两个 2G 都放行
+  setUsable(2.5 * GB); // 够起一个 2G，不够两个
   await schedulerTick();
-  assert.deepEqual(runningTitles(), ['a-2G', 'b-2G'].sort(), '可用 5G，两个 2G 都放行');
+  assert.deepEqual(runningTitles(), ['a-2G'], '只起得了一个');
+  assert.deepEqual(waitingTitles(), ['b-2G'], '另一个在等（严格 FIFO，不插队）');
 
-  // 制造「可用于下载 = 0」：把预留拉到等于当前空闲 → 只有这时才允许暂停（用户规则）
-  updateSettings({ reserveFreeBytes: freeBytes() });
+  // 第一个任务完成 → 空间回血 → 第二个放行
+  tasksRepo.update(tasksRepo.list({ pageSize: 50 }).items.find((t) => t.title === 'a-2G').id, { status: 'completed' });
   await schedulerTick();
-  const paused = tasksRepo.byStatus(['paused']).filter((t) => t.payload?.pausedBySpace);
-  assert.ok(paused.length >= 1, '可用于下载=0 时才出现"已自动暂停"');
-  assert.ok(runningTitles().length >= 1, '至少保留一个在跑防死锁');
-
-  // 回血：预留归零 → 自动恢复
-  updateSettings({ reserveFreeBytes: 0 });
-  await schedulerTick();
-  assert.equal(
-    tasksRepo.byStatus(['paused']).filter((t) => t.payload?.pausedBySpace).length,
-    0,
-    '回血后被暂停的任务自动恢复',
-  );
+  assert.deepEqual(runningTitles(), ['b-2G'], '空间回血后，排队的 b 自动被放行');
+  assert.equal(waitingTitles().length, 0, '等待队列清空');
 });
 
 testWithSpace('多个模块一起排队时也只看空间，不按模块卡', async () => {

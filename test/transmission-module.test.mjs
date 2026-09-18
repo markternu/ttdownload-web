@@ -153,10 +153,10 @@ test('【事故回归】空间不够时：备好但一个字节都不下，且 e
   // 原因里必须把三笔账摊开，用户自己能对上（真正可用 / 需要 / 系统可用 / 保留 / 运行中预扣）。
   assert.match(
     String(after.error),
-    /可用于下载 -?[\d.]+G < 需要 -?[\d.]+G（操作系统实际可用 -?[\d.]+G − 预留 -?[\d.]+G）/,
+    /无法支撑下一个队列任务（可用 -?[\d.]+G < 实际需要 -?[\d.]+G）/,
     `等待原因要摊开三笔账，实际：${after.error}`,
   );
-  assert.match(String(after.error ?? ''), /磁盘空间不足/);
+  assert.match(String(after.error ?? ''), /空间不足/);
   assert.ok(Number(after.expectBytes) >= 5 * GB * 0.99, '准入时必须已知真实大小（≈5G）');
   assert.equal(mock.state.running, false, '种子必须保持暂停（一个字节都不能下）');
 

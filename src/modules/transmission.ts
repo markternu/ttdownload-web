@@ -8,6 +8,7 @@ import { selectBtFiles, pickDominantVideos } from '../services/btSelect';
 import { anonFile, hideName, hidePath, hideText } from '../services/btAnon';
 import { seedsRepo, tasksRepo } from '../core/db';
 import { cleanupBtTaskDirs } from '../services/btCleanup';
+import { parseTorrentFile } from './torrentMeta';
 import type { SeedItem } from '../types';
 import type { ModuleAdapter, PollResult, TaskWithPayload } from './types';
 
@@ -246,8 +247,18 @@ export function registerPendingSeeds(): number {
     if (!/\.torrent$/i.test(name) || name.startsWith('.')) continue;
     const p = path.join(config.dirs.btPending, name);
     const before = seedsRepo.all().length;
-    seedsRepo.upsertByPath({ name, path: p });
+    const seed = seedsRepo.upsertByPath({ name, path: p });
     if (seedsRepo.all().length > before) added += 1;
+    // 直接从 .torrent 读元数据（bencode），**不用先丢给 transmission** 就知道要下载的资源多大。
+    // 这样"批量入队"时才能按大小排队、逐个放行，而不是全丢给 transmission 产生十几个任务。
+    if (Number(seed.sizeBytes ?? 0) <= 0) {
+      try {
+        const meta = parseTorrentFile(p);
+        seedsRepo.update(seed.id, { sizeBytes: meta.videoBytes, fileCount: meta.fileCount });
+      } catch {
+        // 解析失败不阻断：丢给 transmission 后仍能拿到真实大小（第二道闸门会再校验）
+      }
+    }
   }
   return added;
 }

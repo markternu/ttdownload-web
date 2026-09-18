@@ -211,6 +211,10 @@ async function startWaiting(): Promise<void> {
   const gated = new Map<ModuleId, { count: number; limit: number }>();
   const skippedBySpace: { taskId: number; needBytes: number; usableBytes: number }[] = [];
   const waiting = tasksRepo.byStatus(['waiting']) as TaskWithPayload[];
+  // 用户规则（严格 FIFO + 预留）：
+  //   可用于下载 = 系统实际可用 − 预留 − **已在跑的任务还差多少**（它们承诺的空间要占着）；
+  //   队首任务装得下就放行并继续扣掉它要占的空间；装不下就停在这里（后面不许插队）。
+  let usable = freeBytes() - settings.reserveFreeBytes - reservedByRunningTasks();
   for (const task of waiting) {
     // 0 = 不限：只让磁盘空间当"闸门"（用户要的就是这个：有空间就下）
     if (settings.maxConcurrent > 0 && running.length >= settings.maxConcurrent) break;
@@ -233,23 +237,26 @@ async function startWaiting(): Promise<void> {
     const adapter = adapters[task.module];
     if (!adapter) continue;
 
-    // 用户规则：可用于下载 = 系统实际可用 − 预留；只要够放这个任务就下。
-    // 不再预扣"运行中任务还差多少"（那会让 df 明明有空闲却不让下）。
-    const usable = freeBytes() - settings.reserveFreeBytes;
+    // 用户规则（严格先进先出 + 预留）：
+    //   队首任务装得下就放行并**把它的空间预留掉**；装不下就**停在这里**
+    //   （后面的一起等，不许让后面的小任务插队）。
     const need = remainingBytesOf(task);
     if (usable - need < 0) {
-      // 装不下的**跳过**，让后面装得下的先跑 —— 别让一个大家伙把可用空间白白空着。
-      // 顺序仍然是先进先出（谁先来谁先拿到空间），只是遇到放不下的会先让位。
-      logger.child('scheduler').mark('DISK_GATE',
-        `任务 #${task.id} 需要 ${(need / 1024 ** 3).toFixed(2)}G，当前可用 ${(usable / 1024 ** 3).toFixed(2)}G —— 先跳过它，放行后面装得下的（不浪费空间）`, {
+      const gb = (n: number) => (n / 1024 ** 3).toFixed(2);
+      const msg = `可用于下载空间不足，无法支撑下一个队列任务（可用 ${gb(Math.max(0, usable))}G < 需要 ${gb(need)}G），其后任务一并等待`;
+      if (task.error !== msg) {
+        tasksRepo.update(task.id, { error: msg });
+        emit(task.id);
+      }
+      logger.child('scheduler').mark('DISK_GATE', msg, {
         needBytes: need,
         usableBytes: usable,
         freeBytes: freeBytes(),
         reserveBytes: settings.reserveFreeBytes,
-        skipped: true,
+        fifoBlocked: true,
       });
       skippedBySpace.push({ taskId: task.id, needBytes: need, usableBytes: usable });
-      continue;
+      break; // 严格 FIFO：不跳过
     }
 
     try {
@@ -259,21 +266,19 @@ async function startWaiting(): Promise<void> {
         await adapter.prepare(task);
       }
       const fresh = tasksRepo.get(task.id) as TaskWithPayload;
-      // 空间在这一刻重算（prepare 期间 freeBytes 一直在变）
-      const usable2 = freeBytes() - settings.reserveFreeBytes;
       const need2 = remainingBytesOf(fresh);
-      if (usable2 - need2 < 0) {
+      // 预读的大小和真实大小可能不一致（尤其 BT 只挑视频）：以大的为准再校验一次。
+      if (need2 > need && usable - need2 < 0) {
         const gb = (n: number) => (n / 1024 ** 3).toFixed(2);
-        tasksRepo.update(task.id, {
-          status: 'waiting',
-          error: `磁盘空间不足，等待中：可用于下载 ${gb(Math.max(0, usable2))}G < 需要 ${gb(need2)}G`
-            + `（操作系统实际可用 ${gb(freeBytes())}G − 预留 ${gb(settings.reserveFreeBytes)}G）`,
-        });
+        const msg = `可用于下载空间不足，无法支撑下一个队列任务（可用 ${gb(Math.max(0, usable))}G < 实际需要 ${gb(need2)}G），其后任务一并等待`;
+        tasksRepo.update(task.id, { status: 'waiting', error: msg });
         emit(task.id);
-        continue;
+        break;
       }
       tasksRepo.update(task.id, { error: null });
       await adapter.start(fresh);
+      // 预留：这个任务要占的空间，从本轮可用额度里扣掉（下个任务只能看到剩下的）
+      usable -= Math.max(need, need2);
       logger.child('scheduler').mark('TASK_STATE', `任务 #${task.id} 已启动`, {
         module: task.module,
         url: task.url,
