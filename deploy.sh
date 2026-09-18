@@ -822,8 +822,31 @@ case "$ACTION" in
     if [[ -f package-lock.json ]]; then as_owner npm ci --no-audit --no-fund || as_owner npm install --no-audit --no-fund; else as_owner npm install --no-audit --no-fund; fi
     as_owner npm run build
     if [[ $SKIP_WEB -eq 0 && -f web/package.json ]]; then
-      log "重新构建前端 ..."
-      (cd web && (as_owner npm ci --no-audit --no-fund || as_owner npm install --no-audit --no-fund) && as_owner npm run build)
+      log "重新构建前端 ...（vite 会清空 public/ 再重建，这一步别 Ctrl-C）"
+      # ⚠️ vite 的 outDir 是 ../public 且 emptyOutDir=true：构建一开始就把 public/ 清空。
+      #    构建失败/被杀 → 站点变白页。所以先备份，失败/超时/没产出 index.html 就回滚到旧前端。
+      WEB_BAK="public.deploy-bak.$$"
+      rm -rf "$WEB_BAK"
+      if [[ -d public ]]; then cp -a public "$WEB_BAK"; fi
+      # ⚠️ 1~2G 内存的机器上 rollup 在 "rendering chunks" 阶段会疯狂 swap（看着像卡死）甚至 OOM。
+      #    给 Node 明确内存上限 + 20 分钟硬超时：卡住就报错，而不是无限等。
+      if (cd web && (as_owner npm ci --no-audit --no-fund || as_owner npm install --no-audit --no-fund) \
+            && as_owner env NODE_OPTIONS="--max-old-space-size=2048" timeout 1200 npm run build); then
+        if [[ ! -f public/index.html ]]; then
+          warn "前端构建结束但 public/index.html 不存在 —— 会白页，回滚到构建前的产物"
+          rm -rf public
+          if [[ -d "$WEB_BAK" ]]; then mv "$WEB_BAK" public; fi
+          exit 1
+        fi
+        rm -rf "$WEB_BAK"
+        log "前端构建完成"
+      else
+        warn "前端构建失败或超时（20 分钟）—— 已回滚到构建前的前端产物，服务仍是旧版"
+        warn "多半是内存/CPU 不够：加 swap 或先 systemctl stop ${SERVICE_NAME} 再重试"
+        rm -rf public
+        if [[ -d "$WEB_BAK" ]]; then mv "$WEB_BAK" public; fi
+        exit 1
+      fi
     fi
     log "重启服务 ${SERVICE_NAME} ..."
     systemctl restart "$SERVICE_NAME"

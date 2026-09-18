@@ -209,6 +209,12 @@ test('系统依赖里包含 better-sqlite3 本机编译所需的 build-essential
 test('Node 版本自适应：目标 20，只有 Ubuntu <20.04 才退回 18（Debian/树莓派 OS 用 20）', () => {
   assert.match(deploySrc, /setup_\$\{NODE_SETUP\}\.x/, '应使用变量化的 NodeSource 版本');
   assert.match(deploySrc, /NODE_WANT_MAJOR=20/, '目标版本应为 20');
+  // 线上踩过：1G 内存的机器上 vite 卡在 "rendering chunks"（疯狂 swap），且 emptyOutDir=true
+  // 会在构建开始时清空 public/ —— 中途失败就白页。必须：内存上限 + 超时 + 备份回滚 + 校验产物。
+  assert.match(deploySrc, /--max-old-space-size=2048/, '前端构建要给 Node 明确内存上限（小内存机器会 swap 到假死）');
+  assert.match(deploySrc, /timeout 1200 npm run build/, '前端构建要有硬超时，卡住要报错而不是无限等');
+  assert.match(deploySrc, /public\.deploy-bak/, '构建前要备份 public/');
+  assert.match(deploySrc, /public\/index\.html/, '构建后要校验 index.html 存在，否则回滚');
   assert.match(deploySrc, /"\$OS_ID" == "ubuntu"/, '必须同时判断发行版 ID 是 ubuntu');
   assert.match(deploySrc, /OS_MAJ < 20/, '只有 Ubuntu <20.04 才回退 Node 18');
   // 回归：不能用「VERSION_ID 的整数」直接和 20 比较（Debian 12/13 会被误判）
