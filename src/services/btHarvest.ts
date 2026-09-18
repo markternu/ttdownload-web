@@ -30,7 +30,7 @@ import { getSettings } from './settings';
 import { buildPublishUnits, extOfName } from './btSelect';
 import { hidePath, hidePathDeep, hideText } from './btAnon';
 import { createPublishTask } from './pipeline';
-import { cleanupBtTaskDirs } from './btCleanup';
+import { candidateDirs, cleanupBtTaskDirs, findSharedDirs } from './btCleanup';
 import { transmissionClient } from '../modules/transmission';
 import type { Task } from '../types';
 
@@ -440,9 +440,21 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
       }
     }
 
-    // 只有**目录真的没了**才算收尾完成。清理被跳过/失败时留着 harvestDone=false，
-    // 下一轮还会再来（否则 transmission 任务删了、目录却永远留在磁盘上没人管）。
+    // 目录还在时，先分清是「删失败了」还是「被别的种子共用、安全起见没删」：
+    // 后者不是失败 —— 剩下的文件属于另一个种子，由对方收尾时再删；这里必须置 harvestDone，
+    // 否则 alreadyHarvesting() 会一直把目录当成"正在被处理"，另一个种子的货永远扫不到 → 死锁
+    // （线上真实卡住：两个种子同目录，A 100% 收尾被 B 挡住、B 又被 A 的 harvestDone=false 挡住）。
     if (h.dir && fs.existsSync(h.dir)) {
+      const sharedNow = findSharedDirs(
+        t as Task,
+        candidateDirs(t as Task, h.torrentName ?? path.basename(h.dir)),
+      );
+      if (sharedNow.has(h.dir)) {
+        logger.child('bt-harvest').mark('BT_HARVEST',
+          `目录被其它种子共用，本任务收尾完成，剩余由对方清理：${hidePath(h.dir)}`);
+        tasksRepo.update(t.id, { payload: { ...((t.payload ?? {}) as Record<string, unknown>), harvestDone: true } });
+        continue;
+      }
       logger.child('bt-harvest').warn(`目录还没能删掉（${hidePath(h.dir)}），保留收尾标记等下一轮重试`);
       continue;
     }

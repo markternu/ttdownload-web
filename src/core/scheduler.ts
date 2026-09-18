@@ -162,15 +162,15 @@ async function applySpacePressure(usable: number): Promise<void> {
 /** 空间恢复后，恢复被自动暂停的任务 */
 async function resumeSpacePaused(freeMinusReserve: number): Promise<void> {
   const paused = tasksRepo.byStatus(['paused']) as TaskWithPayload[];
-  // 与准入用同一口径：可用 = 系统可用 - 预留 - 运行中任务的预留
-  const runningNow = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
-  const reservedNow = runningNow.reduce((sum, t) => sum + Math.max(0, t.expectBytes || 0), 0);
-  const usable = freeMinusReserve - reservedNow;
+  // 与准入用同一口径：可用 = 系统可用 - 预留 - 运行中任务**还差多少**
+  // ⚠️ 历史 bug：这里单独抄了一份"按 expectBytes 全额预扣"，导致"df 明明有空间，任务却一直
+  //    停在'已自动暂停'" —— 6 个运行中任务虚占 6.21G（真实只差 3.38G），把可用的 6.75G 挤成 0.54G。
+  const usable = freeMinusReserve - reservedByRunningTasks();
   let spendable = usable;
-  const nothingRunning = runningNow.length === 0;
+  const nothingRunning = tasksRepo.byStatus(['downloading', 'parsing']).length === 0;
   for (const task of paused) {
     if (!(task.payload ?? {}).pausedBySpace) continue;
-    const need = Math.max(0, task.expectBytes || 0);
+    const need = remainingBytesOf(task);
     // 防死锁：一个都没在跑时必须放行最老的（否则永远没人下完、空间永远回不来）
     if (spendable - need < 0 && !nothingRunning) continue;
     const adapter = adapters[task.module];
@@ -343,7 +343,7 @@ async function tick(): Promise<void> {
     await pollRunning();
     const settings = getSettings();
     const runningAfter = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
-    const reserved = runningAfter.reduce((sum, t) => sum + Math.max(0, t.expectBytes || 0), 0);
+    const reserved = reservedByRunningTasks();
     const usable = freeBytes() - settings.reserveFreeBytes - reserved;
     await applySpacePressure(usable);
     await resumeSpacePaused(freeBytes() - settings.reserveFreeBytes);

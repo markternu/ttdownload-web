@@ -242,3 +242,38 @@ test('【事故回归】下到 91% 的任务不许挡住新任务（线上投诉
   );
   assert.ok(Number(after.expectBytes) >= 2 * GB * 0.99, '准入时真实大小必须已知（≈2G）');
 });
+
+test('【事故回归】空间压力暂停的任务，等运行中任务"还差"变少后自动恢复（df 有空间却一直暂停的真因）', async () => {
+  const GB = 1024 ** 3;
+  const { schedulerTick } = await import('../dist/core/scheduler.js');
+  const { freeBytes } = await import('../dist/core/disk.js');
+  const { updateSettings } = await import('../dist/services/settings.js');
+
+  mock.state.complete = false;
+  mock.state.percent = 0.91;         // 运行中的任务：已下 1.82G/2G，只还差 0.18G
+  mock.state.totalSize = 2 * GB;
+  mock.state.running = false;
+  mock.state.files = [{ name: 'big.mp4', length: 2 * GB, bytesCompleted: 0 }];
+  mock.state.wanted = [1];
+  for (const t of tasksRepo.list({ pageSize: 500 }).items) tasksRepo.delete(t.id);
+
+  // A：正在下载、快下完（expect 2G，但 poll 后只还差 0.18G）
+  tasksRepo.create({
+    module: 'transmission', title: '快下完的', platform: 'BT', url: null,
+    status: 'downloading', priority: 0, expectBytes: 2 * GB,
+    payload: { torrentId: 7, torrentName: 'Demo', btHash: 'abc', btHandedAt: new Date().toISOString() },
+  });
+  // B：被空间压力暂停、需要 0.5G
+  const b = tasksRepo.create({
+    module: 'transmission', title: '等恢复的', platform: 'BT', url: null,
+    status: 'paused', priority: 0, expectBytes: Math.round(0.5 * GB),
+    payload: { torrentId: 7, pausedBySpace: true },
+  });
+
+  // 可用量钉成 0.7G：剩余口径 0.7 − 0.18 = 0.52 ≥ 0.5 → 必须恢复；
+  // 旧口径按 expect 全额 0.7 − 2.0 < 0 → 恢复不了（正是"df 有空间却一直停在已自动暂停"的 bug）。
+  updateSettings({ reserveFreeBytes: freeBytes() - 0.7 * GB });
+  await schedulerTick();
+
+  assert.equal(tasksRepo.get(b.id).status, 'downloading', `空间够就该恢复被暂停的任务，实际 ${tasksRepo.get(b.id).status}`);
+});
