@@ -475,13 +475,15 @@ export const seedsRepo = {
       .run(input.name, input.path, 'pending', ts, ts);
     return rowToSeed(db.prepare('SELECT * FROM seeds WHERE id=?').get(Number(info.lastInsertRowid)) as SeedRow);
   },
-  update(id: number, patch: Partial<{ status: SeedItem['status']; sizeBytes: number; fileCount: number; taskId: number | null; error: string | null }>): void {
+  update(id: number, patch: Partial<{ status: SeedItem['status']; sizeBytes: number; fileCount: number; taskId: number | null; error: string | null; path: string; name: string }>): void {
     const map: Record<string, string> = {
       status: 'status',
       sizeBytes: 'size_bytes',
       fileCount: 'file_count',
       taskId: 'task_id',
       error: 'error',
+      path: 'path',
+      name: 'name',
     };
     const sets: string[] = [];
     const args: unknown[] = [];

@@ -11,6 +11,7 @@ import LoginPage from './pages/LoginPage'
 const TasksPage = lazy(() => import('./pages/TasksPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
 const NetworkPage = lazy(() => import('./pages/NetworkPage'))
+const BtQueuedPage = lazy(() => import('./pages/BtQueuedPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const Aria2Page = lazy(() => import('./pages/Aria2Page'))
 const BtPage = lazy(() => import('./pages/BtPage'))
@@ -116,6 +117,14 @@ export default function App() {
               element={
                 <Suspense fallback={<LoadingBlock text="正在加载模块页…" />}>
                   <BtPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/bt-queued"
+              element={
+                <Suspense fallback={<LoadingBlock text="正在加载已入队种子…" />}>
+                  <BtQueuedPage />
                 </Suspense>
               }
             />

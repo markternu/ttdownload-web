@@ -1,5 +1,6 @@
+import { Link } from 'react-router-dom'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Code2, Copy, ExternalLink, FileArchive, Globe, Loader2, Magnet, RefreshCw, ShieldAlert, Trash2, UploadCloud, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Code2, Copy, ExternalLink, FileArchive, Globe, Loader2, Magnet, RefreshCw, ShieldAlert, Trash2, UploadCloud, XCircle, ChevronRight } from 'lucide-react'
 import {
   Badge,
   Button,
@@ -75,7 +76,10 @@ export default function BtPage() {
 
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
-  const [seeds, setSeeds] = useState<SeedItem[]>([])
+  const [allSeeds, setAllSeeds] = useState<SeedItem[]>([])
+  // 用户要求：**已经入队的种子不要再留在这个列表里** —— 它们有自己的二级页面（/bt-queued）
+  const seeds = allSeeds.filter((s) => s.status === 'pending')
+  const queuedCount = allSeeds.length - seeds.length
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<number[]>([])
@@ -103,7 +107,7 @@ export default function BtPage() {
         api.btProxy(),
       ])
       if (seedsRes.status === 'fulfilled') {
-        setSeeds(seedsRes.value.items ?? [])
+        setAllSeeds(seedsRes.value.items ?? [])
         setError(null)
       } else {
         setError((seedsRes.reason as Error).message)
@@ -131,7 +135,7 @@ export default function BtPage() {
       try {
         const res = await api.btUpload(file)
         toast.success('上传成功', `${res.zipName} · 解压出 ${res.extracted} 个种子`)
-        setSeeds(res.seeds ?? [])
+        setAllSeeds(res.seeds ?? [])
         void load(true)
       } catch (err) {
         toast.error('上传失败', humanizeError((err as { code?: string }).code ?? '', (err as Error).message))
@@ -768,7 +772,15 @@ export default function BtPage() {
         <CardHeader
           title="上传种子压缩包"
           subtitle="multipart/form-data，字段名 file，仅支持 .zip"
-          action={<Badge tone="neutral">GET /api/bt/seeds</Badge>}
+          action={
+            <Link
+              to="/bt-queued"
+              className="inline-flex items-center gap-1 text-xs text-brand-600 hover:underline dark:text-brand-400"
+            >
+              已入队种子（{queuedCount}）
+              <ChevronRight className="h-3.5 w-3.5" />
+            </Link>
+          }
         />
         <div
           onDragOver={(event) => {
@@ -820,7 +832,9 @@ export default function BtPage() {
       <Card>
         <CardHeader
           title="种子列表"
-          subtitle={`共 ${seeds.length} 个种子 · 已选择 ${selected.length} 个`}
+          subtitle={`待入队 ${seeds.length} 个 · 已选择 ${selected.length} 个${
+            queuedCount > 0 ? `（已入队 ${queuedCount} 个在二级页）` : ''
+          }`}
           action={
             <div className="flex flex-wrap gap-2">
               <Button

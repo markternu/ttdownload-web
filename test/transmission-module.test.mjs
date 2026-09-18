@@ -34,7 +34,10 @@ test('zip 上传 -> 解压 -> 种子入库（并删除 zip）', async () => {
   execFileSync('zip', ['-j', '-q', path.join(config.dirs.btZip, 'upload1.zip'), fakeTorrent]);
   const extracted = await bt.scanZipUploads();
   assert.equal(extracted, 1);
-  assert.equal(fs.existsSync(path.join(config.dirs.btZip, 'upload1.zip')), false, 'zip 应被删除');
+  // 用户要求：种子相关文件全程不自动删除 → zip 移到 btZip/done/ 留档（原地不留，避免重复解压）
+  assert.equal(fs.existsSync(path.join(config.dirs.btZip, 'upload1.zip')), false, 'zip 不应留在原处（否则每 3 秒重复解压）');
+  const archived = fs.readdirSync(path.join(config.dirs.btZip, 'done')).filter((n) => n.endsWith('upload1.zip'));
+  assert.equal(archived.length, 1, 'zip 应被归档留档（不删除）');
   assert.equal(fs.existsSync(path.join(config.dirs.btPending, 'demo.torrent')), true, '种子应进入待下载目录');
   bt.registerPendingSeeds();
   assert.equal(seedsRepo.all().length, 1);
@@ -67,10 +70,11 @@ test('prepare：只勾视频 + 算出真实大小 + **绝不覆盖 download-dir*
   assert.equal(after.payload.btDownloadDir, downloadDir, '记录 transmission 报告的目录');
 
   // ④ transmission 成功接管后，种子文件要删掉（transmission 已有元数据，留着没用）
+  // ⚠️ 行为已按用户要求反转：**.torrent 全程不自动删除**，入队时就移动到 btQueued 留档
   const seedPath = String(after.payload.seedPath ?? '');
   assert.ok(seedPath, 'payload 里应有种子路径');
-  assert.equal(fs.existsSync(seedPath), false, 'transmission 接管成功后应删除 .torrent 文件');
-  assert.equal(after.payload.seedPathDeleted, true, '要标记种子文件已删除');
+  assert.equal(fs.existsSync(seedPath), true, 'transmission 接管后 .torrent 必须保留（用户要求不自动删除）');
+  assert.ok(seedPath.startsWith(config.dirs.btQueued), '并归档在 btQueued（已入队）目录里：' + seedPath);
 });
 
 test('种子文件删除后，重复 prepare 仍能正常复用（空间不够被退回等待再重试）', async () => {
@@ -92,7 +96,8 @@ test('没视频的种子：接管失败，种子文件要留着（方便用户�
   const seed = seedsRepo.all().find((s) => s.name === 'novideo.torrent');
   const task = bt.enqueueSeed(seed);
   await assert.rejects(() => bt.transmissionModule.prepare(tasksRepo.get(task.id)), /没有视频文件/);
-  assert.equal(fs.existsSync(placed), true, '接管失败时种子文件应保留');
+  const stillThere = String(seedsRepo.get(seed.id).path ?? '');
+  assert.equal(fs.existsSync(stillThere), true, '接管失败时种子文件应保留（现在归档在 btQueued）');
 });
 
 test('start：只做 torrent-start，并记录"什么时候交给 transmission 的"', async () => {

@@ -223,7 +223,16 @@ export async function scanZipUploads(): Promise<number> {
       moved += 1;
     }
     fs.rmSync(tmpDir, { recursive: true, force: true });
-    fs.rmSync(zipPath, { force: true });
+    // ⚠️ 用户要求：**不自动删除种子相关文件**。zip 不能原地留着（每 3 秒的 produce 会重复
+    //    解压 → 无限重复种子），所以**移动**到一个已处理目录里留档，绝不删。
+    try {
+      const doneDir = path.join(config.dirs.btZip, 'done');
+      fs.mkdirSync(doneDir, { recursive: true });
+      const keep = path.join(doneDir, `${Date.now()}_${name}`);
+      fs.renameSync(zipPath, keep);
+    } catch (e) {
+      logger.child('transmission').warn(`种子 zip 归档留档失败（不影响解压结果）：${hideText((e as Error).message)}`);
+    }
     extracted += moved;
     logger.child('transmission').mark('ARCHIVE', `种子 zip 解压完成: ${moved} 个种子`, { outputDir: config.dirs.btQueued });
   }
@@ -338,21 +347,11 @@ export const transmissionModule: ModuleAdapter = {
 
     const selectedBytes = await syncBtVideoSelection(task, torrentId);
 
-    // 种子已经被 transmission 成功接管（拿到了任务 id、也读到了文件列表）→
-    // **把这个 .torrent 文件删掉**：transmission 自己已经保存了元数据，
-    // 留着只是占地方（用户明确要求）。注意是"确认接管成功之后"才删 ——
-    // 上面 syncBtVideoSelection 抛错时不会走到这里，种子会留着方便重试。
-    if (fs.existsSync(seedPath)) {
-      try {
-        fs.rmSync(seedPath, { force: true });
-        const p2 = (tasksRepo.get(task.id) as TaskWithPayload).payload ?? {};
-        tasksRepo.update(task.id, { payload: { ...p2, seedPathDeleted: true } });
-        taskLog(task.id).mark('BT_SEED_DELETED',
-          `transmission 已接管该种子，已删除种子文件（${hideName(seedPath)}）`, { torrentId });
-      } catch (e) {
-        // e.message 里带的是种子文件完整路径（= 种子名）→ 必须脱敏
-        logger.child('transmission').warn(`删除种子文件失败（不影响下载）：${hideText((e as Error).message)}`);
-      }
+    // ⚠️ **绝不自动删除 .torrent**（用户要求）。
+    // 种子文件在入队时就已经被移动到 config.dirs.btQueued 归档了，这里什么都不做 ——
+    // 保留它，用户以后想重下（任务被超时清理/手动删任务）都不用重新找种子。
+    if (payload.seedId) {
+      seedsRepo.update(Number(payload.seedId), { status: 'downloading' });
     }
 
     logger.child('transmission').mark('BT_PREPARE',
@@ -498,8 +497,43 @@ export function enqueueSeed(seed: SeedItem, priority = 0): import('../types').Ta
     payload: { seedId: seed.id, seedPath: seed.path },
     meta: { files: [] },
   });
-  seedsRepo.update(seed.id, { status: 'queued', taskId: task.id });
+  // 入队 = 把 .torrent **移动**到"已入队"目录留档（永不删除；界面上的已入队列表就在这儿）
+  const movedTo = moveSeedToQueued(seed);
+  tasksRepo.update(task.id, {
+    payload: { seedId: seed.id, seedPath: movedTo, seedArchived: true },
+  });
+  seedsRepo.update(seed.id, { status: 'queued', taskId: task.id, path: movedTo });
   return task;
+}
+
+/**
+ * 把 .torrent **移动**到"已入队"目录（config.dirs.btQueued = transmission/btzhongzi_yijingdownding）。
+ *
+ * 用户要求：种子文件全程不自动删除，只有用户自己点删除才删。
+ * 移动而不是留着，是为了让"待下载种子"列表里只剩还没入队的（这就是需求里的
+ * "已经入队的不要再放在这里"）。移动失败（跨设备等）就退回原路径，不影响入队。
+ */
+function moveSeedToQueued(seed: SeedItem): string {
+  const src = String(seed.path ?? '');
+  if (!src || !fs.existsSync(src)) return src;
+  try {
+    fs.mkdirSync(config.dirs.btQueued, { recursive: true });
+    let dest = path.join(config.dirs.btQueued, path.basename(src));
+    if (fs.existsSync(dest) && path.resolve(dest) !== path.resolve(src)) {
+      dest = path.join(config.dirs.btQueued, `${path.basename(src).replace(/\.torrent$/i, '')}_${Date.now()}.torrent`);
+    }
+    if (path.resolve(dest) === path.resolve(src)) return src;
+    try {
+      fs.renameSync(src, dest);
+    } catch {
+      fs.copyFileSync(src, dest);
+      // 注意：这里**不删**源文件（用户要求不自动删种子）；源文件留在 btPending 也无害
+    }
+    return dest;
+  } catch (e) {
+    logger.child('transmission').warn(`种子归档移动失败（不影响入队）：${hideText((e as Error).message)}`);
+    return src;
+  }
 }
 
 /** transmission 的 wanted 数组：空数组/缺省 = 全都要；0 = 不要 */

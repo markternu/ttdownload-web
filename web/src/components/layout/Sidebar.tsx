@@ -21,8 +21,6 @@ import {
   Wrench,
   Archive,
   X,
-  Clock,
-  AlertTriangle,
   Activity,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -41,9 +39,6 @@ interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: '首页', icon: Video, description: '粘贴链接，解析并加入下载队列' },
   { to: '/tasks', label: '任务', icon: ListChecks, description: '正在下载 / 已下载' },
-  { to: '/tasks-waiting', label: '排队下载', icon: Clock, description: '等待磁盘空间或并发名额' },
-  { to: '/tasks-publish', label: '归档发布', icon: Archive, description: '扫货子任务：归档 → 加密 → 发布' },
-  { to: '/tasks-other', label: '其它任务', icon: AlertTriangle, description: '失败 / 已取消' },
   { to: '/network', label: '网络自检', icon: Activity, description: '服务端出网自检：先分清网络问题还是工具问题' },
   { to: '/history', label: '历史', icon: History, description: '检索、筛选与删除历史记录' },
   { to: '/dashboard', label: 'Dashboard', icon: BarChart3, description: '数据统计与趋势图表' },

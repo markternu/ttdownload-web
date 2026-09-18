@@ -32,6 +32,7 @@ export const APP_ROUTES = [
   'dashboard',
   'aria2',
   'bt',
+  'bt-queued',
   'files',
   'pending',
   'settings',
