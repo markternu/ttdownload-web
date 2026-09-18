@@ -79,7 +79,7 @@ SKIP_WEB=0
 ACTION="deploy"
 LOG_LINES=200
 ORIGINAL_ARGS=("$@")   # git pull 后要用新脚本重新执行同样的参数
-PROXY_PATH="${PROXY_PATH:-/ttdownload}"
+PROXY_PATH="${PROXY_PATH:-/tt}"
 BT_PROXY_PATH="${BT_PROXY_PATH:-/transmission}"
 BT_PROXY_TOGGLE="${PROJECT_DIR}/deploy/scripts/nginx-proxy-toggle.sh"
 
@@ -275,6 +275,34 @@ ensure_transmission_dirs() {
     fi
     break
   done
+}
+
+# 「必须有 nginx 反代」：新服务器通常只开放 22/80/443，8080 外网根本不可达。
+# 所以**不再判断端口可不可达** —— 一律确保 nginx 装好、并把 http://<IP>${PROXY_PATH} 反代到 8080。
+# setup-nginx-proxy.sh 会在缺 nginx 时自动 apt 安装；安装失败才算致命（那样新服务器会彻底连不上）。
+ensure_nginx_proxy() {
+  local script="${PROJECT_DIR}/deploy/scripts/setup-nginx-proxy.sh"
+  if [[ ! -f "$script" ]]; then
+    warn "缺少 ${script}（先 git pull 拿最新代码），无法配置 nginx 反代"
+    return 1
+  fi
+  if ! command -v nginx >/dev/null 2>&1; then
+    log "未检测到 nginx → 安装（新服务器只能靠 80 端口进来，8080 外网不可达）"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1 || true
+    if ! apt-get install -y nginx; then
+      die "nginx 安装失败：新服务器只开放 22/80/443，没有 nginx 就彻底访问不到（请手动 apt install -y nginx 后重跑）"
+    fi
+    log "nginx 已安装：$(nginx -v 2>&1)"
+  fi
+  log "配置 nginx 反向代理：http://<公网IP>${PROXY_PATH}/ → 127.0.0.1:${PORT}"
+  if bash "$script" --path "$PROXY_PATH" --port "$PORT"; then
+    log "反向代理就绪：http://<公网IP>${PROXY_PATH}/（安卓端填 IP 会自动走这个路径）"
+  else
+    warn "反向代理配置失败（不影响本机服务，但外网可能访问不到）。可稍后手动重试："
+    warn "  sudo bash ${script} --path ${PROXY_PATH} --port ${PORT}"
+    return 1
+  fi
 }
 
 # 拥塞控制：优先启用 BBR（跨国/跨洲链路上单连接吞吐提升最明显；旧内核不支持就跳过）。
@@ -645,7 +673,7 @@ case "$ACTION" in
     exit 0 ;;
   proxy)
     if [[ -f "${PROJECT_DIR}/deploy/scripts/setup-nginx-proxy.sh" ]]; then
-      bash "${PROJECT_DIR}/deploy/scripts/setup-nginx-proxy.sh" --path "${PROXY_PATH}"
+      bash "${PROJECT_DIR}/deploy/scripts/setup-nginx-proxy.sh" --path "${PROXY_PATH}" --port "${PORT}"
     else
       die "缺少 deploy/scripts/setup-nginx-proxy.sh（先 git pull / --update 拿到最新代码）"
     fi
@@ -712,6 +740,8 @@ case "$ACTION" in
     ensure_transmission_dirs
     # 网络调优：跨国链路上单连接吞吐（--update 分支不会走到主流程，必须在这儿也调一次）
     enable_bbr || true
+    # 反代：新服务器只开放 80，必须保证 nginx 在（同样不能等主流程）
+    ensure_nginx_proxy || true
 
   # 老部署升级时把"写死的并发上限"改成 0=不限：准入只该由磁盘空间决定。
   # 注意：.env 的优先级高于代码里的默认值，所以光改代码对**已部署的机器无效**，
@@ -965,6 +995,9 @@ fi
 
 # ---------------------------------------------------------------- 6.5 网络调优（不限速）
 enable_bbr || true
+
+# ---------------------------------------------------------------- 6.6 nginx 反向代理（必须）
+ensure_nginx_proxy || true
 
 # ---------------------------------------------------------------- 7. systemd
 log "注册 systemd 服务: ${SERVICE_FILE}"
