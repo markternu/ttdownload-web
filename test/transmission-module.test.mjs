@@ -138,7 +138,14 @@ test('【事故回归】空间不够时：备好但一个字节都不下，且 e
   const seed = seedsRepo.all().find((s) => s.name === 'huge.torrent');
   const task = bt.enqueueSeed(seed);
 
-  updateSettings({ reserveFreeBytes: Math.max(0, freeBytes() - 3 * GB) });
+  // 空间必须由测试说了算：reserveFreeBytes 是「保留量」，设成 (真实空闲 - X) 就把可用量
+  // **钉死**成 X —— 不再受这台机器磁盘里真实下载了多少东西影响。
+  // 真机血案：原来这里是 Math.max(0, freeBytes() - 3G) 和 1024，树莓派上磁盘被真实下载占满，
+  // 「空间够了」那一侧永远凑不出 5G → 用例在 Mac 上绿、在真机上红。
+  // 允许 reserveFreeBytes 为负：updateSettings 不校验，调度器只算 freeBytes() - reserve。
+  const free = freeBytes();
+
+  updateSettings({ reserveFreeBytes: free - 3 * GB }); // 可用 = 3G < 5G → 必须 waiting
   await schedulerTick();
   const after = tasksRepo.get(task.id);
   assert.equal(after.status, 'waiting', `空间不够就不该开下，实际 ${after.status}`);
@@ -146,7 +153,7 @@ test('【事故回归】空间不够时：备好但一个字节都不下，且 e
   assert.ok(Number(after.expectBytes) >= 5 * GB * 0.99, '准入时必须已知真实大小（≈5G）');
   assert.equal(mock.state.running, false, '种子必须保持暂停（一个字节都不能下）');
 
-  updateSettings({ reserveFreeBytes: 1024 });
+  updateSettings({ reserveFreeBytes: free - 6 * GB }); // 可用 = 6G > 5G → 必须放行
   await schedulerTick();
   assert.equal(tasksRepo.get(task.id).status, 'downloading', '空间够了应放行');
   assert.equal(mock.state.running, true);
