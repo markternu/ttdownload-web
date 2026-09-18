@@ -334,7 +334,11 @@ export const transmissionModule: ModuleAdapter = {
         //    而旧的部署里 .torrent 早被删了 → **任务永远救不回来**。
         //    现在种子文件全程留档（btQueued），所以这里改为：丢掉过期的 torrentId，
         //    直接用留档的 .torrent **重新加回 transmission**。
-        const why = hideText((e as Error).message);
+        // ⚠️ 只认「transmission 里确实没这个种子」这一种；RPC 报错/网络中断等必须原样抛出，
+        //    否则真实原因（比如磁盘/权限/RPC 故障）会被吞成一句"种子文件不存在"，更难排查
+        const raw = String((e as Error).message ?? '');
+        if (!raw.includes('无法读取种子信息')) throw e;
+        const why = hideText(raw);
         logger.child('transmission').warn(
           `任务 #${task.id} 在 transmission 里找不到该种子（${why}）→ 尝试用留档的 .torrent 重新加入`);
         tasksRepo.update(task.id, { payload: { ...payload, torrentId: 0, reAddedAt: new Date().toISOString() } });
