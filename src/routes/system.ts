@@ -5,6 +5,7 @@ import { Router, type RequestHandler } from 'express';
 import { config, DIRS } from '../core/config';
 import { dbFileSize, computeStats, logsRepo } from '../core/db';
 import { dirUsage, freeBytes, statfsBytes, toolStatus, usableBytes } from '../core/disk';
+import { reservedByRunningTasks } from '../core/space';
 import { bus } from '../core/events';
 import { getSettings, getSettingsPublic, updateSettings } from '../services/settings';
 import {
@@ -68,8 +69,10 @@ systemRouter.get(
     ]);
     // 运行中任务"预计要占"的空间：调度器放行新任务时会把它扣掉，
     // 所以"还能不能再放行"= 系统可用 - 预留 - 这些预留。前端要能说清楚这个差额。
-    const runningTasks = tasksRepo.byStatus(['downloading', 'parsing']) as { expect_bytes?: number }[];
-    const reservedBytes = runningTasks.reduce((sum, t) => sum + Math.max(0, Number(t.expect_bytes ?? 0) || 0), 0);
+    // ⚠️ 历史 bug：这里读的是 `expect_bytes`，而 tasksRepo 返回的是驼峰 `expectBytes` →
+    //    reservedBytes 恒为 0，接口把"可用于下载"直接当成"还能再放行"，用户看到的数
+    //    和调度器判定的数根本不是一回事。现在与调度器共用同一个算法（只算"还差多少"）。
+    const reservedBytes = reservedByRunningTasks();
     const usable = usableBytes(settings.reserveFreeBytes);
     res.json({
       disk: {

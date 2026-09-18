@@ -3,6 +3,7 @@ import { bus } from './events';
 import { logger, taskLog } from './logger';
 import { tasksRepo } from './db';
 import { freeBytes } from './disk';
+import { remainingBytesOf, reservedByRunningTasks } from './space';
 import { getSettings } from '../services/settings';
 import { conflict, notFound } from '../utils/http';
 import { handoffToArchive } from '../services/pipeline';
@@ -227,10 +228,13 @@ async function startWaiting(): Promise<void> {
     const adapter = adapters[task.module];
     if (!adapter) continue;
 
-    // 需要下载空间：available = 当前可用 - 保留 - 其它运行任务的预留
-    const reserved = running.reduce((sum, t) => sum + Math.max(0, t.expectBytes || 0), 0);
+    // 需要下载空间：available = 当前可用 - 保留 - 其它运行任务**还差多少**
+    // ⚠️ 历史 bug（线上真实投诉）：这里按 expectBytes 全额预扣一整场下载 —— 一个下到 91% 的任务
+    //    仍占着整整 2.48G，于是"可用于下载 5.28G"却连 1.6G 的任务都放不进来。
+    //    现在只算"还没下完的部分"，而且每次从数据库现算（不再用本轮开始时的快照）。
+    const reserved = reservedByRunningTasks();
     const usable = freeBytes() - settings.reserveFreeBytes - reserved;
-    const need = Math.max(0, task.expectBytes || 0);
+    const need = remainingBytesOf(task);
     if (usable - need < 0) {
       // 装不下的**跳过**，让后面装得下的先跑 —— 别让一个大家伙把可用空间白白空着。
       // 顺序仍然是先进先出（谁先来谁先拿到空间），只是遇到放不下的会先让位。
@@ -254,17 +258,21 @@ async function startWaiting(): Promise<void> {
         await adapter.prepare(task);
       }
       const fresh = tasksRepo.get(task.id) as TaskWithPayload;
-      const need2 = Math.max(0, fresh.expectBytes || 0);
-      if (usable - need2 < 0) {
+      // 空间必须**在这一刻重算**：prepare 期间别的任务在下、freeBytes 一直在变；
+      // 而且此刻任务自己已是 parsing，预扣里要把自己排掉，否则会自己挡自己。
+      const reserved2 = reservedByRunningTasks(task.id);
+      const usable2 = freeBytes() - settings.reserveFreeBytes - reserved2;
+      const need2 = remainingBytesOf(fresh);
+      if (usable2 - need2 < 0) {
         // ⚠️ 只写一句「磁盘空间不足」会让用户觉得莫名其妙：网页显示还有 7G，为什么 1.6G 都放不下？
         //    因为网页那个数是「系统可用 − 保留」，而调度器还要再减掉**正在下载任务已预扣的空间**。
         //    这里把三笔账直接写进原因里，用户自己能对上。
         const gb = (n: number) => (n / 1024 ** 3).toFixed(2);
         tasksRepo.update(task.id, {
           status: 'waiting',
-          error: `磁盘空间不足，等待中：真正可用 ${gb(Math.max(0, usable))}G < 需要 ${gb(need2)}G`
-            + `（系统可用 ${gb(freeBytes())}G − 保留 ${gb(settings.reserveFreeBytes)}G`
-            + ` − 运行中任务预扣 ${gb(reserved)}G）`,
+          error: `磁盘空间不足，等待中：可立即开始 ${gb(Math.max(0, usable2))}G < 需要 ${gb(need2)}G`
+            + `（操作系统实际可用 ${gb(freeBytes())}G − 预留 ${gb(settings.reserveFreeBytes)}G`
+            + ` − 运行中任务还差 ${gb(reserved2)}G）`,
         });
         emit(task.id);
         continue;

@@ -243,7 +243,11 @@ export default function HomePage() {
                 {system ? formatBytes(system.disk.freeBytes, '未知') : '—'} ＝ 可用于下载{' '}
                 {system ? formatBytes(system.disk.usableBytes, '未知') : '—'} ＋ 预留{' '}
                 {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'}（预留是加密/归档/发布的周转空间，
-                不能省：空间用尽时加密、归档就没法操作了），不够时新任务自动排队等回血。
+                不能省：空间用尽时加密、归档就没法操作了）。运行中任务还差{' '}
+                {system ? formatBytes(system.disk.reservedBytes ?? 0, '0 B') : '—'}（只算没下完的部分），
+                <b>可立即开始新任务</b>{' '}
+                {system ? formatBytes(system.disk.admittableBytes ?? 0, '0 B') : '—'}
+                —— 新任务不超过这个数就会马上开下，超过了才排队等回血。
               </span>
             </li>
           </ul>

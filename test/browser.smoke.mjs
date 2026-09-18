@@ -199,6 +199,7 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     assert.match(home, /加密|归档/, '首页要解释预留空间是干什么用的');
     // 用户口径：显示的是「项目可用于下载的空间」，操作系统实际可用必须写成「该数 + 预留」
     assert.match(home, /操作系统实际可用/, '首页要写"操作系统实际可用"（用户口径原词）');
+    assert.match(home, /可立即开始/, '首页要写出“可立即开始”的额度 —— 调度器判定用的就是这个数');
 
     await page.goto(`${base}/settings`, { waitUntil: 'networkidle' });
     await page.waitForSelector('text=/预留磁盘空间/', { timeout: 15000 });

@@ -153,7 +153,7 @@ test('【事故回归】空间不够时：备好但一个字节都不下，且 e
   // 原因里必须把三笔账摊开，用户自己能对上（真正可用 / 需要 / 系统可用 / 保留 / 运行中预扣）。
   assert.match(
     String(after.error),
-    /真正可用 -?[\d.]+G < 需要 -?[\d.]+G（系统可用 -?[\d.]+G − 保留 -?[\d.]+G − 运行中任务预扣 -?[\d.]+G）/,
+    /可立即开始 -?[\d.]+G < 需要 -?[\d.]+G（操作系统实际可用 -?[\d.]+G − 预留 -?[\d.]+G − 运行中任务还差 -?[\d.]+G）/,
     `等待原因要摊开三笔账，实际：${after.error}`,
   );
   assert.match(String(after.error ?? ''), /磁盘空间不足/);
@@ -200,4 +200,45 @@ test('【脱敏】日志里绝不出现种子名和文件名', async () => {
   assert.equal(log.includes('SECRETAD9377'), false, '日志里不该出现图片文件名');
   // 但该有的诊断信息（大小/数量/规则）要还在
   assert.match(log, /BT_SELECT|BT_PREPARE/, '挑片/准备阶段的日志应该在');
+});
+
+test('【事故回归】下到 91% 的任务不许挡住新任务（线上投诉：可用 5.28G 却在排队）', async () => {
+  const GB = 1024 ** 3;
+  const { schedulerTick } = await import('../dist/core/scheduler.js');
+  const { freeBytes } = await import('../dist/core/disk.js');
+  const { updateSettings } = await import('../dist/services/settings.js');
+
+  mock.state.complete = false;
+  mock.state.percent = 0;
+  mock.state.running = false;
+  mock.state.files = [{ name: 'big.mp4', length: 2 * GB, bytesCompleted: 0 }];
+  mock.state.wanted = [1];
+  // 91% 的进度由 mock 提供：poll 会把已下算成 1.82G/2G → 这个任务**只还差 0.18G**，
+  // 而它的 expectBytes（2G）在旧逻辑里会被**全额**预扣一整场下载。
+  mock.state.percent = 0.91;
+  mock.state.totalSize = 2 * GB; // poll 按 percentDone × totalSize 记"已下"
+  for (const t of tasksRepo.list({ pageSize: 500 }).items) tasksRepo.delete(t.id);
+
+  tasksRepo.create({
+    module: 'transmission', title: '快下完的', platform: 'BT', url: null,
+    status: 'downloading', priority: 0, expectBytes: 2 * GB,
+    payload: { torrentId: 7, torrentName: 'Demo', btHash: 'abc', btHandedAt: new Date().toISOString() },
+  });
+
+  // 新任务：2G。可用量钉死成 2.3G —— 足够（2.3 − 0.22 = 2.08 ≥ 2），旧逻辑下会被那 2.48G 全额预扣挡住
+  const fakeTorrent = tmpFile(root, 'src/newcomer.torrent', 'd8:announce11:http://x/ye');
+  fs.copyFileSync(fakeTorrent, path.join(config.dirs.btPending, 'newcomer.torrent'));
+  bt.registerPendingSeeds();
+  const seed = seedsRepo.all().find((s) => s.name === 'newcomer.torrent');
+  const task = bt.enqueueSeed(seed);
+
+  updateSettings({ reserveFreeBytes: freeBytes() - 2.3 * GB });
+  await schedulerTick();
+
+  const after = tasksRepo.get(task.id);
+  assert.equal(
+    after.status, 'downloading',
+    `只还差 0.22G 的运行中任务不该挡住 2G 的新任务，实际 ${after.status}（${after.error ?? ''}）`,
+  );
+  assert.ok(Number(after.expectBytes) >= 2 * GB * 0.99, '准入时真实大小必须已知（≈2G）');
 });
