@@ -66,7 +66,7 @@ systemRouter.get(
         reserveBytes: settings.reserveFreeBytes,
         usableBytes: usable,
         reservedBytes,
-        admittableBytes: usable - reservedBytes,
+        admittableBytes: usable,
       },
       db: { path: config.dbPath, sizeBytes: dbFileSize(), ok: true },
       dirs: DIRS as unknown as Record<string, string>,

@@ -129,16 +129,22 @@ async function pollRunning(): Promise<number> {
  *   现在从新到旧暂停（后加入的先让位），但绝不动最后一个在跑的任务，
  *   让它把当前这个下完 → 走完流水线 → 被安卓取走 → 服务端删除 → 空间回血。
  */
-async function applySpacePressure(usable: number): Promise<void> {
-  if (usable >= 0) return;
+async function applySpacePressure(): Promise<void> {
+  // 用户规则：**只有「可用于下载 = 系统实际可用 − 预留 ≤ 0」**（df 只剩预留的 10G）才允许暂停。
+  // 绝不因为"运行中任务还差多少"去暂停 —— 那会让 df 明明有空闲却显示"空间不足，已自动暂停"。
+  const usable = freeBytes() - getSettings().reserveFreeBytes;
+  if (usable > 0) return;
   const running = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
-  // 新的先暂停（越晚加入的越先让），但保留最老的那个继续跑以保证一定能回血
-  const ordered = [...running].sort((a, b) => Number(b.id) - Number(a.id));
-  let remaining = running.length;
+  // 已 100%（下完了只等扫货）的不暂停：暂停它只会让 transmission 里永远"暂停"，毫无意义。
+  // 新的先暂停（越晚加入的越先让），但保留最老的一个继续跑，保证有任务能下完、空间能回血。
+  const ordered = [...running]
+    .filter((t) => remainingBytesOf(t) > 0)
+    .sort((a, b) => Number(b.id) - Number(a.id));
+  let left = ordered.length;
   for (const task of ordered) {
-    if (remaining <= 1) {
+    if (left <= 1) {
       logger.child('scheduler').warn(
-        `空间压力：已暂停到只剩任务 #${task.id}（保留一个在跑，否则没人能下完、空间永远回不来）`);
+        `空间压力：可用于下载已 ≤ 0，暂停到只剩任务 #${task.id}（保留一个在跑，否则没人能下完、空间永远回不来）`);
       break;
     }
     const adapter = adapters[task.module];
@@ -147,7 +153,7 @@ async function applySpacePressure(usable: number): Promise<void> {
     } catch {
       /* ignore */
     }
-    remaining -= 1;
+    left -= 1;
     tasksRepo.update(task.id, {
       status: 'paused',
       speedBps: 0,
@@ -155,17 +161,16 @@ async function applySpacePressure(usable: number): Promise<void> {
       payload: { ...(task.payload ?? {}), pausedBySpace: true },
     });
     emit(task.id);
-    logger.warn(`任务 #${task.id} 因磁盘空间不足被自动暂停（保留其它任务继续跑以腾空间）`);
+    logger.warn(`任务 #${task.id} 因可用于下载为 0 被自动暂停`);
   }
 }
 
 /** 空间恢复后，恢复被自动暂停的任务 */
-async function resumeSpacePaused(freeMinusReserve: number): Promise<void> {
+async function resumeSpacePaused(): Promise<void> {
   const paused = tasksRepo.byStatus(['paused']) as TaskWithPayload[];
-  // 与准入用同一口径：可用 = 系统可用 - 预留 - 运行中任务**还差多少**
-  // ⚠️ 历史 bug：这里单独抄了一份"按 expectBytes 全额预扣"，导致"df 明明有空间，任务却一直
-  //    停在'已自动暂停'" —— 6 个运行中任务虚占 6.21G（真实只差 3.38G），把可用的 6.75G 挤成 0.54G。
-  const usable = freeMinusReserve - reservedByRunningTasks();
+  // 用户规则：只有「可用于下载 = 系统实际可用 − 预留 > 0」才恢复；不扣运行中任务。
+  const usable = freeBytes() - getSettings().reserveFreeBytes;
+  if (usable <= 0) return;
   let spendable = usable;
   const nothingRunning = tasksRepo.byStatus(['downloading', 'parsing']).length === 0;
   for (const task of paused) {
@@ -228,12 +233,9 @@ async function startWaiting(): Promise<void> {
     const adapter = adapters[task.module];
     if (!adapter) continue;
 
-    // 需要下载空间：available = 当前可用 - 保留 - 其它运行任务**还差多少**
-    // ⚠️ 历史 bug（线上真实投诉）：这里按 expectBytes 全额预扣一整场下载 —— 一个下到 91% 的任务
-    //    仍占着整整 2.48G，于是"可用于下载 5.28G"却连 1.6G 的任务都放不进来。
-    //    现在只算"还没下完的部分"，而且每次从数据库现算（不再用本轮开始时的快照）。
-    const reserved = reservedByRunningTasks();
-    const usable = freeBytes() - settings.reserveFreeBytes - reserved;
+    // 用户规则：可用于下载 = 系统实际可用 − 预留；只要够放这个任务就下。
+    // 不再预扣"运行中任务还差多少"（那会让 df 明明有空闲却不让下）。
+    const usable = freeBytes() - settings.reserveFreeBytes;
     const need = remainingBytesOf(task);
     if (usable - need < 0) {
       // 装不下的**跳过**，让后面装得下的先跑 —— 别让一个大家伙把可用空间白白空着。
@@ -244,7 +246,6 @@ async function startWaiting(): Promise<void> {
         usableBytes: usable,
         freeBytes: freeBytes(),
         reserveBytes: settings.reserveFreeBytes,
-        reservedRunningBytes: reserved,
         skipped: true,
       });
       skippedBySpace.push({ taskId: task.id, needBytes: need, usableBytes: usable });
@@ -258,21 +259,15 @@ async function startWaiting(): Promise<void> {
         await adapter.prepare(task);
       }
       const fresh = tasksRepo.get(task.id) as TaskWithPayload;
-      // 空间必须**在这一刻重算**：prepare 期间别的任务在下、freeBytes 一直在变；
-      // 而且此刻任务自己已是 parsing，预扣里要把自己排掉，否则会自己挡自己。
-      const reserved2 = reservedByRunningTasks(task.id);
-      const usable2 = freeBytes() - settings.reserveFreeBytes - reserved2;
+      // 空间在这一刻重算（prepare 期间 freeBytes 一直在变）
+      const usable2 = freeBytes() - settings.reserveFreeBytes;
       const need2 = remainingBytesOf(fresh);
       if (usable2 - need2 < 0) {
-        // ⚠️ 只写一句「磁盘空间不足」会让用户觉得莫名其妙：网页显示还有 7G，为什么 1.6G 都放不下？
-        //    因为网页那个数是「系统可用 − 保留」，而调度器还要再减掉**正在下载任务已预扣的空间**。
-        //    这里把三笔账直接写进原因里，用户自己能对上。
         const gb = (n: number) => (n / 1024 ** 3).toFixed(2);
         tasksRepo.update(task.id, {
           status: 'waiting',
-          error: `磁盘空间不足，等待中：可立即开始 ${gb(Math.max(0, usable2))}G < 需要 ${gb(need2)}G`
-            + `（操作系统实际可用 ${gb(freeBytes())}G − 预留 ${gb(settings.reserveFreeBytes)}G`
-            + ` − 运行中任务还差 ${gb(reserved2)}G）`,
+          error: `磁盘空间不足，等待中：可用于下载 ${gb(Math.max(0, usable2))}G < 需要 ${gb(need2)}G`
+            + `（操作系统实际可用 ${gb(freeBytes())}G − 预留 ${gb(settings.reserveFreeBytes)}G）`,
         });
         emit(task.id);
         continue;
@@ -342,11 +337,9 @@ async function tick(): Promise<void> {
     await transmissionModule.produce?.();
     await pollRunning();
     const settings = getSettings();
-    const runningAfter = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
-    const reserved = reservedByRunningTasks();
-    const usable = freeBytes() - settings.reserveFreeBytes - reserved;
-    await applySpacePressure(usable);
-    await resumeSpacePaused(freeBytes() - settings.reserveFreeBytes);
+    const reserved = reservedByRunningTasks(); // 仅用于日志展示，不再参与准入/暂停判定
+    await applySpacePressure();
+    await resumeSpacePaused();
     await startWaiting();
     if (logger.isDebug()) {
       const waiting = tasksRepo.byStatus(['waiting']).length;

@@ -70,11 +70,11 @@ test('接口的"运行中预扣"必须是真的（旧代码字段名写错 → �
   const res = await fetch(`${base}/api/system`);
   assert.equal(res.status, 200);
   const json = await res.json();
-  assert.equal(json.disk.reservedBytes, 820_000_000, '接口必须返回真实预扣（旧代码恒为 0）');
+  assert.equal(json.disk.reservedBytes, 820_000_000, '接口保留真实预扣（仅展示，旧代码恒为 0）');
   assert.equal(
     json.disk.admittableBytes,
-    json.disk.usableBytes - 820_000_000,
-    '「可立即开始」= 可用于下载 − 运行中任务还差',
+    json.disk.usableBytes,
+    '准入只按「可用于下载」，不再扣运行中任务（用户规则：可用于下载 − 需要 < 0 才不下）',
   );
 });
 

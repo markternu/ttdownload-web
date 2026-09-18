@@ -242,9 +242,7 @@ export default function DashboardPage() {
                 {system && (system.disk.reservedBytes ?? 0) > 0 ? (
                   <>
                     <br />
-                    当前运行中的任务还差 {formatBytes(system.disk.reservedBytes ?? 0, '0 B')}（只算没下完的部分），
-                    可立即开始 {formatBytes(system.disk.admittableBytes ?? 0, '0 B')} 的新任务
-                    —— 新任务不超过这个数就会马上开下。
+                    新任务大小 ≤ 「可用于下载」就会马上开下，超过了才排队等回血。
                   </>
                 ) : null}
               </p>

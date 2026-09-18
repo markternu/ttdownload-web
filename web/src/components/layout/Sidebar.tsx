@@ -146,17 +146,6 @@ function SidebarContent({ onClose }: { onClose: () => void }) {
           {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'}
           <br />
           （预留是给加密/归档/发布的周转空间，别随意调小）
-          {system && (system.disk.reservedBytes ?? 0) > 0 ? (
-            <>
-              <br />
-              运行中任务还差 {formatBytes(system.disk.reservedBytes ?? 0, '0 B')}（只算没下完的部分）
-              <br />
-              <span className="font-medium text-slate-500 dark:text-slate-300">
-                可立即开始新任务 {formatBytes(system.disk.admittableBytes ?? 0, '0 B')}
-              </span>
-              （新任务不超过这个数就会马上开下）
-            </>
-          ) : null}
         </p>
         <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
           <div

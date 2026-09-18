@@ -91,10 +91,7 @@ export function Topbar({ title, onOpenSidebar }: TopbarProps) {
                       + ` ＋ 预留 ${formatBytes(system.disk.reserveBytes, '0 B')}`,
                     `预留用途：加密 / 归档 / 发布时的文件操作周转空间（加密完成后才删源文件，所以这块一直留着）。`,
                     `⚠️ 不要随意调小这条预留：空间用尽时加密/归档会直接失败。`,
-                    `运行中任务还差 ${formatBytes(system.disk.reservedBytes ?? 0, '0 B')}` +
-                      `（只算"还没下完的部分"，不是整个文件的预计大小；下完/失败立刻归还）`,
-                    `所以此刻能立刻开始的新任务额度：${formatBytes(system.disk.admittableBytes ?? system.disk.usableBytes, '未知')}`
-                      + ` —— 新任务大小 ≤ 这个数就会马上开下`,
+                    `新任务大小 ≤ 这个「可用于下载」就会马上开下`,
                     `路径：${system.disk.path}`,
                   ].join('\n')
                 : '暂无系统状态'
