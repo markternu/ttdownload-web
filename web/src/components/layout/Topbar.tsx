@@ -85,16 +85,17 @@ export function Topbar({ title, onOpenSidebar }: TopbarProps) {
             title={
               system
                 ? [
-                    `可用于下载：${formatBytes(system.disk.usableBytes, '未知')}`,
-                    `系统实际可用：${formatBytes(system.disk.freeBytes, '未知')}`,
-                    `其中预留 ${formatBytes(system.disk.reserveBytes, '0 B')} 给「归档/加密/发布」等文件操作周转，不参与新下载`,
+                    `真正能放行新任务：${formatBytes(system.disk.admittableBytes ?? system.disk.usableBytes, '未知')}`,
+                    `＝ 系统实际可用 ${formatBytes(system.disk.freeBytes, '未知')}`,
+                    `− 预留 ${formatBytes(system.disk.reserveBytes, '0 B')}（给「归档/加密/发布」周转，不参与新下载）`,
+                    `− 正在下载的任务已按预计大小预扣 ${formatBytes(system.disk.reservedBytes ?? 0, '0 B')}（下完/失败会归还）`,
                     `路径：${system.disk.path}`,
                   ].join('\n')
                 : '暂无系统状态'
             }
           >
             {lowSpace ? <AlertTriangle className="h-3.5 w-3.5" /> : null}
-            可下载 {system ? formatBytes(system.disk.usableBytes, '未知') : '—'}
+            可放行 {system ? formatBytes(system.disk.admittableBytes ?? system.disk.usableBytes, '未知') : '—'}
           </div>
 
           {/* SSE 状态 */}

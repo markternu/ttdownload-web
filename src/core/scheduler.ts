@@ -256,7 +256,16 @@ async function startWaiting(): Promise<void> {
       const fresh = tasksRepo.get(task.id) as TaskWithPayload;
       const need2 = Math.max(0, fresh.expectBytes || 0);
       if (usable - need2 < 0) {
-        tasksRepo.update(task.id, { status: 'waiting', error: '磁盘空间不足，等待中' });
+        // ⚠️ 只写一句「磁盘空间不足」会让用户觉得莫名其妙：网页显示还有 7G，为什么 1.6G 都放不下？
+        //    因为网页那个数是「系统可用 − 保留」，而调度器还要再减掉**正在下载任务已预扣的空间**。
+        //    这里把三笔账直接写进原因里，用户自己能对上。
+        const gb = (n: number) => (n / 1024 ** 3).toFixed(2);
+        tasksRepo.update(task.id, {
+          status: 'waiting',
+          error: `磁盘空间不足，等待中：真正可用 ${gb(Math.max(0, usable))}G < 需要 ${gb(need2)}G`
+            + `（系统可用 ${gb(freeBytes())}G − 保留 ${gb(settings.reserveFreeBytes)}G`
+            + ` − 运行中任务预扣 ${gb(reserved)}G）`,
+        });
         emit(task.id);
         continue;
       }

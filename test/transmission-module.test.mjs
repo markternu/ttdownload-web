@@ -149,6 +149,13 @@ test('【事故回归】空间不够时：备好但一个字节都不下，且 e
   await schedulerTick();
   const after = tasksRepo.get(task.id);
   assert.equal(after.status, 'waiting', `空间不够就不该开下，实际 ${after.status}`);
+  // 用户看到过「网页显示还有 7G，为什么 1.6G 都放不下」——因为网页那个数没算运行中任务的预扣。
+  // 原因里必须把三笔账摊开，用户自己能对上（真正可用 / 需要 / 系统可用 / 保留 / 运行中预扣）。
+  assert.match(
+    String(after.error),
+    /真正可用 \d+\.\d+G < 需要 \d+\.\d+G（系统可用 \d+\.\d+G − 保留 \d+\.\d+G − 运行中任务预扣 \d+\.\d+G）/,
+    `等待原因要摊开三笔账，实际：${after.error}`,
+  );
   assert.match(String(after.error ?? ''), /磁盘空间不足/);
   assert.ok(Number(after.expectBytes) >= 5 * GB * 0.99, '准入时必须已知真实大小（≈5G）');
   assert.equal(mock.state.running, false, '种子必须保持暂停（一个字节都不能下）');
