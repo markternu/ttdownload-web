@@ -54,7 +54,7 @@ export const MARKERS: Record<string, string> = {
   BT_SEED_DELETED: 'transmission 已接管，本地 .torrent 文件已删除',
   BT_EARLY: 'BT 大文件提前交付（一个文件先进入归档/加密/发布）',
   BT_HARVEST: 'BT 扫货：扫到哪些货、建了什么发布任务、清理了什么目录',
-  BT_TIMEOUT_GRACE: 'BT 超时宽限中（8 小时到点但进度 > 阈值，再给 4 小时）',
+  BT_TIMEOUT_GRACE: 'BT 超时宽限中（12 小时到点但进度 > 阈值，再给 6 小时）',
   BT_TIMEOUT_DROP: 'BT 超时已清理（删 transmission 任务 + 连数据一起清）',
   BT_CLEANUP: 'BT 目录清理（删了哪些目录/文件、释放多少）',
   BT_CLEANUP_SHARED: 'BT 目录被其它任务共用，本次不删（防误删别人的源文件）',

@@ -104,7 +104,7 @@ export interface Settings {
     /** 情况3：小文件至少几个 */
     manySmallCount: number
   }
-  /** BT 种子超时策略：交给 transmission 后 8 小时内不干涉 */
+  /** BT 种子超时策略：交给 transmission 后 12 小时内不干涉 */
   btPolicy: {
     checkAfterHours: number
     minProgressPercent: number

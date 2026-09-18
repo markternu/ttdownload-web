@@ -348,6 +348,7 @@ git push origin --delete pi-verify             # ④ 删临时分支
 
 | 13 | **前端两段式路由会白屏**：index.html 用相对资源路径（Vite `base: './'`，为兼容子路径部署），像 `/tasks/waiting` 这种两段式 URL 会把 `./assets/*.js` 解析成 `/tasks/assets/*.js` → SPA 回退返回 index.html → "Expected a JavaScript module but got text/html" → **直接刷新/收藏该页就是白屏**（只有两段以上路径会中招） | 路由一律**单段**（`/tasks-waiting`、`/tasks-publish`、`/tasks-other`、`/network`），并同步登记进 `web/src/lib/basePath.ts` 的 `APP_ROUTES` | `test/basepath.test.mjs` 的守卫用例（断言所有前端路由单段 + 必须登记）+ 浏览器用例硬打开新页 |
 | 14 | 任务页把「种子下载任务」和「扫货归档发布子任务」混在一起数/排（14 个种子显示成 23 个任务、总量虚高、侧边栏与页面数字不一致） | 统计口径全部拆分（`db.ts` 的 `summary`/`computeStats` + `/api/tasks?kind=`），界面按口径分开展示；任务区拆成一级页 + 三个独立列表页 | `test/task-count.test.mjs` + 浏览器用例 |
+| 15 | 任务一旦报「无法读取种子信息」就永久失败。这句话的真实含义是 **transmission 里查不到这个 torrent id**（被 8h 超时/扫货策略清掉、手动删除、或 transmission 重装过），不是"本地 .torrent 被删"；但旧逻辑下任务里留着过期的 `torrentId`，只会一遍遍撞同一堵墙 | `prepare()`（`src/modules/transmission.ts`）**只对这种「transmission 无此种子」**做自愈：丢掉过期 `torrentId`、记 `reAddedAt`，用 `btQueued` 里留档的 `.torrent` 重新 `torrent-add`（路径回落 seeds 表）；**其它 RPC 错误原样抛出**，绝不把真实故障伪装成"种子文件不存在" | `test/bt-readd.test.mjs`（`bt-log-redaction` 阶段 5 锁住"错误原文不被替换"） |
 
 ### 8.2 还没做 / 需要你决定
 

@@ -91,14 +91,14 @@ export const config = {
     /** 情况3：小文件至少几个（默认 3） */
     manySmallCount: num(process.env.BT_MANY_SMALL_COUNT, 3),
   },
-  // BT 种子超时策略：扔给 transmission 后只读进度，8 小时内不干涉
+  // BT 种子超时策略：扔给 transmission 后只读进度，12 小时内不干涉
   btPolicy: {
     /** 交给 transmission 多少小时后第一次判断 */
-    checkAfterHours: num(process.env.BT_CHECK_AFTER_HOURS, 8),
+    checkAfterHours: num(process.env.BT_CHECK_AFTER_HOURS, 12),
     /** 到点时进度 ≤ 该百分比 -> 直接清理（连残留一起删） */
     minProgressPercent: num(process.env.BT_MIN_PROGRESS_PERCENT, 60),
     /** 进度 > 该值时再给这么多小时宽限，到点还没完也清理 */
-    graceHours: num(process.env.BT_GRACE_HOURS, 4),
+    graceHours: num(process.env.BT_GRACE_HOURS, 6),
   },
   /** 修复脚本上传/执行：默认关闭（危险功能，需在网页显式开启） */
   scriptUploadEnabled: str(process.env.SCRIPT_UPLOAD_ENABLED, '0') === '1',

@@ -2,11 +2,11 @@
  * BT 种子超时策略（用户指定，取代以前那套"停滞/极慢/挽救"的复杂判断）
  *
  * 规则很简单：
- *   · 种子交给 transmission 之后，**8 小时内不做任何干涉**（只读进度）
+ *   · 种子交给 transmission 之后，**12 小时内不做任何干涉**（只读进度）
  *     —— 有的资源这会儿没速度，过一小时才上线；乱干涉只会把能下完的搞坏。
- *   · 满 8 小时时看进度：
+ *   · 满 12 小时时看进度：
  *       进度 ≤ 60%  → 直接清理：删 transmission 任务 + 连下载残留一起删
- *       进度 >  60% → 再给 4 小时宽限（也就是最晚 12 小时）
+ *       进度 >  60% → 再给 6 小时宽限（也就是最晚 18 小时）
  *   · 宽限到点还没下完 → 同样清理。
  *   · 已经 100% 的不在这里处理 —— 那是"扫货"(btHarvest) 的事。
  *
@@ -18,6 +18,7 @@ import { logger, taskLog } from '../core/logger';
 import { tasksRepo } from '../core/db';
 import { bus } from '../core/events';
 import { getSettings } from './settings';
+import { config } from '../core/config';
 import { cleanupBtTaskDirs } from './btCleanup';
 import { hideText } from './btAnon';
 import { transmissionClient } from '../modules/transmission';
@@ -117,9 +118,9 @@ export async function runBtEvict({ dryRun = false } = {}): Promise<EvictSummary>
     const n = Number(v);
     return Number.isFinite(n) ? n : d;
   };
-  const checkAfterMs = Math.max(1, numOr(policy.checkAfterHours, 8)) * 3600 * 1000;
-  const graceMs = Math.max(1, numOr(policy.graceHours, 4)) * 3600 * 1000;
-  const minPercent = Math.max(0, Math.min(100, numOr(policy.minProgressPercent, 60)));
+  const checkAfterMs = Math.max(1, numOr(policy.checkAfterHours, config.btPolicy.checkAfterHours)) * 3600 * 1000;
+  const graceMs = Math.max(1, numOr(policy.graceHours, config.btPolicy.graceHours)) * 3600 * 1000;
+  const minPercent = Math.max(0, Math.min(100, numOr(policy.minProgressPercent, config.btPolicy.minProgressPercent)));
 
   const summary: EvictSummary = {
     checked: 0, evicted: 0, salvaged: 0, kept: 0, freedBytes: 0, candidates: [],
@@ -148,7 +149,7 @@ export async function runBtEvict({ dryRun = false } = {}): Promise<EvictSummary>
       summary.kept += 1;
       continue;
     }
-    // 还没到 8 小时：什么都不做，只记进度
+    // 还没到 12 小时：什么都不做，只记进度
     if (Date.now() - handedAt < checkAfterMs) {
       tasksRepo.update(task.id, { payload: { ...payload, btLastProgress: progress, btLastCheckAt: new Date().toISOString() } });
       summary.kept += 1;

@@ -12,7 +12,10 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { setupRuntime } from './helpers.mjs';
 
-const root = setupRuntime();
+// ARIA2_RPC_PORT 固定成 1：真机（树莓派）的 6800 端口上**真的有** aria2 守护进程在跑，
+// 不指开的话「自检说可用」就变成"这台机器恰好装了 aria2"的结论，而不是被测代码的结论。
+// 1 端口不会有人监听（连接直接 ECONNREFUSED），与真实环境无关。
+const root = setupRuntime({ env: { ARIA2_RPC_PORT: '1' } });
 
 /* 本地 HTTP 服务：模拟 googlevideo CDN（支持 Range），以及一个通用的 200 页面 */
 const cdnHits = [];
@@ -557,17 +560,47 @@ test('HTTPS 探测：4xx 是「链路可达但被目标站拒绝」，不得误�
 });
 
 test('网络自检的 aria2 项能区分「未安装」与「已安装但没起来」', async () => {
-  netCheck.resetNetworkCache();
-  const report = await netCheck.networkReport(true);
-  const aria2 = report.checks.find((c) => c.id === 'aria2-rpc');
-  assert.ok(aria2, '应有 aria2 检查项');
-  // 测试机没有 aria2c：应明确说「未安装」，并给 apt 建议
-  assert.match(aria2.detail, /aria2c (未安装|已安装)/, `aria2 项应说明安装状态，实际：${aria2.detail}`);
-  if (!aria2.detail.includes('未安装')) {
-    assert.match(aria2.detail, /RPC .* 连不上|可用/);
-  }
-  if (aria2.status === 'fail') {
-    assert.ok(aria2.hint && aria2.hint.length > 0);
+  const { updateSettings } = await import('../dist/services/settings.js');
+  // 设置页优先于 .env：把 RPC 明确指到没人监听的 1 端口（见文件顶部 setupRuntime 的注释）。
+  updateSettings({ aria2Rpc: { host: '127.0.0.1', port: 1, secret: '' } });
+
+  // 假 aria2c：`--version` 时"像个装好的 aria2c"，被当守护进程拉起时立刻退出
+  // （模拟"装了但起不来"，不会真的占用/影响真机上的 aria2）。
+  const fakeAria2 = path.join(root, 'bin', 'aria2c');
+  fs.mkdirSync(path.dirname(fakeAria2), { recursive: true });
+  fs.writeFileSync(
+    fakeAria2,
+    `#!/bin/bash
+if [ "$1" = "--version" ]; then echo "aria2 version 1.37.0-fake"; exit 0; fi
+exit 1
+`,
+    { mode: 0o755 },
+  );
+
+  const originalBin = config.bins.aria2;
+  try {
+    // ① 未安装：二进制指向不存在的路径 → 必须说「未安装」并给 apt 建议
+    config.bins.aria2 = path.join(root, 'bin', 'no-such-aria2c');
+    netCheck.resetNetworkCache();
+    const notInstalled = (await netCheck.networkReport(true)).checks.find((c) => c.id === 'aria2-rpc');
+    assert.ok(notInstalled, '应有 aria2 检查项');
+    assert.equal(notInstalled.status, 'fail', `未安装时应判 fail，实际：${notInstalled.detail}`);
+    assert.match(notInstalled.detail, /aria2c 未安装/, `应说明「未安装」，实际：${notInstalled.detail}`);
+    assert.match(String(notInstalled.hint ?? ''), /apt install -y aria2/, '未安装应给安装建议');
+
+    // ② 已安装但没起来：--version 正常、RPC 端口没人监听、自动拉起也失败
+    //    → 必须说「已安装…连不上」，绝不能说「可用」或「未安装」
+    config.bins.aria2 = fakeAria2;
+    netCheck.resetNetworkCache();
+    const notRunning = (await netCheck.networkReport(true)).checks.find((c) => c.id === 'aria2-rpc');
+    assert.ok(notRunning, '应有 aria2 检查项');
+    assert.equal(notRunning.status, 'fail', `RPC 连不上时应判 fail，实际：${notRunning.detail}`);
+    assert.match(notRunning.detail, /aria2c 已安装/, `应说明「已安装」，实际：${notRunning.detail}`);
+    assert.match(notRunning.detail, /RPC 127\.0\.0\.1:1 连不上/, `应指出 RPC 连不上，实际：${notRunning.detail}`);
+    assert.equal(notRunning.detail.includes('可用'), false, '端口没人监听时不许报「可用」');
+    assert.match(String(notRunning.hint ?? ''), /MARK:ARIA2_DAEMON/, '应给"守护进程起不来"的排查指引');
+  } finally {
+    config.bins.aria2 = originalBin;
   }
 });
 
