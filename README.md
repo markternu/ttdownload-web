@@ -193,7 +193,7 @@ docker compose up -d
 | `HOST` / `PORT` | 0.0.0.0 / 8080 | 监听地址与端口 |
 | `DOWNLOAD_ROOT` | /ttdownload | 下载根目录（所有模块/归档/发布目录都在其下，改后需重启） |
 | `ENCRYPT_PASSWORD` | 老脚本默认值 | AES 密码（必须与 PC 端解密工具一致） |
-| `RESERVE_FREE_BYTES` | 10737418240 (10GiB) | 磁盘保留空间：低于它就暂停下载 |
+| `RESERVE_FREE_BYTES` | 10737418240 (10GiB) | 加密/归档/发布的**周转空间**：操作系统实际可用低于它就暂停新下载。⚠️ 不要随意调小（空间被下载吃满时加密会失败）。口径：「可用于下载」= 操作系统实际可用 − 此项 |
 | `MAX_CONCURRENT` | 0 | 全局并发上限，**0=不限**（准入只由磁盘空间决定） |
 | `CONCURRENCY_TRANSMISSION` / `_ARIA2` / `_WEBVIDEO` | 0 / 0 / 0 | 各模块并发上限，**0=不限**（准入只由磁盘空间决定） |
 
@@ -338,7 +338,7 @@ aria2/transmission/webvideo 三模块（含 JSON-RPC 与进程交互）、统一
 | 会员专享 / 需登录 / 年龄限制视频下载失败 | 程序已自动尝试多种客户端、长重试、降级等方式；仍失败时请到网页「设置 → 公开视频（yt-dlp）」**上传 cookies.txt**（用有权限的账号登录后导出，扩展名 `Get cookies.txt LOCALLY`），保存后点任务「重试」。详见 [`使用教程.md` §2.3](./使用教程.md) |
 | 解析时报“会员专享”但还想下 | 页面会显示「解析受限（仍可下载）」+「仍然下载（自动多方式尝试）」按钮，直接加入队列即可；配上 cookies 成功率更高 |
 | 公开视频解析报 yt-dlp 不存在 | `pip3 install -U yt-dlp` 或 `apt install -y yt-dlp`（设置页可测试连通性） |
-| aria2 任务一直等待 | 磁盘可用空间低于保留值（默认 10GiB）→ 清理消费者目录或调小 `RESERVE_FREE_BYTES` |
+| aria2 任务一直等待 | 磁盘可用空间低于保留值（默认 10GiB）→ 清理消费者目录腾空间（**不要**调小 `RESERVE_FREE_BYTES`，那是加密/归档的周转空间） |
 | 想看看哪些 BT 任务会被出清 | `curl http://localhost:8080/api/bt/stale`（预览，不改数据）；Web「BT 种子」页也有「出清预览」 |
 | 想给 yt-dlp 加代理/自定义参数 | 网页「设置 → 公开视频（yt-dlp）」的「额外参数」填 `--proxy socks5://127.0.0.1:1080`；也可用 `.env` 的 `YTDLP_EXTRA_ARGS` |
 | 想立刻执行一次出清 | `curl -X POST http://localhost:8080/api/bt/evict`；Web「BT 种子」页「立即出清」 |

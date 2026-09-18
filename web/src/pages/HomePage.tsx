@@ -239,9 +239,11 @@ export default function HomePage() {
               <Download className="mt-0.5 h-4 w-4 shrink-0 text-brand-500" />
               <span>
                 可用于下载 {system ? formatBytes(system.disk.usableBytes, '未知') : '—'}
-                （系统实际可用 {system ? formatBytes(system.disk.freeBytes, '未知') : '—'}，已扣掉
-                {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'} 的加密/归档周转预留），
-                不够时新任务自动排队等回血。
+                —— 这是项目能拿去下资源的空间；<b>操作系统实际可用</b>{' '}
+                {system ? formatBytes(system.disk.freeBytes, '未知') : '—'} ＝ 可用于下载{' '}
+                {system ? formatBytes(system.disk.usableBytes, '未知') : '—'} ＋ 预留{' '}
+                {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'}（预留是加密/归档/发布的周转空间，
+                不能省：空间用尽时加密、归档就没法操作了），不够时新任务自动排队等回血。
               </span>
             </li>
           </ul>

@@ -141,9 +141,13 @@ function SidebarContent({ onClose }: { onClose: () => void }) {
           {system ? formatBytes(system.disk.usableBytes, '未知') : '—'}
         </p>
         <p className="text-[11px] leading-4 text-slate-400">
-          系统实际可用 {system ? formatBytes(system.disk.freeBytes, '未知') : '—'}
+          这里的「可用于下载」是项目能拿去下资源的空间
           <br />
-          （已扣掉 {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'} 的加密/归档周转预留）
+          操作系统实际可用 {system ? formatBytes(system.disk.freeBytes, '未知') : '—'} ＝ 可用于下载{' '}
+          {system ? formatBytes(system.disk.usableBytes, '未知') : '—'} ＋ 预留{' '}
+          {system ? formatBytes(system.disk.reserveBytes, '0 B') : '—'}
+          <br />
+          （预留是给加密/归档/发布的周转空间，别随意调小）
           {system && (system.disk.reservedBytes ?? 0) > 0 ? (
             <>
               <br />

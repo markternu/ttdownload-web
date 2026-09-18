@@ -420,7 +420,7 @@ export default function SettingsPage() {
                 placeholder="/ttdownload"
               />
             </Field>
-            <Field label="预留磁盘空间（GB）" hint="留给「归档/加密/发布」等文件操作周转的空间（加密是边读边删，留够一次操作的量就够）。剩余空间低于它就不再放行新下载 —— 即「可用于下载」= 系统实际可用 − 这个预留">
+            <Field label="预留磁盘空间（GB）" hint="这是「加密 / 归档 / 发布」时的文件操作周转空间：加密完成后才会删掉源文件，所以这块必须一直留着 —— 空间被下载吃满时，加密/归档会直接失败。⚠️ 不要随意调小。口径：「可用于下载」= 操作系统实际可用 − 这个预留">
               <Input
                 type="number"
                 min={0}
