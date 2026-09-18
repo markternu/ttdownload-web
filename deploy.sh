@@ -385,8 +385,24 @@ configure_transmission_env() {
   else
     echo "TRANSMISSION_RPC_USER=${user}" >> .env
   fi
+  # 已经有值也让用户有机会**纠正**（真机血案：第一次部署密码敲错，之后再跑部署只会
+  # 提示"已在 .env 中配置"然后跳过，于是错的密码一直留着、用户以为"改不了"）。
+  # 交互式下回车 = 保持原值；非交互（如 --update/定时脚本）永远不问，避免卡住。
   if [[ -n "$password" ]]; then
-    log "transmission RPC 凭据已在 .env 中配置（用户 ${user}）"
+    if ! prompt_ok; then
+      log "transmission RPC 凭据已在 .env 中配置（用户 ${user}）；如需修改请在网页「设置 → 网络设置 → transmission RPC」里改（改完立即生效）"
+      return 0
+    fi
+    local fix=""
+    echo
+    read_prompt fix "transmission RPC 密码（用户 ${user}，回车=保持 .env 里现有的不改，输入新值=覆盖）: "
+    if [[ -n "$fix" ]]; then
+      sed -i "s#^TRANSMISSION_RPC_PASSWORD=.*#TRANSMISSION_RPC_PASSWORD=${fix}#" .env
+      chmod 600 .env
+      log "transmission RPC 密码已更新（用户 ${user}）"
+    else
+      log "保持 .env 里现有的 transmission RPC 密码不变"
+    fi
     return 0
   fi
   if prompt_ok; then
