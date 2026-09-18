@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-const APP_ROUTES = ['tasks','history','dashboard','aria2','bt','files','settings','logs','report','scripts'];
+const APP_ROUTES = ['tasks','history','dashboard','aria2','bt','files','settings','logs','report'];
 const ROUTE_SET = new Set(APP_ROUTES);
 
 function detectBasename(pathname) {
@@ -45,7 +45,7 @@ test('根路径下的未知地址仍然是 404（不会被误当成前缀）', (
 
 test('basename 与前端路由清单保持一致（新增路由必须同步）', () => {
   // 与 web/src/lib/basePath.ts 的 APP_ROUTES 对齐；这里断言的是"路由清单非空且单段"
-  assert.ok(APP_ROUTES.length >= 10);
+  assert.ok(APP_ROUTES.length >= 9);
   for (const r of APP_ROUTES) assert.equal(r.includes('/'), false, `路由 ${r} 应为单段`);
 });
 

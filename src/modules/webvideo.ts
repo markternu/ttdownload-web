@@ -285,7 +285,7 @@ export function humanizeYtDlpError(raw: string, url = ''): string {
   // 登录 / 人机校验 / 需要 cookies
   // yt-dlp 已知问题：YouTube 返回 "The page needs to be reloaded."（多为版本/瞬时问题，见 issue #14610）
   if (has('the page needs to be reloaded', 'page needs to be reloaded')) {
-    return 'YouTube 返回「The page needs to be reloaded.」：这是 yt-dlp 的已知问题（多与版本/瞬时风控有关，不是你的网络）。程序会自动换客户端/重试；若持续出现，请把 yt-dlp 升级到最新版（可用网页「修复脚本」页跑 deploy/scripts/fix-ytdlp.sh），或改用「跳过网页抓取」方式';
+    return 'YouTube 返回「The page needs to be reloaded.」：这是 yt-dlp 的已知问题（多与版本/瞬时风控有关，不是你的网络）。程序会自动换客户端/重试；若持续出现，请在服务器上执行 deploy/scripts/fix-ytdlp.sh 把 yt-dlp 升级到最新版，或改用「跳过网页抓取」方式';
   }
   if (has('not a bot', 'sign in to confirm')) {
     return site?.id === 'youtube'

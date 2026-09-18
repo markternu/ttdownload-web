@@ -403,38 +403,13 @@ interface NetworkReport {
 `ytdlp-version`、`ytdlp-youtube-meta`（真去解析公开测试视频）、`youtube-cdn`（拿到直链后读 1 字节）、
 `aria2-rpc`、`transmission-rpc`。失败项都带中文 `hint` 修复建议。
 
-## 6.8 修复脚本上传/执行（环境问题远程修复通道）
+## 6.8 修复脚本上传/执行（已移除）
 
-> ⚠️ 这是「上传即以服务身份执行」，默认关闭；写操作需要维护令牌
-> （`MAINTENANCE_TOKEN`，未设置时回退 `ANDROID_TOKEN`；两者都为空则不校验，页面会警告）。
-> 令牌通过请求头 `X-Maint-Token` 或 `?token=` 传递。功能未开启时返回 400 `SCRIPT_DISABLED`。
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/api/system/scripts` | 概览：`{ enabled, tokenRequired, timeoutSec, allowlistHint, items: ScriptItem[] }` |
-| POST | `/api/system/scripts/toggle` | `{ enabled: boolean }` → 概览（开启需令牌） |
-| POST | `/api/system/scripts` | 上传：`multipart/form-data` 字段 `file`，或 JSON `{ name, content }` → `{ item, overview }` |
-| GET | `/api/system/scripts/:id?lines=300` | `{ item, preview, log, logLines, enabled, tokenRequired, timeoutSec }`；运行中会顺带刷新状态 |
-| POST | `/api/system/scripts/:id/run` | 执行（分离运行，脚本重启本服务也不中断）→ `{ item, via: 'systemd-run'\|'setsid' }` |
-| GET | `/api/system/scripts/:id/file` | 下载脚本原文 |
-| GET | `/api/system/scripts/:id/log` | 下载执行日志（含 `bash -x` 轨迹与 `__EXIT_CODE=N`） |
-| DELETE | `/api/system/scripts/:id` | 删除（运行中拒绝） |
-
-错误码：`SCRIPT_DISABLED`（功能未开启）、`SCRIPT_TOKEN`（维护令牌缺失/错误）、`SCRIPT_SAVE`（上传内容不合规）、
-`SCRIPT_RUN`（启动失败或上一次仍在运行）、`SCRIPT_NOT_FOUND`、`SCRIPT_LOG_NOT_FOUND`（还没运行过、无日志）、`SCRIPT_DELETE`（删除失败）。
-
-```ts
-interface ScriptItem {
-  id: string; name: string; sizeBytes: number; sha256: string; uploadedAt: string; runCount: number;
-  running: boolean; statusUrl: string; logsUrl: string; fileUrl: string;
-  lastRun?: { startedAt: string; finishedAt: string | null; exitCode: number | null;
-              timedOut: boolean; logPath: string; pid: number | null; via: 'systemd-run' | 'setsid' };
-}
-```
-
-实现约束：只接受文本 shell 脚本（`.sh/.bash` 或带 `#!/bin/bash`），≤1MB，落盘 `state/scripts/`（0700/0600）；
-执行用 `systemd-run` 瞬时单元（无 systemd 时退回 `setsid` 分离进程）；超时默认 600 秒（`SCRIPT_RUN_TIMEOUT_SEC`），
-超时退出码 124；保留最近 20 份；全过程打 `[MARK:SCRIPT_UPLOAD]` / `[MARK:SCRIPT_RUN]` 日志。
+> 本接口曾提供「Web 上传 shell 脚本并以服务身份（root）执行」的环境修复通道
+> （`GET/POST /api/system/scripts*`、`[MARK:SCRIPT_UPLOAD]`/`[MARK:SCRIPT_RUN]` 日志、
+> `SCRIPT_UPLOAD_ENABLED` / `SCRIPT_RUN_TIMEOUT_SEC` 配置）。因「任何能打开页面的人都能上传并以
+> root 执行任意脚本」风险过高，**已于 2026-09-18 整体移除**：这些路径现在一律返回 404，相关配置项与
+> 日志标记也不复存在。系统环境问题请在服务器上直接执行仓库自带脚本（`sudo bash deploy/scripts/*.sh`）。
 
 ## 7. 设置
 

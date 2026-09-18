@@ -6,7 +6,7 @@
  *       /ttdownload/、/ttdownload/tasks…，而 <BrowserRouter> 必须知道
  *       basename="/ttdownload"，否则会把 /ttdownload/tasks 当成未知路由 → 404 页面。
  *
- * 推导规则（本项目前端路由都是单段：/login /tasks /bt /aria2 /files /pending /settings /logs /report /scripts /history）：
+ * 推导规则（本项目前端路由都是单段：/login /tasks /bt /aria2 /files /pending /settings /logs /report /history）：
  *   - 第一个路径段就是已知路由（/tasks）→ 没有前缀（根路径部署）
  *   - 已知路由之前还有段（/ttdownload/tasks、/apps/x/logs）→ 前缀就是它前面的部分
  *   - 路径以 / 结尾且首段不是已知路由（/ttdownload/）→ 入口地址，前缀就是整段
@@ -38,7 +38,6 @@ export const APP_ROUTES = [
   'settings',
   'logs',
   'report',
-  'scripts',
 ] as const
 
 const ROUTE_SET = new Set<string>(APP_ROUTES)

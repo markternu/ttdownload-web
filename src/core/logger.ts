@@ -73,8 +73,6 @@ export const MARKERS: Record<string, string> = {
   YTDLP_DONE: 'yt-dlp 下载完成与产物文件',
   NET_CHECK: '网络自检（DNS/HTTPS/YouTube/yt-dlp/CDN）',
   DIAG: '诊断包导出',
-  SCRIPT_UPLOAD: '修复脚本上传/开启关闭/删除',
-  SCRIPT_RUN: '修复脚本执行（启动/结束/退出码/超时）',
   TOOL_STATUS: '外部工具可用性探测（--version）',
   ERROR: '未捕获异常/兜底错误（含堆栈）',
 };

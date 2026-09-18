@@ -595,7 +595,7 @@ async function runChecks(): Promise<NetworkReport> {
             : '未检测到任何 JS 运行时（yt-dlp 需要 deno/bun/quickjs 或 node >= 22）',
         hint: usable
           ? undefined
-          : '安装 deno（约 40MB，独立二进制，不影响项目 Node）：网页「修复脚本」页上传执行 deploy/scripts/fix-ytdlp.sh；装完 yt-dlp 才能拿到视频格式',
+          : '安装 deno（约 40MB，独立二进制，不影响项目 Node）：在服务器上执行 deploy/scripts/fix-ytdlp.sh；装完 yt-dlp 才能拿到视频格式',
         group: 'ytdlp',
       },
     ];

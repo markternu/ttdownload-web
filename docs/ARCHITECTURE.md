@@ -307,21 +307,13 @@ network/markers/logs（每个日志文件尾部 2MB）。环境变量与设置�
   （transmission WebUI 内部用绝对路径）。
 - **可移植**：脚本不用 `sed -i`（GNU/BSD 参数不兼容会让它静默不改文件），改配置一律 awk + 原子替换。
 
-### 6.2.5 修复脚本通道（`src/services/scriptRunner.ts`）
+### 6.2.5 环境修复脚本（不再由网页上传执行）
 
-代码问题走 Git + `deploy.sh --update`；**环境问题**（缺包/权限/systemd/Node 版本）由开发者生成脚本、
-用户在本页上传执行。因为这是「上传即 root 执行」，实现上做了多层约束：
-
-| 约束 | 实现 |
-| --- | --- |
-| 默认关闭 | 设置项 `scriptUploadEnabled`（env `SCRIPT_UPLOAD_ENABLED`，默认 0） |
-| 令牌 | `tokenOk()` 常数时间比较；`MAINTENANCE_TOKEN` → 回退 `ANDROID_TOKEN`；无令牌时返回明确错误码 |
-| 执行前预览 | 上传只落盘；`GET /:id` 返回 `preview` 供页面展示，执行是独立动作 |
-| 输入校验 | 文本、≤1MB、拒绝二进制、仅 `.sh/.bash`（或 shebang） |
-| 独立执行 | `systemd-run --unit ttdl-fix-<id> --collect` 起瞬时单元（脱离本服务 cgroup，服务重启不中断）；无 systemd 时 `setsid` 分离 |
-| 超时 | 包装脚本内 `timeout <sec> bash -x <script>`（无 timeout 命令时降级并注明），超时码 124 |
-| 留痕 | 脚本/包装器/日志落 `state/scripts/`（0700/0600），`[MARK:SCRIPT_UPLOAD]`/`[MARK:SCRIPT_RUN]` 记录上传、开关、启动方式、退出码、超时 |
-| 保留 | 最近 20 份，运行中的不清理 |
+> 早期版本提供过「网页上传 `.sh` 并以服务身份（root）执行」的修复脚本通道
+> （`src/services/scriptRunner.ts` + `/api/system/scripts`），因风险过高已**整体移除**
+> （2026-09-18 移除，见 git log）。系统环境类问题（缺包/权限/systemd/Node 版本/目录属主）
+> 现在统一在服务器上直接跑仓库自带的脚本：`sudo bash deploy/scripts/diagnose-env.sh`、
+> `deploy/scripts/fix-node20.sh`、`fix-ytdlp.sh`、`fix-ownership.sh` 等。
 
 ## 6. 清理（消费者下载完成后删除）
 
@@ -345,7 +337,6 @@ network/markers/logs（每个日志文件尾部 2MB）。环境变量与设置�
 | `src/core/procLog.ts` | 外部命令调用日志（argv/退出码/耗时/输出摘要） |
 | `src/services/netCheck.ts` | 网络自检（DNS/HTTPS/yt-dlp/CDN/RPC）|
 | `src/services/report.ts` | 问题反馈报告打包（zip/JSON）、错误摘要、任务清单导出、git 版本 |
-| `src/services/scriptRunner.ts` | 修复脚本上传/执行（令牌、预览、独立单元、超时、留痕） |
 | `src/services/btProxy.ts` | transmission 9091 的 nginx 子路径反代开关（安全检查/状态汇总/日志埋点，实际改配置交给 `deploy/scripts/nginx-proxy-toggle.sh`） |
 | `src/modules/*` | transmission / aria2 / webvideo 三个生产者 + 完成检测 |
 | `src/services/archive.ts` | 归档（打包/命名/VLT 标记） |

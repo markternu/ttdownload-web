@@ -370,7 +370,6 @@ test('运维子命令齐备：--update / --stop / --start / --logs / --logs-foll
   assert.match(deploySrc, /ttdownload-logs-\$\{STAMP\}/, '--collect 应离线打包日志文件');
   // 老部署升级：应补齐新配置项而不是只补 PORT/DOWNLOAD_ROOT
   assert.match(deploySrc, /backfill_env\(\)/, '应有 .env 补齐函数');
-  assert.match(deploySrc, /SCRIPT_UPLOAD_ENABLED=0/, '应给现有 .env 补齐修复脚本开关');
   assert.match(deploySrc, /PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1/, '应跳过 playwright 浏览器下载');
   // sudo 部署时 git/npm/构建必须以仓库属主身份执行，否则产物变 root 所有、之后普通用户无法 git pull
   assert.match(deploySrc, /REPO_OWNER=/, '应识别仓库属主');

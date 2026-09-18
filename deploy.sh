@@ -31,7 +31,7 @@
 #      sudo ./deploy.sh --bt-proxy-off      # 关闭上面这个反代（配置彻底删除，外界访问不到 9091）
 #      sudo ./deploy.sh --bt-proxy-status   # 查看当前状态
 #
-#  环境问题自检/修复脚本（可在网页「修复脚本」页上传执行，也可 sudo bash 直接跑）：
+#  环境问题自检（在服务器上 sudo bash 直接跑）：
 #      deploy/scripts/diagnose-env.sh   只读体检（Node/aria2/transmission/yt-dlp/DNS/磁盘/服务）
 #      deploy/scripts/fix-node20.sh     Node 升级到 20 并重建依赖、重启服务（幂等）
 #      sudo ./deploy.sh --uninstall  # 停止并移除 systemd 服务（保留数据目录）
@@ -974,8 +974,6 @@ WEB_SESSION_HOURS=168
 WEB_SESSION_SECRET=${WEB_SESSION_SECRET_VALUE}
 # 调试期：debug 记录外部命令 argv/退出码/stdout 摘要，排查完可改成 info 以减小日志
 LOG_LEVEL=debug
-SCRIPT_UPLOAD_ENABLED=0
-SCRIPT_RUN_TIMEOUT_SEC=600
 # 自动获取访客 cookies（无头浏览器抓抖音/TikTok 等站点；0=关闭）
 COOKIE_HARVEST_ENABLED=1
 LOG_MAX_MB=20
@@ -1016,9 +1014,7 @@ else
     "LOG_LEVEL=debug" \
     "LOG_MAX_MB=20" \
     "LOG_KEEP_FILES=5" \
-    "SCRIPT_UPLOAD_ENABLED=0" \
     "COOKIE_HARVEST_ENABLED=1" \
-    "SCRIPT_RUN_TIMEOUT_SEC=600" \
     "WEB_AUTH_USER=${WEB_AUTH_USER:-admin}" \
     "WEB_SESSION_HOURS=168" \
     "WEB_SESSION_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -1111,7 +1107,6 @@ if [[ "${OK:-0}" -eq 1 ]]; then
   log "服务管理     : systemctl status|restart|stop ${SERVICE_NAME}"
   log "项目属主     : ${REPO_OWNER}（如发现 git/npm 报权限错误，跑 deploy/scripts/fix-ownership.sh 归位）"
   log "日志/排查    : http://${IP:-<服务器IP>}:${PORT}/logs 与 /report（一键下载诊断报告发给开发者）"
-  log "修复脚本页   : http://${IP:-<服务器IP>}:${PORT}/scripts（维护令牌 = 上面的安卓 Token；也可在 .env 里自设 MAINTENANCE_TOKEN）"
   log "自动 cookies : 抖音/TikTok 这类站点由服务器上的无头浏览器自动获取访客 cookies，无需人工导出"
   log "BT 反代开关  : 外网打不开 transmission 控制台时，可在「BT 种子下载」页一键开启反向代理，"
   log "               或执行 sudo ./deploy.sh --bt-proxy  → http://<公网IP>${BT_PROXY_PATH}/web/"

@@ -907,7 +907,7 @@ export default function SettingsPage() {
                         <code className="mx-1 break-all rounded bg-amber-100/70 px-1 py-0.5 dark:bg-amber-900/40">
                           sudo apt install -y chromium
                         </code>
-                        （Debian/Ubuntu/树莓派），或到「修复脚本」页执行{' '}
+                        （Debian/Ubuntu/树莓派）；不想装 chromium 也可以在服务器上执行{' '}
                         <code className="break-all rounded bg-amber-100/70 px-1 py-0.5 dark:bg-amber-900/40">
                           deploy/scripts/fix-cookies-browser.sh
                         </code>
