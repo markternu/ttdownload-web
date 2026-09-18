@@ -295,6 +295,22 @@ ensure_nginx_proxy() {
     fi
     log "nginx 已安装：$(nginx -v 2>&1)"
   fi
+  # ⚠️ 装了不等于在跑：真机上遇到过 apt 装完 nginx 仍是 inactive+disabled
+  #    （有些镜像的 policy-rc.d 会阻止服务自启）→ 必须显式 enable --now 并验证在监听，
+  #    否则"配置成功了但 80 端口根本没人听"，新服务器就彻底访问不到。
+  if ! systemctl is-active --quiet nginx; then
+    log "nginx 未运行 → 启动并设为开机自启"
+    systemctl enable nginx >/dev/null 2>&1 || true
+    systemctl start nginx >/dev/null 2>&1 || true
+  fi
+  if ! systemctl is-active --quiet nginx; then
+    warn "nginx 仍未能启动，尝试直接看错误："
+    systemctl status nginx --no-pager -l 2>&1 | tail -5 || true
+    die "nginx 没在运行 —— 没有它 80 端口就没有人监听，外面进不来（先修好 nginx 再重跑）"
+  fi
+  if ! ss -ltn 2>/dev/null | grep -qE ':(80|443)\b'; then
+    warn "nginx 在跑但 80/443 都没监听（检查 /etc/nginx 下的 server 配置）"
+  fi
   log "配置 nginx 反向代理：http://<公网IP>${PROXY_PATH}/ → 127.0.0.1:${PORT}"
   if bash "$script" --path "$PROXY_PATH" --port "$PORT"; then
     log "反向代理就绪：http://<公网IP>${PROXY_PATH}/（安卓端填 IP 会自动走这个路径）"

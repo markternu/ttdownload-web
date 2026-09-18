@@ -112,6 +112,16 @@ if ! command -v nginx >/dev/null 2>&1; then
   apt-get update -y >/dev/null 2>&1 || true
   apt-get install -y nginx || die "nginx 安装失败"
 fi
+# 装了不等于在跑（真机上遇到 apt 装完仍是 inactive+disabled，policy-rc.d 会阻止自启）
+if ! systemctl is-active --quiet nginx 2>/dev/null; then
+  WARN "nginx 未运行，正在启动并设为开机自启…"
+  systemctl enable nginx >/dev/null 2>&1 || true
+  systemctl start nginx >/dev/null 2>&1 || true
+fi
+if ! systemctl is-active --quiet nginx 2>/dev/null; then
+  systemctl status nginx --no-pager -l 2>&1 | tail -5 | sed 's/^/    /' || true
+  die "nginx 没有运行（80 端口无人监听，外面进不来）—— 先修好 nginx 再重试"
+fi
 nginx -v 2>&1 | sed 's/^/    /'
 if ! nginx -t >/dev/null 2>&1; then
   WARN "当前 nginx 配置本身就有问题（先修好再继续）："
