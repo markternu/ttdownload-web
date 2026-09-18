@@ -321,17 +321,38 @@ export const transmissionModule: ModuleAdapter = {
     }
 
     // 已经加过（空间不够被退回等待 / 服务重启重新排队）→ 复用，保持暂停。
-    // 这条必须放在"检查种子文件存在"之前：prepare 成功后 .torrent 就被删掉了，
-    // 再查原路径会误判"种子不存在"而永久失败（空间不够被退回等待的种子一重试就废）。
+    // 这条必须放在"检查种子文件存在"之前：复用分支不该因为路径问题被误判成"种子不存在"。
     const existingId = Number(payload.torrentId ?? 0);
     if (existingId) {
       await client.call('torrent-stop', { ids: [existingId] }).catch(() => undefined);
-      await syncBtVideoSelection(task, existingId);
-      return;
+      try {
+        await syncBtVideoSelection(task, existingId);
+        return;
+      } catch (e) {
+        // ⚠️ 关键修复：transmission 里已经**没有这个种子**了（被超时策略/扫货/手动删掉、
+        //    或者 transmission 重装/清空过）→ 以前这里直接抛「无法读取种子信息」，
+        //    而旧的部署里 .torrent 早被删了 → **任务永远救不回来**。
+        //    现在种子文件全程留档（btQueued），所以这里改为：丢掉过期的 torrentId，
+        //    直接用留档的 .torrent **重新加回 transmission**。
+        const why = hideText((e as Error).message);
+        logger.child('transmission').warn(
+          `任务 #${task.id} 在 transmission 里找不到该种子（${why}）→ 尝试用留档的 .torrent 重新加入`);
+        tasksRepo.update(task.id, { payload: { ...payload, torrentId: 0, reAddedAt: new Date().toISOString() } });
+        payload.torrentId = 0;
+        // 落到下面的"从种子文件加入"逻辑（种子文件在 btQueued 里留档，不会再出现"文件不存在"）
+      }
     }
 
-    const seedPath = String(payload.seedPath ?? '');
-    if (!seedPath || !fs.existsSync(seedPath)) throw new Error('种子文件不存在（可能已被移动或删除）');
+    // 种子文件路径：优先任务里记的，其次查 seeds 表（入队时已把它移到 btQueued 留档）
+    let seedPath = String(payload.seedPath ?? '');
+    if (!seedPath || !fs.existsSync(seedPath)) {
+      const seedId = Number(payload.seedId ?? 0);
+      const recorded = seedId ? String(seedsRepo.get(seedId)?.path ?? '') : '';
+      if (recorded && fs.existsSync(recorded)) seedPath = recorded;
+    }
+    if (!seedPath || !fs.existsSync(seedPath)) {
+      throw new Error('种子文件不存在：留档目录里也没有（可能被手动删除了）——请在「BT 种子」页重新上传该种子');
+    }
 
     const base64 = fs.readFileSync(seedPath).toString('base64');
     const addRes = await client.call<{
