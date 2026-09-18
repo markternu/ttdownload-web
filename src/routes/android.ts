@@ -8,7 +8,7 @@ import { freeBytes } from '../core/disk';
 import { logger } from '../core/logger';
 import { cleanupPublished } from '../services/cleanup';
 import { getSettings } from '../services/settings';
-import { asyncHandler, badRequest, notFound, unauthorized } from '../utils/http';
+import { asyncHandler, badRequest, notFound, unauthorized, streamFileTo } from '../utils/http';
 import type { PublishedFile } from '../types';
 
 export const androidRouter = Router();
@@ -243,7 +243,7 @@ androidRouter.get(
       res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
       res.setHeader('Content-Length', String(end - start + 1));
       // 高 RTT（跨洲）链路上，64KB 默认分块会让吞吐被事件循环/往返拖住 → 1MB
-      fs.createReadStream(file.path, { start, end, highWaterMark: 1 << 20 }).pipe(res);
+      streamFileTo(res, file.path, { start, end });
       return;
     }
 
@@ -251,7 +251,7 @@ androidRouter.get(
     filesRepo.trackDownload(id, 'android');
     logger.child('android').mark('FILE_DOWNLOAD', `安卓端开始下载成品文件 #${id}`, { name: file.name, sizeBytes: stat.size });
     res.setHeader('Content-Length', String(stat.size));
-    fs.createReadStream(file.path, { highWaterMark: 1 << 20 }).pipe(res);
+    streamFileTo(res, file.path);
   }),
 );
 

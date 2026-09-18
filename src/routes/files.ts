@@ -5,7 +5,7 @@ import { config } from '../core/config';
 import { filesRepo } from '../core/db';
 import { deletePublished } from '../services/cleanup';
 import { logger } from '../core/logger';
-import { asyncHandler, notFound } from '../utils/http';
+import { asyncHandler, notFound, streamFileTo } from '../utils/http';
 import type { PublishedFile } from '../types';
 
 export const filesRouter = Router();
@@ -105,7 +105,7 @@ filesRouter.get(
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${path.basename(file.name)}"`);
     res.setHeader('Content-Length', String(fs.statSync(file.path).size));
-    fs.createReadStream(file.path, { highWaterMark: 1 << 20 }).pipe(res);
+    streamFileTo(res, file.path);
   }),
 );
 
