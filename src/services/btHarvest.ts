@@ -17,7 +17,7 @@
  *     注意：**不动文件夹、不动 transmission 任务**（它还在下）
  *
  * 为什么不在下载完成的瞬间直接处理：用户要求"扔给 transmission 就别管它，
- * 8 小时内不干涉"。扫货是按目录独立判断的，天然不会干扰 transmission。
+ * 12 小时内不干涉"。扫货是按目录独立判断的，天然不会干扰 transmission。
  */
 
 import fs from 'node:fs';

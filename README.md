@@ -31,8 +31,8 @@
 视频时"**独树一帜下最大、相差无几一起下**"（最大的 ≥ 第二大的 5 倍就只下最大的；最大的本身不到
 200MB 而后面有一堆小文件时，改下那堆小的）。
 
-**BT 8 小时/4 小时超时策略**：种子交给 transmission 之后 **8 小时内只读进度、绝不干涉**（有的资源
-这会儿没速度，过一小时才上线）；满 8 小时进度仍 ≤60% → 清理；>60% → 再宽限 4 小时，到点还没完也清理。
+**BT 12 小时/6 小时超时策略**：种子交给 transmission 之后 **12 小时内只读进度、绝不干涉**（有的资源
+这会儿没速度，过一小时才上线）；满 12 小时进度仍 ≤60% → 清理；>60% → 再宽限 6 小时（最晚 18 小时），到点还没完也清理。
 已经下完的由「扫货」拿走。每次清理都会**广播"空间已腾挪"**，等待队列立即重新评估。
 
 **BT 扫货（harvest）**：每 2 分钟扫 transmission 的 `downloads` / `incomplete` 两个目录 ——
@@ -252,7 +252,7 @@ docker compose up -d
 | `BT_SMALL_FILE_MAX` | 300MB | 扫货打包阈值：小于它的小文件合成一个 zip，≥ 它的各自单独走 |
 | `BT_BIG_RATIO` / `BT_SMALL_CEILING` | 5 / 200MB | "挑同类"：相差多少倍算异类 / "最大的太小、小的成堆"的绝对上限 |
 | `BT_HARVEST_INTERVAL_MS` / `BT_EVICT_INTERVAL_MS` | 120000 / 600000 | 扫货周期（2 分钟）/ 超时检查周期（10 分钟） |
-| `BT_EVICT_*`（`BT_EVICT_ENABLED`/`MIN_AGE_HOURS`/`SALVAGE_PERCENT`/`STALL_MINUTES`/`SLOW_KBPS`/`SLOW_ETA_HOURS`） | — | **已废弃**：旧的"停滞/极慢/挽救"出清机制被 8h/4h 策略取代，这些变量还在读但已无人使用（留着无害） |
+| `BT_EVICT_*`（`BT_EVICT_ENABLED`/`MIN_AGE_HOURS`/`SALVAGE_PERCENT`/`STALL_MINUTES`/`SLOW_KBPS`/`SLOW_ETA_HOURS`） | — | **已废弃**：旧的"停滞/极慢/挽救"出清机制被 12h/6h 策略取代，这些变量还在读但已无人使用（留着无害） |
 | `YTDLP_BIN` / `FFMPEG_BIN` / `OPENSSL_BIN` / `ZIP_BIN` / `UNZIP_BIN` | 同名命令 | 外部工具路径 |
 
 更多设置（默认质量/格式、限速、超时、重试、主题、模块并发等）可在 **Web 设置页** 在线修改（存 SQLite）。

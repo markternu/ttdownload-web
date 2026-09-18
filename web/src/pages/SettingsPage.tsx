@@ -1086,7 +1086,7 @@ export default function SettingsPage() {
           </div>
         </Card>
 
-        {/* BT 超时策略（8 小时 + 4 小时宽限） */}
+        {/* BT 超时策略（12 小时 + 6 小时宽限） */}
         <Card>
           <CardHeader
             title={
@@ -1094,11 +1094,11 @@ export default function SettingsPage() {
                 <Trash2 className="h-4 w-4" /> BT 超时清理
               </span>
             }
-            subtitle="交给 transmission 后 8 小时内完全不干涉（有的资源过一会儿才上线）；到点还没下完才按下面的规则清理"
+            subtitle="交给 transmission 后 12 小时内完全不干涉（有的资源过一会儿才上线）；到点还没下完才按下面的规则清理"
           />
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-3">
-              <Field label="多少小时后检查" hint="从交给 transmission 那一刻算起，默认 8 小时">
+              <Field label="多少小时后检查" hint="从交给 transmission 那一刻算起，默认 12 小时">
                 <Input
                   type="number"
                   min={1}
@@ -1116,7 +1116,7 @@ export default function SettingsPage() {
                   onChange={(event) => patch('btPolicy', { ...draft.btPolicy, minProgressPercent: Number(event.target.value) })}
                 />
               </Field>
-              <Field label="宽限小时数" hint="进度高于上面那个值时再给这么多小时，到点还没完也清理，默认 4 小时">
+              <Field label="宽限小时数" hint="进度高于上面那个值时再给这么多小时，到点还没完也清理，默认 6 小时">
                 <Input
                   type="number"
                   min={1}

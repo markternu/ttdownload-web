@@ -399,7 +399,7 @@ export const transmissionModule: ModuleAdapter = {
     }
     const selectedBytes = Math.max(0, Number(payload.selectedBytes ?? task.expectBytes ?? 0) || 0);
     await client.call('torrent-start', { ids: [torrentId] });
-    // 记录"什么时候扔给 transmission 的"：8 小时/4 小时策略从这一刻算起
+    // 记录"什么时候扔给 transmission 的"：12 小时/6 小时策略从这一刻算起
     const handedAt = String(payload.btHandedAt ?? new Date().toISOString());
 
     const seedId = Number(payload.seedId ?? 0);
@@ -426,7 +426,7 @@ export const transmissionModule: ModuleAdapter = {
   },
 
   /**
-   * 只**读**进度。8 小时窗口内不对 transmission 里的种子做任何操作
+   * 只**读**进度。12 小时窗口内不对 transmission 里的种子做任何操作
    * （不暂停、不删文件、不改勾选）—— 有的资源这会儿没速度，过一小时才上线，
    * 干涉只会把能下完的种子搞坏。到点后的清理由 btPolicy 负责；
    * 下完的货由 btHarvest 扫目录处理。
@@ -453,15 +453,15 @@ export const transmissionModule: ModuleAdapter = {
     const speed = torrent.rateDownload ?? 0;
     const eta = torrent.eta && torrent.eta > 0 ? torrent.eta : null;
 
-    // 进度快照留痕（给 8h/4h 判断用，也方便排查"到底卡在多少"）
+    // 进度快照留痕（给 12h/6h 判断用，也方便排查"到底卡在多少"）
     if (Math.abs(progress - Number(payload.btLastProgress ?? -1)) >= 1) {
       tasksRepo.update(task.id, { payload: { ...payload, btLastProgress: progress, btLastCheckAt: new Date().toISOString() } });
     }
 
-    // transmission 自己报错时如实转达，但**不**擅自删任务 —— 交给 8 小时策略
+    // transmission 自己报错时如实转达，但**不**擅自删任务 —— 交给 12 小时策略
     if (torrent.error && torrent.error !== 0) {
       const msg = hideText(torrent.errorString || `错误码 ${torrent.error}`);
-      taskLog(task.id).warn(`transmission 报告错误（继续观察，按 8 小时策略处理）: ${msg}`);
+      taskLog(task.id).warn(`transmission 报告错误（继续观察，按 12 小时策略处理）: ${msg}`);
     }
 
     const selectedBytes = Math.max(0, Number(payload.selectedBytes ?? task.expectBytes ?? 0) || 0);

@@ -47,16 +47,22 @@ async function makeRunningTask({ name, handedHoursAgo, percent }) {
   return tasksRepo.get(task.id);
 }
 
-test('8 小时内不干涉：不管进度多低都不动它', async () => {
-  const task = await makeRunningTask({ name: 'young', handedHoursAgo: 2, percent: 0.05 });
+test('默认策略是 12 小时 / 6 小时（用户要求从 8+4 放宽）', () => {
+  assert.equal(config.btPolicy.checkAfterHours, 12, '默认首次判断应改为 12 小时');
+  assert.equal(config.btPolicy.graceHours, 6, '默认宽限应改为 6 小时（最晚 12+6=18 小时）');
+});
+
+test('12 小时内不干涉：8 小时就动手是旧策略，现在必须等满 12 小时', async () => {
+  // ⚠️ 牙齿：这一条在旧默认（8 小时）下会失败 —— 8.5 小时、进度 5% 会被清掉
+  const task = await makeRunningTask({ name: 'young', handedHoursAgo: 8.5, percent: 0.05 });
   const s = await runBtEvict();
-  assert.equal(tasksRepo.get(task.id).status, 'downloading', '2 小时 < 8 小时，不该被清理');
+  assert.equal(tasksRepo.get(task.id).status, 'downloading', '8.5 小时 < 12 小时，不该被清理');
   assert.equal(s.dropped, 0);
   assert.ok(s.kept >= 1);
 });
 
-test('满 8 小时且进度 ≤ 60% -> 清理（删任务 + 删残留）', async () => {
-  const task = await makeRunningTask({ name: 'stalled', handedHoursAgo: 8.5, percent: 0.3 });
+test('满 12 小时且进度 ≤ 60% -> 清理（删任务 + 删残留）', async () => {
+  const task = await makeRunningTask({ name: 'stalled', handedHoursAgo: 12.5, percent: 0.3 });
   const s = await runBtEvict();
   const after = tasksRepo.get(task.id);
   assert.equal(after.status, 'failed', `进度 30% 应该被清掉，实际 ${after.status}`);
@@ -66,18 +72,19 @@ test('满 8 小时且进度 ≤ 60% -> 清理（删任务 + 删残留）', async
   assert.equal(mock.state.removed[mock.state.removed.length - 1].deleteLocalData, true, '要连下载残留一起删');
 });
 
-test('满 8 小时但进度 > 60% -> 进入宽限，不删', async () => {
-  const task = await makeRunningTask({ name: 'graceful', handedHoursAgo: 8.5, percent: 0.8 });
+test('满 12 小时但进度 > 60% -> 进入宽限，不删', async () => {
+  const task = await makeRunningTask({ name: 'graceful', handedHoursAgo: 12.5, percent: 0.8 });
   const s = await runBtEvict();
   assert.equal(tasksRepo.get(task.id).status, 'downloading', '进度 80% 应给宽限，不能删');
   assert.equal(s.inGrace, 1);
 });
 
-test('宽限 4 小时也过了还没下完 -> 清理', async () => {
-  const task = await makeRunningTask({ name: 'toolate', handedHoursAgo: 12.5, percent: 0.75 });
+test('宽限 6 小时也过了还没下完 -> 清理（12+6=18 小时）', async () => {
+  // ⚠️ 牙齿：旧默认下 12.5 小时就已过 8+4，现在 12.5 小时还在宽限里，必须等到 18 小时
+  const task = await makeRunningTask({ name: 'toolate', handedHoursAgo: 18.5, percent: 0.75 });
   await runBtEvict();
   const after = tasksRepo.get(task.id);
-  assert.equal(after.status, 'failed', `超过 8+4 小时应清理，实际 ${after.status}`);
+  assert.equal(after.status, 'failed', `超过 12+6 小时应清理，实际 ${after.status}`);
   assert.match(String(after.error), /宽限/);
 });
 

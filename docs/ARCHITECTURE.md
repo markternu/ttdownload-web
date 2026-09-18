@@ -69,7 +69,7 @@
    - 确认接管成功 → **删掉那个 `.torrent` 文件**（transmission 自己已存元数据）。
    - **绝不传 `download-dir` / `incomplete-dir`**：transmission 以 `debian-transmission` 运行，
      改成我们的目录会让它下完搬文件时 `Permission denied`（真机事故，见 HANDOVER §3.1）。
-5. **`start()`**：只做 `torrent-start`，并记下 `btHandedAt`（8 小时策略的起点）。
+5. **`start()`**：只做 `torrent-start`，并记下 `btHandedAt`（12 小时策略的起点）。
 6. **`poll()`**：**只读进度**，不干涉。下完的货由**扫货**（§5.6）交进归档 → 加密 → 发布；
    超时的由**超时策略**（§5.5）清理。
 7. **入队逻辑为什么这么绕**：早期加种子/选片/算大小都在 `start()` 里，准入时 `expectBytes=0`
@@ -149,16 +149,16 @@ usable      = free - reserved - RESERVE_FREE_BYTES(默认 10GiB)
 
 ---
 
-## 5.5 BT 超时策略（8 小时 / 4 小时宽限）
+## 5.5 BT 超时策略（12 小时 / 6 小时宽限）
 
 > ⚠️ 这里在 BT 重构时被**整段替换**过。旧文档写的"无资源/停滞/极慢 + `btEvict.*` 阈值 + 10 小时门槛"
 > **已经不存在了**（旧配置字段还留在 config 里，但没人读，无害）。现在只有一条规则：
 
 | 阶段 | 规则 |
 | --- | --- |
-| 交给 transmission 后 8 小时内 | **只读进度**（`poll`），不暂停、不删、不改勾选 —— 有的资源这会儿没速度，过一小时才上线，干涉只会把能下完的搞坏 |
-| 满 8 小时（`btPolicy.checkAfterHours`） | 进度 **≤ `minProgressPercent`（默认 60%）** → 直接清理 |
-| 进度 **> 60%** | 再宽限 `graceHours`（默认 4 小时，即最晚 12 小时）→ 到点还没下完也清理 |
+| 交给 transmission 后 12 小时内 | **只读进度**（`poll`），不暂停、不删、不改勾选 —— 有的资源这会儿没速度，过一小时才上线，干涉只会把能下完的搞坏 |
+| 满 12 小时（`btPolicy.checkAfterHours`） | 进度 **≤ `minProgressPercent`（默认 60%）** → 直接清理 |
+| 进度 **> 60%** | 再宽限 `graceHours`（默认 6 小时，即最晚 18 小时）→ 到点还没下完也清理 |
 | 已经 100% | 不归这里管，由**扫货**（§3.1、`btHarvest`）拿走 |
 
 **计时起点**：`payload.btHandedAt`（`start()` 真正 `torrent-start` 的那一刻）。
@@ -198,7 +198,7 @@ incomplete（还在下的）：
   · **绝不动目录、绝不动 transmission 任务**
 ```
 
-为什么不在下载完成的瞬间处理：用户要求"扔给 transmission 就别管它，8 小时内不干涉"。
+为什么不在下载完成的瞬间处理：用户要求"扔给 transmission 就别管它，12 小时内不干涉"。
 扫货按目录独立判断，天然不会干扰 transmission。
 
 为什么一个目录只建一个任务：拆成多个任务时，先完成的那个收尾会删掉目录，而
