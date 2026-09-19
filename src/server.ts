@@ -10,6 +10,7 @@ import { applyNoLimitPolicy } from './modules/transmission';
 import { startBtHarvestWorker, stopBtHarvestWorker } from './services/btHarvest';
 import { ensureAria2Daemon } from './modules/aria2Client';
 import { logAuthBootState } from './services/auth';
+import { startUsbWorker, stopUsbWorker } from './services/usbMount';
 
 async function main(): Promise<void> {
   ensureDirs();
@@ -59,6 +60,7 @@ async function main(): Promise<void> {
   startScheduler();
   startBtEvictWorker();
   startBtHarvestWorker();
+  startUsbWorker();
   kickScheduler();
 
   const app = createApp();

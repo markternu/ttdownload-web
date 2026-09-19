@@ -27,6 +27,7 @@ import type {
   Settings,
   Stats,
   SystemStatus,
+  UsbStatus,
   Task,
   TaskAction,
   TaskListResponse,
@@ -202,6 +203,10 @@ export const api = {
   health: () => request<HealthStatus>('/api/health'),
 
   system: () => request<SystemStatus>('/api/system'),
+
+  usb: () => request<{ usb: UsbStatus }>('/api/usb'),
+  usbMount: () => request<{ usb: UsbStatus }>('/api/usb/mount', { method: 'POST' }),
+  usbEject: () => request<{ usb: UsbStatus }>('/api/usb/eject', { method: 'POST' }),
 
   stats: () => request<Stats>('/api/stats'),
 

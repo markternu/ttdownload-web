@@ -14,6 +14,7 @@ import { btRouter } from './routes/bt';
 import { webvideoRouter } from './routes/webvideo';
 import { filesRouter } from './routes/files';
 import { androidRouter } from './routes/android';
+import { usbRouter } from './routes/usb';
 
 export function createApp(): express.Express {
   const app = express();
@@ -63,6 +64,7 @@ export function createApp(): express.Express {
   app.use('/api/webvideo', webvideoRouter);
   app.use('/api/files', filesRouter);
   app.use('/api/android', androidRouter);
+  app.use('/api', usbRouter);
 
   app.get('/api', (_req, res) => {
     res.json({

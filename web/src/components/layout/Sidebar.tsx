@@ -27,6 +27,7 @@ import { cn } from '../../lib/cn'
 import { formatBytes } from '../../lib/format'
 import { useAppData } from '../../context/AppDataContext'
 import { useAuth } from '../../context/AuthContext'
+import { UsbCard } from './UsbCard'
 
 interface NavItem {
   to: string
@@ -182,6 +183,8 @@ function SidebarContent({ onClose }: { onClose: () => void }) {
           </span>
         </div>
       </div>
+
+      <UsbCard />
 
       {/* 当前登录账号 + 退出登录（桌面端与移动端抽屉共用） */}
       <div className="flex items-center gap-2.5 rounded-2xl border border-slate-200 bg-white px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900">

@@ -294,6 +294,18 @@ export interface SystemStatus {
   node: string
 }
 
+export interface UsbStatus {
+  present: boolean
+  mounted: boolean
+  device?: string
+  mountpoint?: string
+  fstype?: string
+  label?: string
+  sizeBytes?: number
+  freeBytes?: number
+  lastError?: string
+}
+
 export interface HealthStatus {
   ok: boolean
   version?: string
