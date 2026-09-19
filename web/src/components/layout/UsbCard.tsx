@@ -55,6 +55,9 @@ export function UsbCard() {
             <br />
             归档成品会自动剪切到 {usb.mountpoint}/ttdownload/
           </p>
+          {usb.lastError ? (
+            <p className="mt-1 text-[11px] leading-4 text-red-500 dark:text-red-400">{usb.lastError}</p>
+          ) : null}
           <button
             type="button"
             disabled={busy}

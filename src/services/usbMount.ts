@@ -160,13 +160,18 @@ export function autoMount(): UsbState {
   }
 }
 
+let lastEjectedDevice: string | null = null;
+
 export function ejectUsb(): UsbState {
   const s = getUsbState();
   if (!s.mounted) return s;
+  const mp = s.mountpoint ?? MOUNT_DIR;
   try {
     execFileSync('sync', { timeout: 30000 });
-    execFileSync('umount', [MOUNT_DIR], { timeout: 30000 });
-    logger.child('usb').mark('USB', `已弹出外部盘 ${s.device}`);
+    // ⚠️ 用**实际挂载点**卸载：U 盘可能被系统 udisks2 自动挂到 /media/xxx，而不是 /mnt/usb
+    execFileSync('umount', [mp], { timeout: 30000 });
+    lastEjectedDevice = s.device ?? null; // 记住刚弹出的盘：后台巡检别再把它自动挂回去
+    logger.child('usb').mark('USB', `已弹出外部盘 ${s.device}（${mp}）`);
   } catch (e) {
     return { ...s, lastError: `弹出失败（可能有进程还在占用）：${(e as Error).message}` };
   }
@@ -259,8 +264,16 @@ export function startUsbWorker(): void {
   if (timer) return;
   const tick = () => {
     try {
+      const s = getUsbState();
+      // 盘被拔掉 → 清除"刚弹出"的记忆，下次插入才允许再自动挂载
+      if (!s.present) lastEjectedDevice = null;
       const prevMounted = cached.mounted;
-      cached = autoMount();
+      if (!s.mounted && s.device && s.device === lastEjectedDevice) {
+        // 用户刚手动弹出的盘：巡检**不要**又自动挂回去
+        cached = s;
+      } else {
+        cached = autoMount();
+      }
       if (cached.mounted) {
         if (!prevMounted) logger.child('usb').mark('USB', `检测到外部盘并挂载：${cached.device}（${cached.label ?? ''}）`);
         offloadArchivedToUsb();
