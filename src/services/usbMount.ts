@@ -68,12 +68,17 @@ function lsblk(): Block[] {
   }
 }
 
+// 根盘是哪块开机就不会变，缓存起来，别每 10 秒重复跑 findmnt
+let _rootDevice: string | null = null;
 function rootDevice(): string {
-  try {
-    return execFileSync('findmnt', ['-n', '-o', 'SOURCE', '/'], { encoding: 'utf8', timeout: 3000 }).trim();
-  } catch {
-    return '';
+  if (_rootDevice === null) {
+    try {
+      _rootDevice = execFileSync('findmnt', ['-n', '-o', 'SOURCE', '/'], { encoding: 'utf8', timeout: 3000 }).trim();
+    } catch {
+      _rootDevice = '';
+    }
   }
+  return _rootDevice;
 }
 
 function parseSize(s: string): number {
@@ -168,6 +173,38 @@ export function ejectUsb(): UsbState {
   return getUsbState();
 }
 
+/**
+ * 原子写文件：先写 `.part` 临时名 → fsync 落盘 → rename 成最终名。
+ * 这样中途拔盘 / 停电最多留下一个带 `.part` 标记的临时文件，
+ * 绝不会出现"名字正常、内容却只写了一半"的损坏成品。失败时清理临时文件并抛错。
+ */
+function copyFileAtomic(from: string, to: string): void {
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  const tmp = `${to}.part`;
+  const rfd = fs.openSync(from, 'r');
+  let wfd: number | null = null;
+  try {
+    wfd = fs.openSync(tmp, 'w');
+    const buf = Buffer.alloc(1024 * 1024);
+    let n: number;
+    while ((n = fs.readSync(rfd, buf, 0, buf.length, null)) > 0) {
+      fs.writeSync(wfd, buf, 0, n);
+    }
+    fs.fsyncSync(wfd); // 数据落盘（U 盘缓存冲进设备），否则拔盘会丢尾巴
+    fs.closeSync(wfd);
+    wfd = null;
+    fs.renameSync(tmp, to); // 同一文件系统内原子改名：要么旧文件、要么完整新文件
+  } catch (e) {
+    if (wfd !== null) {
+      try { fs.closeSync(wfd); } catch { /* ignore */ }
+    }
+    try { fs.unlinkSync(tmp); } catch { /* 设备可能已拔，删不掉就算了 */ }
+    throw e;
+  } finally {
+    fs.closeSync(rfd);
+  }
+}
+
 /** 递归剪切（跨文件系统用 copy + rm，不能用 rename——EXDEV） */
 function moveAcross(from: string, to: string): void {
   const st = fs.statSync(from);
@@ -176,8 +213,8 @@ function moveAcross(from: string, to: string): void {
     for (const name of fs.readdirSync(from)) moveAcross(path.join(from, name), path.join(to, name));
     fs.rmdirSync(from);
   } else {
-    fs.mkdirSync(path.dirname(to), { recursive: true });
-    fs.copyFileSync(from, to);
+    copyFileAtomic(from, to);
+    // ⚠️ 只在「完整文件原子落盘成功」之后才删源 —— 中途拔盘/停电源文件永远完好
     fs.unlinkSync(from);
   }
 }
