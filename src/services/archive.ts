@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { workDirs } from './usbMount';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { config } from '../core/config';
@@ -129,17 +130,18 @@ export async function archiveTaskFiles(
   });
   if (existing.length === 0) return { ok: false, error: '没有可归档的文件（可能已被移动或删除）' };
 
-  fs.mkdirSync(config.dirs.archiveReady, { recursive: true });
+  const wd = workDirs();
+  fs.mkdirSync(wd.archiveReady, { recursive: true });
   fs.mkdirSync(config.dirs.state, { recursive: true });
 
   const publishedName = nextPublishName();
-  const target = path.join(config.dirs.archiveReady, publishedName);
+  const target = path.join(wd.archiveReady, publishedName);
   const originalName = safeFileName(opts.originalName || path.basename(existing[0]));
 
   try {
     if (existing.length > 1) {
       // 多文件 -> zip（扁平），先放临时 zip 再移动为目标名
-      const tmpZip = path.join(config.dirs.archiveReady, `.tmp_${publishedName}.zip`);
+      const tmpZip = path.join(wd.archiveReady, `.tmp_${publishedName}.zip`);
       // ⚠️ `zip -j` 遇到**同名文件**直接报 "cannot repeat names" 并以非 0 退出
       //    （例如 CD1/movie.mp4 + CD2/movie.mp4）。这在 BT 里很常见，而归档失败会让扫货
       //    每个 tick 重建任务反复失败、目录永远清不掉。所以先做一次"扁平化 + 去重命名"。

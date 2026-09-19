@@ -5,6 +5,7 @@ import { bus } from '../core/events';
 import { filesRepo, tasksRepo } from '../core/db';
 import { logger, taskLog } from '../core/logger';
 import { archiveTaskFiles, moveWithDedup } from './archive';
+import { workDirs } from './usbMount';
 import { encryptFile, stripExtension } from './crypto';
 import { encryptPassword, getSettings } from './settings';
 import { cleanupBtTaskDirs } from './btCleanup';
@@ -15,6 +16,11 @@ import type { ModuleId, Task } from '../types';
  * 归档 → 加密 → 发布 流水线（消费者目录）。
  * 由任务状态驱动（archiving / encrypting），保证服务重启后可继续。
  */
+
+/** 空间不足 / U盘被拔 / 只读等"可恢复"错误：遇到这些不该判失败，保持原状态等下轮重试 */
+function isRecoverableSpaceError(msg: string): boolean {
+  return /ENOSPC|EROFS|EIO|ENXIO|ENODEV|no space|Input\/output|No such file|read-only/i.test(msg ?? '');
+}
 
 let timer: NodeJS.Timeout | null = null;
 let running = false;
@@ -85,7 +91,11 @@ async function processArchiving(): Promise<void> {
       tasksRepo.update(task.id, { payload: { ...payload, publishUnits: units } });
     }
     if (failed) {
-      tasksRepo.update(task.id, { status: 'failed', error: `归档失败: ${failed}` });
+      const recoverable = isRecoverableSpaceError(String(failed));
+      tasksRepo.update(task.id, {
+        status: recoverable ? 'archiving' : 'failed',
+        error: recoverable ? `归档空间不足或 U 盘已拔出，等待恢复后自动重试：${failed}` : `归档失败: ${failed}`,
+      });
       bus.emitTask(tasksRepo.get(task.id));
       continue;
     }
@@ -120,8 +130,9 @@ async function processEncrypting(): Promise<void> {
   for (const task of list) {
     const payload = payloadOf(task);
     const units = unitsOf(task);
-    fs.mkdirSync(config.dirs.encryptTmp, { recursive: true });
-    fs.mkdirSync(config.dirs.consumer, { recursive: true });
+    const wd = workDirs();
+    fs.mkdirSync(wd.encryptTmp, { recursive: true });
+    fs.mkdirSync(wd.consumer, { recursive: true });
 
     let failed: string | null = null;
     const published: { fileId: number; name: string; title: string; sizeBytes: number; path: string }[] = [];
@@ -135,7 +146,7 @@ async function processEncrypting(): Promise<void> {
         break;
       }
       const base = path.basename(archivePath);
-      const inTmp = moveWithDedup(archivePath, config.dirs.encryptTmp, base);
+      const inTmp = moveWithDedup(archivePath, wd.encryptTmp, base);
       const encrypted = `${inTmp}.data`;
       const res = await encryptFile(inTmp, encrypted, pwd);
       if (!res.ok) {
@@ -144,7 +155,7 @@ async function processEncrypting(): Promise<void> {
       }
       fs.rmSync(inTmp, { force: true });
       const stripped = stripExtension(encrypted);
-      const finalPath = moveWithDedup(stripped, config.dirs.consumer, path.basename(stripped));
+      const finalPath = moveWithDedup(stripped, wd.consumer, path.basename(stripped));
       const sizeBytes = fs.statSync(finalPath).size;
       const fileId = filesRepo.add({
         taskId: task.id,
@@ -165,7 +176,12 @@ async function processEncrypting(): Promise<void> {
     }
 
     if (failed) {
-      tasksRepo.update(task.id, { status: 'failed', error: `加密失败: ${failed}`, payload: { ...payload, publishUnits: units } });
+      const recoverable = isRecoverableSpaceError(String(failed));
+      tasksRepo.update(task.id, {
+        status: recoverable ? 'encrypting' : 'failed',
+        error: recoverable ? `加密空间不足或 U 盘已拔出，等待恢复后自动重试：${failed}` : `加密失败: ${failed}`,
+        payload: { ...payload, publishUnits: units },
+      });
       bus.emitTask(tasksRepo.get(task.id));
       continue;
     }

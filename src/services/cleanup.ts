@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { workDirs } from './usbMount';
 import path from 'node:path';
 import { config } from '../core/config';
 import { bus } from '../core/events';
@@ -17,11 +18,12 @@ export interface CleanupResult {
 function safeConsumerPath(p: string): boolean {
   try {
     const resolved = path.resolve(p);
-    const root = path.resolve(config.dirs.consumer) + path.sep;
+    const wd = workDirs();
+    const root = path.resolve(wd.consumer) + path.sep;
     if (!resolved.startsWith(root)) return false;
     const lst = fs.lstatSync(resolved);
     if (lst.isSymbolicLink() || !lst.isFile()) return false;
-    const rel = path.relative(config.dirs.consumer, resolved);
+    const rel = path.relative(wd.consumer, resolved);
     if (rel.startsWith('..') || rel.includes('/../')) return false;
     if (path.basename(resolved).startsWith('.')) return false;
     return true;

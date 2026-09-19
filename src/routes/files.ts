@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { workDirs } from '../services/usbMount';
 import path from 'node:path';
 import { Router } from 'express';
 import { config } from '../core/config';
@@ -115,7 +116,7 @@ filesRouter.get('/orphans', (_req, res) => {
   const known = new Set(rows.map((r) => path.basename(r.path)));
   const orphans: string[] = [];
   try {
-    for (const name of fs.readdirSync(config.dirs.consumer)) {
+    for (const name of fs.readdirSync(workDirs().consumer)) {
       if (name.startsWith('.')) continue;
       if (!known.has(name)) orphans.push(name);
     }

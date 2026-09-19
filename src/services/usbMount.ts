@@ -14,9 +14,43 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../core/config';
 import { logger } from '../core/logger';
+import { getSettings } from './settings';
 
 const MOUNT_DIR = '/mnt/usb';
 const TARGET_DIR = 'ttdownload';
+
+/** 归档/加密/成品三个"文件操作"目录：U 盘在时切到 U 盘，否则用 SD 默认目录 */
+export interface WorkDirs {
+  archiveReady: string;
+  encryptTmp: string;
+  consumer: string;
+  onUsb: boolean;
+}
+
+export function workDirs(): WorkDirs {
+  const s = getCachedUsbState();
+  if (s.mounted && s.mountpoint && fs.existsSync(s.mountpoint)) {
+    const base = path.join(s.mountpoint, TARGET_DIR);
+    return {
+      archiveReady: path.join(base, 'downd_ok_p2'),
+      encryptTmp: path.join(base, 'downd_ok_p2_jiami_tmp'),
+      consumer: path.join(base, 'xiaofeizhe_downd'),
+      onUsb: true,
+    };
+  }
+  return {
+    archiveReady: config.dirs.archiveReady,
+    encryptTmp: config.dirs.encryptTmp,
+    consumer: config.dirs.consumer,
+    onUsb: false,
+  };
+}
+
+/** 有效预留空间：U 盘挂载时那 10G 红线取消（文件操作周转用 U 盘的空间），否则照旧 10G */
+export function effectiveReserve(): number {
+  const s = getCachedUsbState();
+  return s.mounted ? 0 : getSettings().reserveFreeBytes;
+}
 
 export interface UsbState {
   /** 是否插着外部盘（U 盘/移动硬盘） */
@@ -226,11 +260,14 @@ function moveAcross(from: string, to: string): void {
 
 /** 把归档好的成品（consumer 目录）剪切到外部盘根目录的 ttdownload/ */
 export function offloadArchivedToUsb(): { moved: number; bytes: number } {
-  const s = getUsbState();
-  if (!s.mounted || !s.mountpoint) return { moved: 0, bytes: 0 };
+  // U 盘挂载时，成品目录已经直接落在 U 盘（workDirs().consumer），新成品不再"二次剪切"。
+  // 这里只做一件事：把 U 盘插入**之前**留在 SD 上的旧成品补搬到 U 盘。
+  const wd = workDirs();
+  if (!wd.onUsb) return { moved: 0, bytes: 0 };
   const src = config.dirs.consumer;
-  if (!fs.existsSync(src)) return { moved: 0, bytes: 0 };
-  const dest = path.join(s.mountpoint, TARGET_DIR);
+  const dest = wd.consumer;
+  if (src === dest || !fs.existsSync(src)) return { moved: 0, bytes: 0 };
+  fs.mkdirSync(dest, { recursive: true });
   let moved = 0;
   let bytes = 0;
   try {
@@ -244,10 +281,10 @@ export function offloadArchivedToUsb(): { moved: number; bytes: number } {
       bytes += st.isDirectory() ? 0 : st.size;
     }
     if (moved > 0) {
-      logger.child('usb').mark('USB', `归档资源已剪切到外部盘：${moved} 项 / ${(bytes / 1024 / 1024).toFixed(1)}MB → ${dest}`, { moved, bytes });
+      logger.child('usb').mark('USB', `SD 上已有的成品已补搬到外部盘：${moved} 项 / ${(bytes / 1024 / 1024).toFixed(1)}MB → ${dest}`, { moved, bytes });
     }
   } catch (e) {
-    logger.child('usb').warn(`剪切归档资源到外部盘失败：${(e as Error).message}`);
+    logger.child('usb').warn(`补搬成品到外部盘失败：${(e as Error).message}`);
   }
   return { moved, bytes };
 }

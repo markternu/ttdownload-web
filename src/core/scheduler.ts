@@ -4,6 +4,7 @@ import { logger, taskLog } from './logger';
 import { tasksRepo } from './db';
 import { freeBytes } from './disk';
 import { remainingBytesOf, reservedByRunningTasks } from './space';
+import { effectiveReserve } from '../services/usbMount';
 import { getSettings } from '../services/settings';
 import { conflict, notFound } from '../utils/http';
 import { handoffToArchive } from '../services/pipeline';
@@ -132,7 +133,7 @@ async function pollRunning(): Promise<number> {
 async function applySpacePressure(): Promise<void> {
   // 用户规则：**只有「可用于下载 = 系统实际可用 − 预留 ≤ 0」**（df 只剩预留的 10G）才允许暂停。
   // 绝不因为"运行中任务还差多少"去暂停 —— 那会让 df 明明有空闲却显示"空间不足，已自动暂停"。
-  const usable = freeBytes() - getSettings().reserveFreeBytes;
+  const usable = freeBytes() - effectiveReserve();
   if (usable > 0) return;
   const running = tasksRepo.byStatus(['downloading', 'parsing']) as TaskWithPayload[];
   // 已 100%（下完了只等扫货）的不暂停：暂停它只会让 transmission 里永远"暂停"，毫无意义。
@@ -169,7 +170,7 @@ async function applySpacePressure(): Promise<void> {
 async function resumeSpacePaused(): Promise<void> {
   const paused = tasksRepo.byStatus(['paused']) as TaskWithPayload[];
   // 用户规则：只有「可用于下载 = 系统实际可用 − 预留 > 0」才恢复；不扣运行中任务。
-  const usable = freeBytes() - getSettings().reserveFreeBytes;
+  const usable = freeBytes() - effectiveReserve();
   if (usable <= 0) return;
   let spendable = usable;
   const nothingRunning = tasksRepo.byStatus(['downloading', 'parsing']).length === 0;
@@ -214,7 +215,7 @@ async function startWaiting(): Promise<void> {
   // 用户规则（严格 FIFO + 预留）：
   //   可用于下载 = 系统实际可用 − 预留 − **已在跑的任务还差多少**（它们承诺的空间要占着）；
   //   队首任务装得下就放行并继续扣掉它要占的空间；装不下就停在这里（后面不许插队）。
-  let usable = freeBytes() - settings.reserveFreeBytes - reservedByRunningTasks();
+  let usable = freeBytes() - effectiveReserve() - reservedByRunningTasks();
   for (const task of waiting) {
     // 0 = 不限：只让磁盘空间当"闸门"（用户要的就是这个：有空间就下）
     if (settings.maxConcurrent > 0 && running.length >= settings.maxConcurrent) break;
@@ -252,7 +253,7 @@ async function startWaiting(): Promise<void> {
         needBytes: need,
         usableBytes: usable,
         freeBytes: freeBytes(),
-        reserveBytes: settings.reserveFreeBytes,
+        reserveBytes: effectiveReserve(),
         fifoBlocked: true,
       });
       skippedBySpace.push({ taskId: task.id, needBytes: need, usableBytes: usable });
@@ -296,7 +297,7 @@ async function startWaiting(): Promise<void> {
     logger.child('scheduler').mark('DISK_GATE',
       `本轮因空间不足跳过 ${skippedBySpace.length} 个任务，等回血后再来（顺序仍是先进先出）`, {
         skipped: skippedBySpace.slice(0, 10),
-        usableBytes: freeBytes() - settings.reserveFreeBytes,
+        usableBytes: freeBytes() - effectiveReserve(),
       });
   }
 
@@ -356,8 +357,8 @@ async function tick(): Promise<void> {
           waiting,
           running,
           freeBytes: free,
-          reserveBytes: settings.reserveFreeBytes,
-          usableBytes: free - settings.reserveFreeBytes - reserved,
+          reserveBytes: effectiveReserve(),
+          usableBytes: free - effectiveReserve() - reserved,
           moduleConcurrency: settings.moduleConcurrency,
           maxConcurrent: settings.maxConcurrent,
         });
@@ -380,7 +381,7 @@ export function startScheduler(): void {
   timer = setInterval(() => {
     void tick();
   }, config.schedulerIntervalMs);
-  logger.mark('BOOT', `统一下载调度器已启动（每 ${Math.round(config.schedulerIntervalMs / 1000)} 秒一轮，全局并发 ${getSettings().maxConcurrent}，保留空间 ${(getSettings().reserveFreeBytes / 1024 ** 3).toFixed(1)}G）`);
+  logger.mark('BOOT', `统一下载调度器已启动（每 ${Math.round(config.schedulerIntervalMs / 1000)} 秒一轮，全局并发 ${getSettings().maxConcurrent}，保留空间 ${(effectiveReserve() / 1024 ** 3).toFixed(1)}G）`);
 }
 
 export function stopScheduler(): void {

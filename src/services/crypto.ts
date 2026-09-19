@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { workDirs } from './usbMount';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -130,7 +131,8 @@ export function nextPublishName(): string {
   }
   for (let attempt = 0; attempt < 1000; attempt += 1) {
     const candidate = `${prefix}${idx}`;
-    const exists = fs.existsSync(path.join(config.dirs.consumer, candidate)) || fs.existsSync(path.join(config.dirs.archiveReady, candidate));
+    const wd = workDirs();
+    const exists = fs.existsSync(path.join(wd.consumer, candidate)) || fs.existsSync(path.join(wd.archiveReady, candidate));
     idx += 1;
     if (!exists) {
       try {

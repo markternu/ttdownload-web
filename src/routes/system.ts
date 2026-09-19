@@ -5,6 +5,7 @@ import { config, DIRS } from '../core/config';
 import { dbFileSize, computeStats, logsRepo } from '../core/db';
 import { dirUsage, freeBytes, statfsBytes, toolStatus, usableBytes } from '../core/disk';
 import { reservedByRunningTasks } from '../core/space';
+import { effectiveReserve } from '../services/usbMount';
 import { bus } from '../core/events';
 import { getSettings, getSettingsPublic, updateSettings } from '../services/settings';
 import {
@@ -56,14 +57,14 @@ systemRouter.get(
     //    reservedBytes 恒为 0，接口把"可用于下载"直接当成"还能再放行"，用户看到的数
     //    和调度器判定的数根本不是一回事。现在与调度器共用同一个算法（只算"还差多少"）。
     const reservedBytes = reservedByRunningTasks();
-    const usable = usableBytes(settings.reserveFreeBytes);
+    const usable = usableBytes(effectiveReserve());
     res.json({
       disk: {
         path: DIRS.root,
         totalBytes: sf.total,
         freeBytes: sf.free,
         usedBytes: sf.total - sf.free,
-        reserveBytes: settings.reserveFreeBytes,
+        reserveBytes: effectiveReserve(),
         usableBytes: usable,
         reservedBytes,
         admittableBytes: usable,
@@ -563,5 +564,5 @@ systemRouter.post(
 
 systemRouter.get('/free-space', (_req, res) => {
   const settings = getSettingsPublic();
-  res.json({ freeBytes: freeBytes(), reserveBytes: settings.reserveFreeBytes, usableBytes: usableBytes(settings.reserveFreeBytes) });
+  res.json({ freeBytes: freeBytes(), reserveBytes: effectiveReserve(), usableBytes: usableBytes(effectiveReserve()) });
 });
