@@ -414,7 +414,7 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
     // 3b) 再删掉对应的文件夹（只删这一个种子自己的目录，走白名单安全检查）
     //     "目录还有别的任务在用"的情况已经在 3-0b 提前挡掉了
     if (h.dir) {
-      const freed = cleanupBtTaskDirs(t as Task, h.torrentName ?? path.basename(h.dir), 'bt-harvest');
+      const freed = cleanupBtTaskDirs(t as Task, h.torrentName ?? path.basename(h.dir), 'bt-harvest', h.dir ? [h.dir] : []);
       logger.child('bt-harvest').mark('BT_HARVEST',
         `扫货完成，已清理 ${hidePath(h.dir)}${freed ? `（释放 ${(freed / 1024 ** 2).toFixed(1)}MB）` : ''}`, { freedBytes: freed });
       if (freed > 0) bus.emitSpaceFreed({ bytes: freed, reason: 'bt-harvest', detail: { taskId: t.id } });

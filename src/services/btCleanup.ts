@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { config } from '../core/config';
 import { bus } from '../core/events';
 import { logger } from '../core/logger';
@@ -53,9 +54,12 @@ export function isSafeToDelete(target: string): { ok: boolean; reason?: string }
 }
 
 /** 一个 BT 任务可能散落的所有目录 */
-export function candidateDirs(task: Task, torrentName: string): string[] {
+export function candidateDirs(task: Task, torrentName: string, extraDirs: string[] = []): string[] {
   const payload = (task as Task & { payload?: Record<string, unknown> }).payload ?? {};
   const out = new Set<string>();
+  // 已知的真实目录（扫货时是从磁盘上列出来的）优先收进来：名字里带特殊字符/括号/中文时，
+  // 靠"种子名拼路径"可能拼不出真实目录名，导致删了个不存在的地方、空间永远不释放。
+  for (const d of extraDirs) if (d) out.add(path.resolve(d));
   if (payload.downloadDir) out.add(path.resolve(String(payload.downloadDir)));
   const safeName = String(torrentName || '').replace(/[/\\]/g, '_').trim();
   if (safeName) {
@@ -201,9 +205,9 @@ function pruneEmptyDirs(dirs: string[]): string[] {
  *   ② 只删本任务自己的文件（payload.downloadedPaths + meta.files）
  *   ③ 收掉变空的目录；非空的保留并记日志
  */
-export function cleanupBtTaskDirs(task: Task, torrentName: string, reason: string): number {
+export function cleanupBtTaskDirs(task: Task, torrentName: string, reason: string, extraDirs: string[] = []): number {
   const t = tasksRepo.get(Number(task.id)) ?? task;
-  const dirs = candidateDirs(t, torrentName);
+  const dirs = candidateDirs(t, torrentName, extraDirs);
   const shared = findSharedDirs(t, dirs);
   const sharedSkipped = [...shared.keys()];
 
@@ -273,6 +277,41 @@ export function cleanupBtTaskDirs(task: Task, torrentName: string, reason: strin
   return freedBytes;
 }
 
+/** 递归修权限：文件属主是 transmission、父目录不可写时，root 才能删干净 */
+function chmodTree(dir: string): void {
+  const st = fs.lstatSync(dir);
+  if (st.isDirectory()) {
+    fs.chmodSync(dir, 0o755);
+    for (const name of fs.readdirSync(dir)) chmodTree(path.join(dir, name));
+  } else if (st.isFile()) {
+    fs.chmodSync(dir, 0o644);
+  }
+}
+
+/**
+ * 强制删目录。按"温和 → 强硬"三级来，并保留最后一次的真实 errno 用于报错：
+ *  ① fs.rmSync（正常情况）
+ *  ② 失败：递归 chmod 后再 rmSync（属主是 transmission / 父目录不可写 —— 线上真机遇到）
+ *  ③ 还失败：rm -rf -- <dir>（argv 传路径，不经过 shell；中文名、括号、超长名都不会有转义问题）
+ */
+function forceRemoveDir(dir: string): void {
+  let lastErr: unknown;
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    return;
+  } catch (e) { lastErr = e; }
+  try {
+    chmodTree(dir);
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    return;
+  } catch (e) { lastErr = e; }
+  try {
+    execFileSync('rm', ['-rf', '--', dir], { timeout: 120_000 });
+    return;
+  } catch (e) { lastErr = e; }
+  throw lastErr;
+}
+
 /** 底层：按目录整块删除（仅用于确定独占的目录；会做安全检查） */
 export function removeDirs(dirs: string[]): RemoveDirsResult {
   let freedBytes = 0;
@@ -287,12 +326,17 @@ export function removeDirs(dirs: string[]): RemoveDirsResult {
     }
     const size = pathSizeBytes(dir);
     try {
-      fs.rmSync(dir, { recursive: true, force: true });
+      forceRemoveDir(dir);
       freedBytes += size;
       removed.push(dir);
       logger.child('bt-cleanup').mark('BT_CLEANUP', `目录清理已删除: ${hidePath(dir)}`, { freedBytes: size });
     } catch (e) {
-      logger.child('bt-cleanup').error(`[MARK:BT_CLEANUP] 目录清理删除失败 ${hidePath(dir)}: ${(e as Error).message}`);
+      const err = e as NodeJS.ErrnoException;
+      // 把真实原因（errno/code/syscall）打出来，别再只给一句含糊的"删除失败"
+      logger.child('bt-cleanup').error(
+        `[MARK:BT_CLEANUP] 目录清理删除失败 ${hidePath(dir)}: ${err.code ?? ''} ${err.message}`,
+        { errno: err.errno, code: err.code, syscall: err.syscall, uid: process.getuid?.() },
+      );
       skipped.push(dir);
     }
   }
