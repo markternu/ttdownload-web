@@ -81,8 +81,8 @@ export function VideoPreviewCard({ result, onAdd, adding = false }: VideoPreview
               {result.platform || '未知平台'}
             </span>
             {result.degraded ? (
-              <Badge tone="danger" dot>
-                解析失败
+              <Badge tone="warning" dot>
+                未取到详情
               </Badge>
             ) : (
               <Badge tone="success" dot>
@@ -134,12 +134,12 @@ export function VideoPreviewCard({ result, onAdd, adding = false }: VideoPreview
 
           <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2.5 text-xs text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
             {result.degraded ? (
-              <div className="mb-2 rounded-lg border border-red-300/70 bg-red-50 px-2.5 py-2 text-[11px] text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
-                <p className="font-medium">解析失败：没拿到任何可用格式，直接下载多半也会失败</p>
+              <div className="mb-2 rounded-lg border border-amber-300/70 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+                <p className="font-medium">没取到视频详情，但**不影响下载**</p>
                 <p className="mt-1 leading-relaxed">{result.parseError || '未能获取视频详情（可能需要登录/会员权限）'}</p>
-                <p className="mt-1 leading-relaxed text-red-700 dark:text-red-300">
-                  请先按上面这句话处理（例如换出口 IP，或在「设置 → 公开视频（yt-dlp）」上传**已登录**的
-                  cookies.txt），处理完重新解析一次；解析成功（绿色「解析成功」）后再加入队列。
+                <p className="mt-1 leading-relaxed text-amber-700 dark:text-amber-300">
+                  直接点下面的按钮加入队列即可 —— 下载会按「最佳画质」自动尝试多套策略，多数情况下能下成功。
+                  若确实下不动，再去「设置 → 公开视频（yt-dlp）」上传一份 cookies.txt 兜底。
                 </p>
               </div>
             ) : null}
@@ -166,7 +166,7 @@ export function VideoPreviewCard({ result, onAdd, adding = false }: VideoPreview
               icon={<Download className="h-4 w-4" />}
               onClick={() => onAdd({ formatId: selected?.id ?? null, quality, format })}
             >
-              {result.degraded ? '仍要尝试下载（多半失败）' : '加入下载队列'}
+              {result.degraded ? '直接下载（拿不到详情也能下）' : '加入下载队列'}
             </Button>
             <span className="inline-flex items-center gap-1 text-[11px] text-slate-400">
               <AlertCircle className="h-3 w-3" />

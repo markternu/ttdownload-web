@@ -200,10 +200,15 @@ webvideoRouter.post(
       // 解析失败不阻断用户：返回 degraded 结果（前端可以“仍然下载”），
       // 真正能不能下交给下载时的多重策略去试。
       const message = (e as Error).message;
-      logger.warn(`解析失败 ${url}: ${message}`);
+      // ⚠️ 口径（真机教训）：解析和下载是两条独立路径 —— 解析（yt-dlp -J 拿元数据）被风控挡了，
+      //    下载那条（8 档策略阶梯）照样能下成功。所以提示必须中性，别让用户以为失败了。
+      const friendly =
+        `没拿到视频详情（${message}）—— 但这不影响下载：直接加入队列即可，` +
+        `下载会按「最佳画质」自动尝试多套策略，多数情况下能下成功。`;
+      logger.warn(`解析未拿到详情 ${url}: ${message}`);
       res.json({
         degraded: true,
-        parseError: message,
+        parseError: friendly,
         platform: detectPlatform(url),
         title: url,
         thumbnail: null,
