@@ -10,6 +10,7 @@ import {
   profileFor,
   SITE_PROFILES,
 } from '../services/cookieHarvest';
+import { extractDouyinViaBrowser, isDouyinUrl } from '../services/douyinBrowser';
 import { logger, taskLog } from '../core/logger';
 import { tailText } from '../core/procLog';
 import { toolStatus } from '../core/disk';
@@ -189,7 +190,9 @@ export async function parseVideo(
     cookies: opts.cookiesFile ? opts.cookiesFile : opts.cookiesFromBrowser ? `browser:${opts.cookiesFromBrowser}` : '(无)',
     client: clientArgs.length ? YOUTUBE_PARSE_CLIENTS : '(默认)',
   });
-  const info = await new Promise<YtDlpInfo>((resolve, reject) => {
+  let info: YtDlpInfo;
+  try {
+  info = await new Promise<YtDlpInfo>((resolve, reject) => {
     const child = spawn(ytdlpBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -233,6 +236,30 @@ export async function parseVideo(
       }
     });
   });
+  } catch (e) {
+    // ★ 抖音兜底：yt-dlp 的 Douyin 提取器被 a_bogus 风控挡住时，改用浏览器兜底
+    //   （让抖音页面自己的 JS 完成签名，我们截它的详情接口响应）—— 不重写签名算法。
+    if (isDouyinUrl(url)) {
+      const fb = await extractDouyinViaBrowser(url).catch((err) => {
+        scoped.warn(`[MARK:DOUYIN_FALLBACK] 浏览器兜底失败：${(err as Error).message}`);
+        return null;
+      });
+      if (fb) {
+        scoped.mark('YTDLP_PARSE', `yt-dlp 解析失败，已用浏览器兜底成功: ${url}`);
+        return {
+          platform: '抖音',
+          title: fb.title,
+          thumbnail: fb.thumbnail,
+          durationSec: fb.durationSec,
+          author: fb.author,
+          formats: fb.formats,
+          defaultFormatId: fb.defaultFormatId,
+          expectedBytes: fb.expectedBytes,
+        };
+      }
+    }
+    throw e;
+  }
 
   const formatsRaw = Array.isArray(info.formats) ? info.formats : [];
   const formats = formatsRaw.map(normalizeFormat).filter((f): f is FormatOption => !!f);
