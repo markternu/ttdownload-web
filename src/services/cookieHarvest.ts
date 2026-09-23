@@ -582,7 +582,13 @@ export async function ensureHarvested(
       // ① 优先不用浏览器（快、稳、不招风控）
       let via: 'http' | 'browser' = 'http';
       let cookies: ParsedCookie[] = [];
-      if (profile.httpProvider && !launcherOverride) {
+      // ⚠️ 强制重抓（自愈 / 手动刷新）时**跳过 HTTP 接口**：ttwid 那个接口是"看心情"的，
+      //    上一次就是因为不认它才失败的；再走同一条路只会拿到同样不认的 cookie，自愈等于白做。
+      //    这时直接用持久化浏览器（会话是热的）拿完整 cookie，才有意义。
+      if (opts.force && profile.httpProvider && !launcherOverride) {
+        scoped.info(`[MARK:${COOKIE_MARKER}] ${profile.name}：强制重抓 —— 跳过 HTTP 接口，直接用持久化浏览器获取完整 cookie`);
+      }
+      if (profile.httpProvider && !launcherOverride && !opts.force) {
         try {
           cookies = await profile.httpProvider();
           scoped.info(`[MARK:${COOKIE_MARKER}] ${profile.name}：HTTP 接口直接拿到 ${cookies.length} 条 cookie（未启动浏览器）`);
