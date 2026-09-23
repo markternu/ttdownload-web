@@ -216,13 +216,15 @@ export async function extractDouyinViaBrowser(url: string, timeoutMs = 45_000): 
         const { src, w, h, d } = JSON.parse(info) as { src: string; w: number; h: number; d: number };
         if (!src || src.startsWith('blob:') || src.startsWith('data:')) return;
         const short = w && h ? Math.min(w, h) : h || w;
+        // 读取时播放器可能还没把 videoWidth/Height 填好（会算出 10p 这种假维度）→ 不合理就用「默认」
+        const res = short && short >= 100 ? `${short}p` : '默认';
         found = {
           title: '抖音视频',
           author: null,
           thumbnail: null,
           durationSec: Number.isFinite(d) && d > 0 ? Math.round(d) : null,
           formats: [
-            { id: 'video-el', ext: 'mp4', resolution: short ? `${short}p` : '?', label: `${short ? `${short}p` : '默认'} · MP4 · 视频+音频`, filesize: null, vcodec: 'h264', acodec: 'aac' },
+            { id: 'video-el', ext: 'mp4', resolution: res, label: `${res} · MP4 · 视频+音频`, filesize: null, vcodec: 'h264', acodec: 'aac' },
           ],
           defaultFormatId: 'video-el',
           expectedBytes: 0,
