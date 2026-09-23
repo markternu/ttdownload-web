@@ -197,10 +197,47 @@ export async function extractDouyinViaBrowser(url: string, timeoutMs = 45_000): 
       }
     };
 
+    // 通道③：读页面播放器最终的播放地址（最直接：播放器自己会把 src 设成真实可播地址）
+    const readVideoEl = async (): Promise<void> => {
+      if (found) return;
+      try {
+        const info = (await page.evaluate(
+          `(() => {
+             const v = document.querySelector('video');
+             if (!v) return null;
+             let src = v.currentSrc || v.src || '';
+             if (!src) { const s = v.querySelector('source'); if (s) src = s.src || ''; }
+             if (!src) return null;
+             const rect = v.getBoundingClientRect ? v.getBoundingClientRect() : { width: v.videoWidth, height: v.videoHeight };
+             return JSON.stringify({ src, w: v.videoWidth || Math.round(rect.width) || 0, h: v.videoHeight || Math.round(rect.height) || 0, d: v.duration || 0 });
+           })()`,
+        )) as string | null;
+        if (!info) return;
+        const { src, w, h, d } = JSON.parse(info) as { src: string; w: number; h: number; d: number };
+        if (!src || src.startsWith('blob:') || src.startsWith('data:')) return;
+        const short = w && h ? Math.min(w, h) : h || w;
+        found = {
+          title: '抖音视频',
+          author: null,
+          thumbnail: null,
+          durationSec: Number.isFinite(d) && d > 0 ? Math.round(d) : null,
+          formats: [
+            { id: 'video-el', ext: 'mp4', resolution: short ? `${short}p` : '?', label: `${short ? `${short}p` : '默认'} · MP4 · 视频+音频`, filesize: null, vcodec: 'h264', acodec: 'aac' },
+          ],
+          defaultFormatId: 'video-el',
+          expectedBytes: 0,
+        };
+      } catch {
+        /* ignore */
+      }
+    };
+
     const deadline = Date.now() + timeoutMs;
-    // 先给页面一点时间跑 JS，再开始轮询两条通道
+    // 先给页面一点时间跑 JS，再开始轮询三条通道
     await page.waitForTimeout(1500);
     while (!found && Date.now() < deadline) {
+      await readVideoEl();
+      if (found) break;
       await readSsr();
       if (found) break;
       await page.waitForTimeout(700);
