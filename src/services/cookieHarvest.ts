@@ -275,6 +275,11 @@ export function defaultHarvestSites(): string[] {
   return ['douyin', 'tiktok', 'bilibili'];
 }
 
+/** 持久化浏览器 profile 目录：会话/Storage 留在里面，cookie 才能"一直新鲜"（不必人工换） */
+export function chromeProfileDir(): string {
+  return path.join(config.dirs.state, 'chrome-profile');
+}
+
 export function harvestedDir(): string {
   return path.join(config.dirs.state, 'cookies-harvested');
 }
@@ -493,32 +498,51 @@ async function launchAndHarvest(profile: CookieSiteProfile): Promise<ParsedCooki
     );
   }
 
-  let browser;
+  const profileDir = chromeProfileDir();
+  fs.mkdirSync(profileDir, { recursive: true });
+  let ctx;
   try {
-    browser = await chromium.launch({
+    // ⚠️ 关键：用**持久化 profile**（launchPersistentContext），不是每次开一个空白浏览器。
+    //    抖音的 __ac_signature / msToken 是页面 JS 挑战生成的，冷启动每次都要从零过挑战，
+    //    固定等 8 秒经常没跑完 → 只捞到 ttwid/__ac_nonce → yt-dlp 报 "Fresh cookies are needed"。
+    //    持久化 profile 让会话、localStorage、Service Worker 都留着，cookie 能长期保持"新鲜"。
+    ctx = await chromium.launchPersistentContext(profileDir, {
       ...(exe ? { executablePath: exe } : {}),
       headless: true,
+      userAgent: DESKTOP_UA,
+      locale: 'zh-CN',
+      timezoneId: 'Asia/Shanghai',
+      viewport: { width: 1366, height: 900 },
       args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
     });
   } catch (e) {
     throw new Error(
-      `启动无头浏览器失败（chromium=${exe ?? 'playwright 自带'}）：${(e as Error).message}。` +
+      `启动无头浏览器失败（chromium=${exe ?? 'playwright 自带'}，profile=${profileDir}）：${(e as Error).message}。` +
         `Debian/Ubuntu/树莓派可执行：sudo apt install -y chromium`,
     );
   }
 
   try {
-    const ctx = await browser.newContext({
-      userAgent: DESKTOP_UA,
-      locale: 'zh-CN',
-      timezoneId: 'Asia/Shanghai',
-      viewport: { width: 1366, height: 900 },
-    });
-    const page = await ctx.newPage();
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
     page.setDefaultTimeout(30_000);
     await page.goto(profile.harvestUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
-    // 等 JS 挑战（抖音的 __ac_signature / 谷歌的同意页）跑完
+    // 不只是傻等固定时间：轮询 cookie 数量直到"稳定"（挑战跑完不会再新增），最多再等 25 秒
+    const capMs = Math.max(profile.waitMs, 25_000);
+    const start = Date.now();
     await page.waitForTimeout(profile.waitMs);
+    let lastCount = -1;
+    let stable = 0;
+    while (Date.now() - start < capMs) {
+      const now = (await ctx.cookies()).length;
+      if (now === lastCount) {
+        stable += 1;
+        if (stable >= 2) break;
+      } else {
+        stable = 0;
+        lastCount = now;
+      }
+      await page.waitForTimeout(700);
+    }
     const cookies = await ctx.cookies();
     await ctx.close();
     return cookies.map((c) => ({
@@ -532,7 +556,8 @@ async function launchAndHarvest(profile: CookieSiteProfile): Promise<ParsedCooki
       httpOnly: !!c.httpOnly,
     }));
   } finally {
-    await browser.close().catch(() => undefined);
+    // 持久化 context 关闭即关掉浏览器；成功路径已关过，这里兜底
+    await ctx.close().catch(() => undefined);
   }
 }
 
