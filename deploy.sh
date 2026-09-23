@@ -344,10 +344,95 @@ CONF
   log "拥塞控制已启用 BBR（原 ${cur}）"
 }
 
-# transmission：没装则必须用工程自带脚本安装（交互提示原样保留，供用户输入白名单/密码等）
+# transmission RPC 默认密码（用户要求：等 60 秒没人输入就用它）
+TRANSMISSION_DEFAULT_PASSWORD="${TRANSMISSION_DEFAULT_PASSWORD:-123456a}"
+
+# 非交互自动安装 + 配置 transmission（全新机器无人值守也能装好；不再依赖那个必须交互的脚本）
+auto_install_transmission() {
+  log "未检测到 transmission，自动安装 transmission-daemon ..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq >/dev/null 2>&1 || warn "apt-get update 失败，继续尝试安装"
+  if ! apt-get install -y -qq transmission-daemon transmission-cli >/dev/null 2>&1; then
+    warn "自动安装 transmission 失败"
+    return 1
+  fi
+  systemctl stop transmission-daemon >/dev/null 2>&1 || true
+
+  local dl inc
+  dl="$(grep -E '^BT_DOWNLOAD_DIR=' .env 2>/dev/null | cut -d= -f2-)"; dl="${dl:-/var/lib/transmission/downloads}"
+  inc="$(grep -E '^TRANSMISSION_INCOMPLETE_DIR=' .env 2>/dev/null | cut -d= -f2-)"; inc="${inc:-/var/lib/transmission/incomplete}"
+  mkdir -p "$dl" "$inc" /var/lib/transmission-daemon
+  chown -R debian-transmission:debian-transmission /var/lib/transmission /var/lib/transmission-daemon 2>/dev/null || true
+
+  # 密码：交互式终端下等用户 60 秒；超时 / 非交互 → 用默认 123456a
+  local password=""
+  if [[ -t 0 ]]; then
+    printf '%s' "请设置 transmission RPC 密码（60 秒内不输入则自动使用 ${TRANSMISSION_DEFAULT_PASSWORD}）: "
+    read -r -t 60 password || true
+    echo
+  fi
+  [[ -n "$password" ]] || password="$TRANSMISSION_DEFAULT_PASSWORD"
+
+  if ! python3 - "$dl" "$inc" "$password" <<'PYEOF'; then
+import json, os, sys
+dl, inc, pwd = sys.argv[1], sys.argv[2], sys.argv[3]
+p = '/etc/transmission-daemon/settings.json'
+if not os.path.exists(p):
+    sys.exit(1)
+s = json.load(open(p))
+s.update({
+    'rpc-enabled': True,
+    'rpc-bind-address': '127.0.0.1',
+    'rpc-port': 9091,
+    'rpc-authentication-required': True,
+    'rpc-username': 'opengl',
+    'rpc-password': pwd,
+    'rpc-whitelist-enabled': False,
+    'download-dir': dl,
+    'incomplete-dir': inc,
+    'incomplete-dir-enabled': True,
+    'download-queue-enabled': False,
+    'seed-queue-enabled': False,
+    'speed-limit-down-enabled': False,
+    'speed-limit-up-enabled': False,
+    'alt-speed-enabled': False,
+    'ratio-limit-enabled': False,
+    'idle-seeding-limit-enabled': False,
+    'cache-size-mb': 64,
+    'peer-limit-global': 500,
+    'peer-limit-per-torrent': 100,
+})
+json.dump(s, open(p, 'w'), indent=4)
+PYEOF
+    warn "写 transmission 配置失败"
+    return 1
+  fi
+
+  systemctl enable transmission-daemon >/dev/null 2>&1 || true
+  systemctl start transmission-daemon >/dev/null 2>&1 || true
+  sleep 3
+  if ! systemctl is-active transmission-daemon >/dev/null 2>&1; then
+    warn "transmission-daemon 启动失败，请查看：journalctl -u transmission-daemon -n 30"
+    return 1
+  fi
+  mkdir -p "$dl" "$inc"
+  chown -R debian-transmission:debian-transmission /var/lib/transmission 2>/dev/null || true
+
+  # 凭据写回 .env（后端走 JSON-RPC，用这份凭据）
+  sed -i '/^TRANSMISSION_RPC_USER=/d;/^TRANSMISSION_RPC_PASSWORD=/d' .env
+  printf 'TRANSMISSION_RPC_USER=opengl\nTRANSMISSION_RPC_PASSWORD=%s\n' "$password" >> .env
+  chmod 600 .env 2>/dev/null || true
+  log "transmission 已安装并配置完成（RPC 用户 opengl / 密码 ${password} / 下载目录 ${dl}）"
+  return 0
+}
+
+# transmission：没装则优先**非交互自动安装**；自动装失败再退回工程自带的交互式脚本
 ensure_transmission() {
   if transmission_installed; then
     log "transmission 已安装（transmission-daemon），跳过安装（不做任何改动）"
+    return 0
+  fi
+  if auto_install_transmission; then
     return 0
   fi
   if [[ ! -f "$BT_INSTALLER" ]]; then
@@ -355,13 +440,11 @@ ensure_transmission() {
     return 1
   fi
   if ! prompt_ok; then
-    warn "当前环境没有可用终端（非交互执行），无法运行需要输入信息的 transmission 安装脚本。"
-    warn "请稍后手动执行：sudo bash ${BT_INSTALLER}"
-    warn "执行完再运行：sudo ./deploy.sh --restart"
+    warn "自动安装失败，且当前没有可用终端跑交互式安装脚本。"
+    warn "请稍后手动执行：sudo bash ${BT_INSTALLER}  然后 sudo ./deploy.sh --restart"
     return 1
   fi
-  log "未检测到 transmission，开始运行官方安装配置脚本：deploy/ubuntutr.sh"
-  log "（该脚本会进行交互式提问：IP 白名单、RPC 登录密码等，请按提示输入）"
+  log "回退到工程自带交互式安装脚本：deploy/ubuntutr.sh"
   echo
   if ! run_bt_installer; then
     warn "transmission 安装脚本执行失败（可稍后手动：sudo bash deploy/ubuntutr.sh）"

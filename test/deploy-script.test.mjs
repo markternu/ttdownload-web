@@ -173,24 +173,23 @@ test('aria2 未安装：会 apt install -y aria2', () => {
   assert.match(sb.calls(), /apt-get install -y aria2/);
 });
 
-test('transmission 未安装：必须调用工程自带的 deploy/ubuntutr.sh（保留其交互）', () => {
+test('transmission 未安装：自动 apt 安装（不再强制交互脚本）；密码默认 123456a 且等 60 秒', () => {
   const sb = makeSandbox({ withAria2: true, withTransmission: false });
   const out = sb.run();
   assert.match(out, /未检测到 transmission/);
-  assert.match(out, /ubuntutr\.sh/);
-  const calls = sb.calls();
-  assert.match(calls, /INSTALLER_CALLED/, '应调用安装脚本');
-  // 且不能擅自 apt 安装 transmission
-  assert.equal(/apt-get install[^\n]*transmission/.test(calls), false, '不得绕过交互脚本直接 apt 安装 transmission');
+  assert.match(sb.calls(), /apt-get install[^\n]*transmission/, '必须自动 apt 安装 transmission（无人值守也能装好）');
+  // 策略本身（写在脚本里，供交互式首装时使用）
+  assert.match(deploySrc, /TRANSMISSION_DEFAULT_PASSWORD:-123456a/, '默认密码必须是 123456a');
+  assert.match(deploySrc, /read -r -t 60/, '密码提示必须等 60 秒');
+  assert.match(deploySrc, /TRANSMISSION_RPC_PASSWORD=%s/, '密码要写回 .env');
 });
 
-test('两者都未安装：先装 aria2，再调用 transmission 交互安装脚本', () => {
+test('两者都未安装：aria2 与 transmission 都自动安装', () => {
   const sb = makeSandbox({ withAria2: false, withTransmission: false });
-  const out = sb.run();
+  sb.run();
   const calls = sb.calls();
   assert.match(calls, /apt-get install -y aria2/);
-  assert.match(calls, /INSTALLER_CALLED/);
-  assert.match(out, /交互式提问|请按提示输入/);
+  assert.match(calls, /apt-get install[^\n]*transmission/);
 });
 
 test('只有 transmission-daemon、没有 transmission-remote：视为已安装，绝不重跑安装脚本', () => {
