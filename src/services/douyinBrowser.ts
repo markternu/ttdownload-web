@@ -177,10 +177,13 @@ export async function extractDouyinViaBrowser(url: string, timeoutMs = 45_000): 
     const readSsr = async (): Promise<void> => {
       if (found) return;
       try {
+        // ⚠️ 真机侦察（2026-09）：抖音 PC 版视频页的数据在 window.SSR_RENDER_DATA 里，
+        //    不是老的 _ROUTER_DATA；接口响应里也没有详情（SSR + 客户端水合）。
+        //    所以这里把常见变量名都读一遍，再统一递归找视频对象。
         const raw = (await page.evaluate(
-          '(() => { try { return JSON.stringify([window._ROUTER_DATA ?? null, window.__INIT_PROPS__ ?? null, window.__INITIAL_STATE__ ?? null]); } catch { return ""; } })()',
+          '(() => { try { return JSON.stringify([window.SSR_RENDER_DATA ?? null, window._ROUTER_DATA ?? null, window.EXPOSE_DATA ?? null, window.__INIT_PROPS__ ?? null, window.__INITIAL_STATE__ ?? null]); } catch { return ""; } })()',
         )) as string;
-        if (!raw || raw === '[null,null,null]') return;
+        if (!raw) return;
         const arr = JSON.parse(raw) as unknown[];
         for (const part of arr) {
           const node = findVideoNode(part);
