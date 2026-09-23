@@ -23,7 +23,7 @@ const endIdx = deploySrc.indexOf(endMarker);
 assert.ok(startIdx > 0 && endIdx > startIdx, '应从 deploy.sh 中提取到依赖处理函数');
 const functionsBlock = deploySrc.slice(startIdx, endIdx);
 
-function makeSandbox({ withAria2, withTransmission, withTransmissionRemote = withTransmission, fakeInstallerBody, aptNodeConflict = false, stubCurl = false, extraCalls = '' }) {
+function makeSandbox({ withAria2, withTransmission, withTransmissionRemote = withTransmission, fakeInstallerBody, aptNodeConflict = false, stubCurl = false, extraCalls = '', stubs = {}, curlBody = '', env = {} }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ttdl-deploy-'));
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin, { recursive: true });
@@ -74,6 +74,8 @@ function makeSandbox({ withAria2, withTransmission, withTransmissionRemote = wit
     writeStub('transmission-daemon', 'echo transmission-daemon-mock');
     if (withTransmissionRemote) writeStub('transmission-remote', 'echo transmission-remote-mock');
   }
+  // 通用桩：测试自己提供某个命令的假实现（如假 node / 假 deno）
+  for (const [name, body] of Object.entries(stubs)) writeStub(name, body);
   // apt-get 桩：只记录被调用的参数；aptNodeConflict=1 时模拟真机那个"held broken packages"
   if (aptNodeConflict) {
     writeStub(
@@ -101,7 +103,8 @@ exit 0`,
   }
   writeStub('systemctl', `echo "systemctl $@" >> ${logFile}`);
   // curl 桩：ensure_node 会 `curl ... | bash -` 配置 NodeSource 源；测试里不打网络
-  if (stubCurl) writeStub('curl', `echo "curl $@" >> ${logFile}`);
+  if (curlBody) writeStub('curl', curlBody);
+  else if (stubCurl) writeStub('curl', `echo "curl $@" >> ${logFile}`);
 
   // 假的 transmission 安装脚本（真实场景是 deploy/ubuntutr.sh，交互提示原样保留）
   fs.mkdirSync(path.join(dir, 'deploy'), { recursive: true });
@@ -112,13 +115,19 @@ exit 0`,
     { mode: 0o755 },
   );
 
+  const envLines = Object.entries(env)
+    .map(([k, v]) => `export ${k}="${String(v).split('__SANDBOX__').join(dir)}"`)
+    .join('\n');
+
   const harness = path.join(dir, 'harness.sh');
   fs.writeFileSync(
     harness,
     `#!/bin/bash
 PROJECT_DIR="${dir}"
 BT_INSTALLER="${installer}"
-PATH="${bin}:${sysBin}"
+${envLines}
+PATH_EXTRA="\${PATH_EXTRA:-}"
+PATH="${bin}:${sysBin}\${PATH_EXTRA:+:\$PATH_EXTRA}"
 APT_SOURCES_DIR="${aptSources}"
 DEPLOY_ASSUME_TTY=1
 export PATH DEPLOY_ASSUME_TTY APT_SOURCES_DIR
@@ -483,4 +492,138 @@ test('nginx-proxy-toggle.sh：可执行、危险操作有护栏（备份 / nginx
   assert.match(text, /write_file_atomic/, '应使用可移植的原子写入');
   // 调用方（Node 服务）靠这一行解析结果
   assert.match(text, /TTDL_NGINX_PROXY_RESULT=/, '应输出机器可解析的结果行');
+});
+
+// ---------------------------------------------------------------------------
+//  JS 运行时（deno）—— 2026-09-23 全新树莓派从头部署时抓到的血案
+//
+//  现象：部署日志打印"✅ YouTube 下载依赖齐全"，体检却说"✗ JS 运行时 缺失"，
+//        实机上 /usr/bin/deno 是**断链**、真身躺在 /root/.deno/bin/deno。
+//  根因（两个，必须一起修）：
+//   ① `if DENO_INSTALL=/usr/local curl -fsSL https://deno.land/install.sh | sh -s -- -y`
+//      环境变量只作用于**管道左边的 curl**，右边的 sh 收不到 → deno 装进 $HOME/.deno；
+//   ② 部署报告用 `{ deno…; } || { bun…; } || { qjs…; } || { node -v; }` 的回落链取值，
+//      deno 断链时一路落到 `node -v`(v20) → 非空 → 报"齐全"；而 node<22 并不算可用运行时。
+// ---------------------------------------------------------------------------
+
+/** 模拟 deno.land/install.sh：只认 **sh 进程自己看到的** DENO_INSTALL（这正是官方脚本的行为） */
+const FAKE_DENO_CURL = `case "$*" in
+  *deno.land/install.sh*)
+    cat <<'CURL_EOF'
+#!/bin/sh
+if [ -n "$DENO_INSTALL" ]; then dir="$DENO_INSTALL"; else dir="$HOME/.deno"; fi
+mkdir -p "$dir/bin"
+cat > "$dir/bin/deno" <<'DENO_EOF'
+#!/bin/bash
+if [ "$1" = "--version" ]; then echo "deno 2.9.7 (stable, release, aarch64-unknown-linux-gnu)"; exit 0; fi
+echo "deno-stub"
+DENO_EOF
+chmod +x "$dir/bin/deno"
+CURL_EOF
+    ;;
+esac`;
+
+test('【血案回归】deno 的 DENO_INSTALL 必须作用于管道右边的 sh（否则装进 $HOME/.deno、留下断链）', () => {
+  const sb = makeSandbox({
+    withAria2: false,
+    withTransmission: false,
+    curlBody: FAKE_DENO_CURL,
+    env: {
+      DENO_INSTALL_DIR: '__SANDBOX__/usr-local',
+      DENO_LINK_DIR: '__SANDBOX__/usr-bin',
+      HOME: '__SANDBOX__/home',
+      PATH_EXTRA: '__SANDBOX__/usr-bin',
+    },
+    extraCalls: 'mkdir -p "$DENO_LINK_DIR" "$HOME"\ninstall_js_runtime',
+  });
+  const out = sb.run();
+
+  const installed = path.join(sb.dir, 'usr-local', 'bin', 'deno');
+  const inHome = path.join(sb.dir, 'home', '.deno', 'bin', 'deno');
+
+  assert.ok(
+    fs.existsSync(installed),
+    `deno 必须装进 DENO_INSTALL 指定的目录 ${installed}（DENO_INSTALL 没传给 sh 就会落到 $HOME/.deno）`,
+  );
+  assert.equal(fs.existsSync(inHome), false, 'deno 不该落进 $HOME/.deno —— 出现它说明 DENO_INSTALL 没作用于 sh');
+  // 装完必须真的能跑（不能只看安装器的退出码）
+  assert.match(out, /deno 已安装：deno 2\.9\.7/, '装成后必须打印真实版本');
+  assert.doesNotMatch(out, /未能安装任何 JS 运行时/, '装成了就不该报失败');
+  // 链接要指向真身，不能是断链
+  const link = path.join(sb.dir, 'usr-bin', 'deno');
+  assert.ok(fs.existsSync(link) && fs.existsSync(fs.realpathSync(link)), '链接必须能解析到真实二进制');
+});
+
+test('【血案回归】deno 装完仍不可用时不许报成功（安装器退出码不算数）', () => {
+  const sb = makeSandbox({
+    withAria2: false,
+    withTransmission: false,
+    // 安装器"成功"跑完，但产出的 deno 是**不可执行**的假货 → 必须落到失败分支
+    curlBody: `case "$*" in
+  *deno.land/install.sh*)
+    cat <<'CURL_EOF'
+#!/bin/sh
+mkdir -p "$HOME/.deno/bin"
+echo "not a runtime"
+CURL_EOF
+    ;;
+esac`,
+    env: { DENO_INSTALL_DIR: '__SANDBOX__/usr-local', DENO_LINK_DIR: '__SANDBOX__/usr-bin', HOME: '__SANDBOX__/home' },
+    extraCalls: 'mkdir -p "$DENO_LINK_DIR" "$HOME"\ninstall_js_runtime',
+  });
+  const { out } = sb.runAllowFail();
+  assert.match(out, /未能安装任何 JS 运行时/, '拿不到可用运行时就必须明说失败');
+  assert.doesNotMatch(out, /deno 已安装/, '不许在运行时不可用时打印"已安装"');
+});
+
+test('js_runtime_version 与 js_runtime_available 同口径：node<22 不算可用运行时', () => {
+  // 只有 node 20 → 版本串必须为空（旧代码会回落到 `node -v` 打出 v20.x，从而谎报"齐全"）
+  const onlyNode20 = makeSandbox({
+    withAria2: false,
+    withTransmission: false,
+    stubs: { node: 'if [ "$1" = "-v" ]; then echo v20.20.2; fi' },
+    extraCalls: 'echo "JSVER=[$(js_runtime_version)]"',
+  });
+  assert.match(onlyNode20.run(), /JSVER=\[\]/, 'node 20 不满足 node>=22，版本串必须为空');
+
+  // 有 deno → 打 deno 的版本
+  const withDeno = makeSandbox({
+    withAria2: false,
+    withTransmission: false,
+    stubs: { deno: 'if [ "$1" = "--version" ]; then echo "deno 2.9.7 (stable)"; fi' },
+    extraCalls: 'echo "JSVER=[$(js_runtime_version)]"',
+  });
+  assert.match(withDeno.run(), /JSVER=\[deno 2\.9\.7 \(stable\)\]/, '有 deno 时应回报 deno 版本');
+});
+
+test('【血案回归】部署报告的"是否齐全"必须用 js_runtime_available 判定，不能再回落到 node -v', () => {
+  const start = deploySrc.indexOf('ensure_ytdlp_stack() {');
+  const end = deploySrc.indexOf('# Node.js（目标 20）');
+  assert.ok(start > 0 && end > start, '应能定位 ensure_ytdlp_stack');
+  const block = deploySrc.slice(start, end);
+
+  assert.match(block, /js="\$\(js_runtime_version\)"/, 'JS 运行时版本必须走 js_runtime_version（与判定同口径）');
+  assert.equal(
+    /js="\$\([^)]*node -v/m.test(block),
+    false,
+    '不允许再出现"回落到 node -v"的取值链（会拿 node 20 冒充可用运行时）',
+  );
+  assert.match(block, /!\s*js_runtime_available/, '"是否齐全"必须由 js_runtime_available 判定');
+});
+
+test('【血案回归】全仓库不许再出现 `DENO_INSTALL=… curl … | sh`（变量给错进程，装了个寂寞）', () => {
+  // 说明：DENO_INSTALL 写在管道**左边**只影响 curl，右边的 sh 收不到 →
+  // deno 落进 $HOME/.deno、/usr/local/bin/deno 不存在 → 死链 + YouTube 永久失败。
+  // 这里把 deploy.sh、修复脚本、用户文档一起锁住（§2：同一类问题所有调用点一次改完）。
+  const targets = ['deploy.sh', 'deploy/scripts/fix-ytdlp.sh', '使用教程.md', 'README.md'];
+  for (const rel of targets) {
+    const p = path.join(projectRoot, rel);
+    if (!fs.existsSync(p)) continue;
+    for (const [i, line] of fs.readFileSync(p, 'utf8').split('\n').entries()) {
+      if (/^\s*#/.test(line)) continue; // 注释里举例说明是允许的
+      if (/DENO_INSTALL=\S*\s+curl/.test(line)) {
+        assert.fail(`${rel}:${i + 1} DENO_INSTALL 写在 curl 一侧（对 sh 无效）：${line.trim()}`);
+      }
+    }
+  }
 });

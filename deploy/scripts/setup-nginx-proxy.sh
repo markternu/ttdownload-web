@@ -102,7 +102,7 @@ if [ "$PRINT_ONLY" = 1 ]; then
   exit 0
 fi
 
-[ "$(id -u)" = "0" ] || die "需要 root（网页「修复脚本」页执行时本身就是 root）"
+[ "$(id -u)" = "0" ] || die "需要 root：sudo bash deploy/scripts/setup-nginx-proxy.sh"
 
 # ---------- nginx 是否可用 ----------
 MARK "1. 检查 nginx"

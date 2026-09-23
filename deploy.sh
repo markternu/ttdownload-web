@@ -194,7 +194,7 @@ print_dep_status() {
   if have_cmd yt-dlp; then
     echo "  ✓ yt-dlp      $(yt-dlp --version 2>/dev/null)"
     if pip3 show yt-dlp-ejs >/dev/null 2>&1; then echo "  ✓ yt-dlp-ejs  已安装（n challenge 求解脚本）"; else echo "  ✗ yt-dlp-ejs  未安装 → YouTube 会报 No video formats found（部署时会自动补）"; fi
-    if js_runtime_available; then echo "  ✓ JS 运行时   $( { deno --version 2>/dev/null | head -1; } || { node -v; } )"; else echo "  ✗ JS 运行时   缺失（deno/bun/quickjs/node>=22）→ YouTube 一定失败（部署时会自动装 deno）"; fi
+    if js_runtime_available; then echo "  ✓ JS 运行时   $(js_runtime_version)"; else echo "  ✗ JS 运行时   缺失（deno/bun/quickjs/node>=22）→ YouTube 一定失败（部署时会自动装 deno）"; fi
   else
     echo "  ✗ yt-dlp      未安装（公开视频模块需要）"
   fi
@@ -529,42 +529,70 @@ js_runtime_available() {
   return 1
 }
 
+# 「可用」运行时的版本号；没有可用运行时输出空串。
+# 打印与判定**共用 js_runtime_available 的口径**：node<22 不算数 —— 血案见 install_js_runtime()。
+js_runtime_version() {
+  if command -v deno >/dev/null 2>&1; then deno --version 2>/dev/null | head -1; return 0; fi
+  if command -v bun  >/dev/null 2>&1; then bun  --version 2>/dev/null | head -1; return 0; fi
+  if command -v qjs  >/dev/null 2>&1; then qjs  --version 2>&1 | head -1; return 0; fi
+  if command -v node >/dev/null 2>&1 && [[ "$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)" -ge 22 ]]; then node -v; return 0; fi
+  return 0
+}
+
 install_js_runtime() {
-  js_runtime_available && { log "JS 运行时已就绪：$( { deno --version 2>/dev/null | head -1; } || { bun --version 2>/dev/null; } || { node -v; } )"; return 0; }
+  # 目录可被环境变量覆盖：测试里指向临时目录，免得真去动服务器的 /usr/local（同 APT_SOURCES_DIR 的先例）
+  local DENO_DIR="${DENO_INSTALL_DIR:-/usr/local}"
+  local LINK_DIR="${DENO_LINK_DIR:-/usr/bin}"
+
+  js_runtime_available && { log "JS 运行时已就绪：$(js_runtime_version)"; return 0; }
 
   log "安装 JS 运行时（yt-dlp 解 YouTube n challenge 必需）..."
   # ① 官方安装脚本（deno.land）
-  if DENO_INSTALL=/usr/local curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null 2>&1; then
-    ln -sf /usr/local/bin/deno /usr/bin/deno 2>/dev/null || true
-    log "deno 已安装：$(deno --version 2>/dev/null | head -1)"
-    return 0
+  #   ⚠️⚠️ 血案（2026-09-23 全新树莓派从头部署）：这行原来写成
+  #        `if DENO_INSTALL=/usr/local curl -fsSL https://deno.land/install.sh | sh -s -- -y`
+  #      环境变量只作用于**管道左边的 curl**，右边的 sh 收不到 → deno 被装进安装脚本的默认位置
+  #      $HOME/.deno（sudo 部署时是 /root/.deno），紧随其后的 `ln -sf /usr/local/bin/deno`
+  #      只造出一个**断链**。结果：`command -v deno` 找不到、yt-dlp 打出
+  #      `JS Challenge Providers: ... deno (unavailable)`、YouTube 永远 "No video formats found"，
+  #      而部署日志却因为下面第 641 行的口径错误照样打印"✅ 齐全"。
+  #      规矩：DENO_INSTALL 必须挂在 **sh 那一侧**；装完必须**真的能跑**（js_runtime_available）才算成功。
+  if curl -fsSL https://deno.land/install.sh | DENO_INSTALL="$DENO_DIR" sh -s -- -y >/dev/null 2>&1 \
+    && [[ -x "${DENO_DIR}/bin/deno" ]]; then
+    ln -sf "${DENO_DIR}/bin/deno" "${LINK_DIR}/deno" 2>/dev/null || true
+    if js_runtime_available; then
+      log "deno 已安装：$(deno --version 2>/dev/null | head -1)"
+      return 0
+    fi
   fi
-  warn "deno.land 安装失败，改用 GitHub release"
+  warn "deno.land 安装失败（或装完仍不可用），改用 GitHub release"
 
   # ② GitHub release（按架构）
+  local DENO_ASSET=""
   case "$(uname -m)" in
     aarch64|arm64) DENO_ASSET="deno-aarch64-unknown-linux-gnu.zip" ;;
     x86_64|amd64)  DENO_ASSET="deno-x86_64-unknown-linux-gnu.zip" ;;
     *)             DENO_ASSET="" ;;
   esac
   if [[ -n "$DENO_ASSET" ]] && curl -fL --retry 2 -o /tmp/deno.zip "https://github.com/denoland/deno/releases/latest/download/${DENO_ASSET}" >/dev/null 2>&1; then
-    if command -v unzip >/dev/null 2>&1; then unzip -o -q /tmp/deno.zip -d /usr/local/bin; else python3 -c "import zipfile;zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')"; fi
-    chmod +x /usr/local/bin/deno 2>/dev/null || true
-    ln -sf /usr/local/bin/deno /usr/bin/deno 2>/dev/null || true
+    mkdir -p "${DENO_DIR}/bin"
+    if command -v unzip >/dev/null 2>&1; then unzip -o -q /tmp/deno.zip -d "${DENO_DIR}/bin"; else python3 -c "import zipfile;zipfile.ZipFile('/tmp/deno.zip').extractall('${DENO_DIR}/bin')"; fi
+    chmod +x "${DENO_DIR}/bin/deno" 2>/dev/null || true
     rm -f /tmp/deno.zip
-    if command -v deno >/dev/null 2>&1; then log "deno 已安装（GitHub release）：$(deno --version 2>/dev/null | head -1)"; return 0; fi
+    ln -sf "${DENO_DIR}/bin/deno" "${LINK_DIR}/deno" 2>/dev/null || true
+    if js_runtime_available; then log "deno 已安装（GitHub release）：$(deno --version 2>/dev/null | head -1)"; return 0; fi
   fi
   warn "GitHub release 也失败，尝试发行版仓库的 quickjs"
 
   # ③ 发行版仓库的 quickjs（体积小、apt 直装）
-  if apt-get install -y quickjs >/dev/null 2>&1 && command -v qjs >/dev/null 2>&1; then
-    log "quickjs 已安装：$(qjs --version 2>&1 | head -1)"
+  if apt-get install -y quickjs >/dev/null 2>&1 && js_runtime_available; then
+    log "quickjs 已安装：$(js_runtime_version)"
     return 0
   fi
 
   # ④ npm 上的 deno 包（有些环境只有 npm 通）
-  if command -v npm >/dev/null 2>&1 && npm install -g deno >/dev/null 2>&1 && command -v deno >/dev/null 2>&1; then
-    log "deno 已通过 npm 安装：$(deno --version 2>/dev/null | head -1)"
+  #    注意：npm -g 装到 npm 的 prefix（如 /usr/local/bin），可能不在 PATH 里 → 同样要**验证能跑**
+  if command -v npm >/dev/null 2>&1 && npm install -g deno >/dev/null 2>&1 && js_runtime_available; then
+    log "deno 已通过 npm 安装：$(js_runtime_version)"
     return 0
   fi
 
@@ -635,12 +663,17 @@ ensure_ytdlp_stack() {
   install_js_runtime || true
 
   # 如实汇报（这行会出现在部署日志与「网络自检」里）
+  #   ⚠️ 血案（2026-09-23）：这里原来把"能否用"写成 `{ deno ...; } || { bun ...; } || { qjs ...; } || { node -v; }`
+  #   的回落链。deno 那条是**断链**时，链子会一路落到 `node -v` 打印 v20.20.2 → 变量非空 →
+  #   直接打印"✅ YouTube 下载依赖齐全"，而 node 20 **不满足** js_runtime_available 要求的 >=22。
+  #   结果就是"部署日志说齐全、体检说缺失、YouTube 真的下不了"。
+  #   规矩：**判定只有一处**（js_runtime_available），打印复用 js_runtime_version，两者口径必须一致。
   local ytv ejs js
   ytv="$(yt-dlp --version 2>/dev/null || echo 未安装)"
   ejs="$(pip3 show yt-dlp-ejs 2>/dev/null | awk -F': ' '/^Version/{print $2}' || true)"
-  js="$( { deno --version 2>/dev/null | head -1; } || { bun --version 2>/dev/null; } || { qjs --version 2>&1 | head -1; } || { node -v 2>/dev/null; } )"
+  js="$(js_runtime_version)"
   log "公开视频依赖：yt-dlp ${ytv}｜yt-dlp-ejs ${ejs:-缺失}｜JS 运行时 ${js:-缺失}"
-  if [[ -z "${ejs}" ]] || [[ -z "${js}" ]]; then
+  if [[ -z "${ejs}" ]] || ! js_runtime_available; then
     warn "⚠️  公开视频（YouTube）可能仍失败：缺 yt-dlp-ejs 或 JS 运行时 → 稍后执行 sudo bash deploy/scripts/fix-ytdlp.sh"
   else
     log "✅ YouTube 下载依赖齐全（yt-dlp + ejs + JS 运行时）"

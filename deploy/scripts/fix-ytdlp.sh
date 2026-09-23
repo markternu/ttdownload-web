@@ -97,15 +97,22 @@ if command -v deno >/dev/null 2>&1; then
   OK "deno 已安装：$(deno --version 2>/dev/null | head -1)"
 else
   export DENO_INSTALL=/usr/local
-  if curl -fsSL https://deno.land/install.sh | sh -s -- -y >/tmp/deno-install.log 2>&1; then
+  # ⚠️ 光看安装器退出码不算数（2026-09-23 血案：装完 /usr/local/bin/deno 根本不存在，
+  #    日志却报"已安装"）→ 必须**真的能跑**才算成功。
+  if curl -fsSL https://deno.land/install.sh | sh -s -- -y >/tmp/deno-install.log 2>&1 \
+     && /usr/local/bin/deno --version >/dev/null 2>&1; then
     OK "deno 已安装：$(/usr/local/bin/deno --version 2>/dev/null | head -1)"
   else
-    BAD "deno 安装脚本失败，改用 GitHub release"
+    BAD "deno 安装脚本失败（或装完不可执行），改用 GitHub release"
     if curl -fL -o /tmp/deno.zip https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip 2>/dev/null || \
        curl -fL -o /tmp/deno.zip https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip; then
       python3 -c "import zipfile;zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')" 2>/dev/null || unzip -o -q /tmp/deno.zip -d /usr/local/bin
       chmod +x /usr/local/bin/deno
-      OK "deno 已安装：$(/usr/local/bin/deno --version 2>/dev/null | head -1)"
+      if /usr/local/bin/deno --version >/dev/null 2>&1; then
+        OK "deno 已安装：$(/usr/local/bin/deno --version 2>/dev/null | head -1)"
+      else
+        BAD "deno 已落地但无法执行（架构不匹配/权限问题）"
+      fi
     else
       BAD "deno 下载失败（网络/GitHub 不通）：n challenge 仍无法求解，可稍后重跑本脚本"
     fi

@@ -31,7 +31,7 @@ die()  { printf '  [FAIL] %s\n' "$1" >&2; exit 1; }
 echo "ttdownload-web 修复脚本：项目目录属主归位"
 echo "时间：$(date '+%F %T %z')   主机：$(hostname)   用户：$(id -un)"
 
-[ "$(id -u)" = "0" ] || die "需要 root（网页「修复脚本」页执行时本身就是 root）"
+[ "$(id -u)" = "0" ] || die "需要 root：sudo bash deploy/scripts/fix-ownership.sh"
 
 MARK "1. 定位项目目录与目标属主"
 PROJ=""

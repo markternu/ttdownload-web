@@ -35,7 +35,7 @@ echo "ttdownload-web 修复脚本：Node 升级到 20"
 echo "时间：$(date '+%F %T %z')   主机：$(hostname)   用户：$(id -un)"
 
 if [ "$(id -u)" != "0" ]; then
-  die "请以 root 运行（sudo）。在网页「修复脚本」页上传执行时本身就是 root，可忽略此提示。"
+  die "请以 root 运行：sudo bash deploy/scripts/fix-node20.sh"
 fi
 
 MARK "1. 找到项目目录"

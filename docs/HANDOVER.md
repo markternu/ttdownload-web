@@ -255,18 +255,25 @@ grep -aE 'BT 扫货已启动|BT 超时策略已启动' /ttdownload/state/app.log
 ```
 
 全新机器（尤其是**机器上已经有 transmission-daemon**、脚本因此跳过 `ubuntutr.sh` 的机器）
-再补这四条 —— BT 最容易"装好了但静默不工作"：
+再补这五条 —— BT / 公开视频最容易"装好了但静默不工作"：
 
 ```bash
 # ① 四个后台 worker 都起来了吗
 grep -aE '流水线已启动|调度器已启动|BT 超时策略已启动|BT 扫货已启动' /ttdownload/state/app.log | tail -4
-# ② transmission RPC 真通吗（409 = 正常；401/000 = 凭据或服务不对，BT 一定不可用）
-curl -s -o /dev/null -w 'tr rpc http=%{http_code}\n' http://127.0.0.1:9091/transmission/rpc
+# ② transmission RPC 真通吗（**带凭据** 409 = 正常；不带凭据 401 也是正常的"要鉴权"，
+#    别把 401 误判成故障 —— 2026-09-23 实测确认）
+curl -s -u "$(grep -E '^TRANSMISSION_RPC_USER=' .env | cut -d= -f2-):$(grep -E '^TRANSMISSION_RPC_PASSWORD=' .env | cut -d= -f2-)" \
+  -o /dev/null -w 'tr rpc http=%{http_code}\n' http://127.0.0.1:9091/transmission/rpc
 # ③ transmission 实际用的下载目录 = .env 里的 BT_DOWNLOAD_DIR 吗（不一致就永远扫不到货）
 grep -h '"download-dir"' /etc/transmission-daemon/settings.json \
   /var/lib/transmission/.config/transmission-daemon/settings.json 2>/dev/null
 # ④ 磁盘：/ttdownload 可用空间必须 > 预留（默认 10G），否则所有任务永远"空间不足"
 df -h /ttdownload 2>/dev/null || df -h /
+# ⑤ 公开视频的 JS 运行时**真的在 PATH 里**（2026-09-23 血案：部署日志说"✅ 齐全"、实际是断链）
+command -v deno && deno --version
+yt-dlp -v --simulate --no-warnings https://www.youtube.com/watch?v=jNQXAC9IVRw 2>&1 | grep -i 'jsc\]'
+#   期望：JS Challenge Providers: bun (unavailable), deno, node (unavailable), ...
+#   若出现 deno (unavailable) → 看 /usr/bin/deno 是不是指向不存在的 /usr/local/bin/deno（断链）
 ```
 
 **如果 Node 那一步报 `E: Unable to correct problems, you have held broken packages.`**
@@ -356,6 +363,8 @@ git push origin --delete pi-verify             # ④ 删临时分支
 | 17 | **线上**：页面显示「可用于下载 5.28G」，却有一个 1.6G 的任务在排队（用户："这么个简单的算法怎么老是改不明白"） | 两个真 bug：① 调度器按 `expectBytes` **全额预扣一整场下载** —— 一个下到 91% 的任务仍占着整整 2.48G，实际只差 0.17G，跑着的 6 个任务虚占 5.72G（真实只需要 2.57G）；② `/api/system` 读的是 `expect_bytes`，而 `tasksRepo` 返回驼峰 `expectBytes` → `reservedBytes` **恒为 0**，接口把"可用于下载"直接当成"还能再放行"，**用户看到的数和判定用的数不是一回事** | 新增 `src/core/space.ts`：`remainingBytesOf()` = `max(expectBytes, totalBytes) − downloadedBytes`（只算还差多少，总量取传输器报的真实值），`reservedByRunningTasks()` 供**调度器与接口共用**；调度器第 2 道闸门改为用**当下**的 free/reserved 重算并排除任务自己；等待原因与前端文案统一为「**可立即开始** = 可用于下载 − 运行中任务还差」 | `test/disk-gate-reservation.test.mjs`(3 条，含"接口预扣不得恒为 0") + `test/transmission-module.test.mjs` 第 9 条 （91% 的任务不许挡住新任务；旧逻辑下必红） |
 | 18 | **线上**：`df` 明明有空闲，任务却全停在「磁盘空间不足，已自动暂停」；且出现 100% 进度仍「下载中」、目录永远删不掉、`freedBytes:0` 的死循环 | ① `resumeSpacePaused()` 和 `tick()` 里各有一份**漏改**的「按 `expectBytes` 全额预扣」——6 个运行中任务虚占 6.21G（真实只差 3.38G），把可用 6.75G 挤成 0.54G，所以永远恢复不了；② 两个种子落进同一目录时，A 100% 收尾被"仍下载中"的 B 挡住删不了目录，`alreadyHarvesting()` 又因 A 的 `harvestDone=false` 挡住 B 被扫货 → 互锁死循环 | ① `resumeSpacePaused`/`tick` 改用共享的 `reservedByRunningTasks()`（只算还差多少）；② `btHarvest` 收尾时区分"删失败"与"被其它种子共用、安全起见没删"：后者直接置 `harvestDone=true`（剩余由对方清理），不再无限重试 | `test/transmission-module.test.mjs` 第 10 条（空间恢复应自动继续，旧口径下必红） |
 | 18 | **网页上的「修复脚本」通道风险过高**：任何能打开该页面的人都能上传 `.sh`，并以服务身份（root）在这台机器上执行任意命令（早期设计靠"默认关闭 + 维护令牌 + 上传前预览"兜底，但开关一旦打开就等于把 root shell 挂到 Web 上） | **整体移除**（业主决策）：删 `src/services/scriptRunner.ts`、`/api/scripts` 与 `/api/system/scripts*` 全部端点、`scriptUploadEnabled`/`scriptRunTimeoutSec` 设置与 env、`[MARK:SCRIPT_UPLOAD]`/`[MARK:SCRIPT_RUN]` 标记、前端页面与侧边栏入口；环境问题改为 SSH 执行 `deploy/scripts/*.sh`。**DB 未做破坏性迁移**（settings 表里遗留的旧键被忽略） | 新增 `test/no-script-module.test.mjs`（端点 404 + 设置/config 无 `script*` 字段；删除前 4/4 红） |
+
+| 19 | **全新机器部署后 YouTube 永远下不了**，而部署日志还打印"✅ YouTube 下载依赖齐全"：`deploy.sh` 把 deno 安装写成了 `DENO_INSTALL=/usr/local curl … \| sh -s -- -y` —— 变量只作用于**管道左边的 curl**，右边的 `sh` 收不到 → deno 装进 `$HOME/.deno`（sudo 下 `/root/.deno`），`ln -sf /usr/local/bin/deno` 只造出**断链**；yt-dlp 因此打出 `deno (unavailable)`。同时"如实汇报"那行用 `{ deno…; } \|\| … \|\| { node -v; }` 回落链，deno 断了就落到 node 20 打成非空 → 谎报"齐全"（而 `js_runtime_available()` 要求 node>=22） | `deploy.sh`：① 改写为 `curl … \| DENO_INSTALL="$DENO_DIR" sh -s -- -y`，并且**装完必须 `js_runtime_available` 才算成功**（可覆盖的 `DENO_INSTALL_DIR`/`DENO_LINK_DIR`）；② 新增 `js_runtime_version()`，「判定」与「打印」共用 `js_runtime_available` 口径。同类点一并修：`deploy/scripts/fix-ytdlp.sh` 装完也验证可执行、`使用教程.md` 里那条手工命令就是错写法 | `test/deploy-script.test.mjs` 新增 5 条（假 curl 模拟官方安装器只认 sh 侧变量、装完不可执行不许报成功、node<22 不算运行时、报告必须走 `js_runtime_available`、全仓库禁 `DENO_INSTALL=… curl`）。**未修复代码上 4 条必红**（已实测） |
 
 ### 8.2 还没做 / 需要你决定
 

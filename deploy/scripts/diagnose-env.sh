@@ -2,7 +2,7 @@
 # =============================================================================
 #  ttdownload-web 环境体检脚本（只读，不修改任何东西）
 #
-#  用法：在网页「修复脚本」页上传本文件并执行；或直接 sudo bash diagnose-env.sh
+#  用法：sudo bash deploy/scripts/diagnose-env.sh   （只读，不会修改任何东西）
 #  作用：把「代码之外」的环境状况打出来（Node/aria2/transmission/yt-dlp/DNS/磁盘/权限/服务），
 #        出问题时把输出日志发给开发者，比一个个问要快得多。
 # =============================================================================
@@ -143,7 +143,7 @@ if command -v yt-dlp >/dev/null 2>&1; then
     else BAD "node $(node -v)：yt-dlp 视为 unsupported（需要 deno/bun/quickjs 或 node >= 22）"; fi
   else BAD "没有任何 JS 运行时（deno/bun/quickjs/node）"; fi
   if pip3 show yt-dlp-ejs >/dev/null 2>&1; then OK "yt-dlp-ejs：已安装"; else BAD "yt-dlp-ejs 未安装（挑战求解脚本缺失）"; fi
-  [ "${JS_OK}" = "1" ] || INFO "  → 修复：在「修复脚本」页上传执行 deploy/scripts/fix-ytdlp.sh（会装 deno + yt-dlp-ejs）"
+  [ "${JS_OK}" = "1" ] || INFO "  → 修复：sudo bash deploy/scripts/fix-ytdlp.sh（会装 deno + yt-dlp-ejs）"
   if OUTV="$(timeout 60 yt-dlp -v --simulate --no-warnings "https://www.youtube.com/watch?v=jNQXAC9IVRw" 2>&1 | grep -iE 'JS runtimes|jsc\]' | head -2)"; then
     printf '%s\n' "${OUTV}" | sed 's/^/    /'
   fi
