@@ -888,6 +888,15 @@ case "$ACTION" in
     # 会直接 "npm: command not found" 中断更新（真机踩过：全新机器 Node 没装上，
     # update 分支不装 Node，只会在这里失败）。放在 re-exec 之后 → 用的是刚拉下来的新逻辑。
     if [[ $SKIP_APT -eq 0 ]]; then ensure_node; fi
+    # 老部署升级时自愈：补 .env 里**新增**的键（只加缺失的，绝不改已有值）。
+    # 「下载原始文件」需要 ORIGINAL_DL_SECRET —— --update 不走主流程的 .env 段，必须在这里补。
+    if [[ -f .env ]]; then
+      if ! grep -q '^ORIGINAL_DL_SECRET=' .env; then
+        echo "ORIGINAL_DL_SECRET=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> .env
+        chmod 600 .env
+        log "已为现有 .env 补齐 ORIGINAL_DL_SECRET（「下载原始文件」的密码种子；不影响其它配置）"
+      fi
+    fi
     # 老部署升级时自愈：补 yt-dlp-ejs / JS 运行时（缺了 YouTube 一定失败）
     if [[ $SKIP_APT -eq 0 ]]; then ensure_ytdlp_stack; fi
     if [[ $SKIP_APT -eq 0 ]]; then ensure_cookie_browser; fi
