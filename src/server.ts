@@ -1,4 +1,5 @@
 import http from 'node:http';
+import fs from 'node:fs';
 import { createApp } from './app';
 import { config, ensureDirs } from './core/config';
 import { logger } from './core/logger';
@@ -11,6 +12,33 @@ import { startBtHarvestWorker, stopBtHarvestWorker } from './services/btHarvest'
 import { ensureAria2Daemon } from './modules/aria2Client';
 import { logAuthBootState } from './services/auth';
 import { startUsbWorker, stopUsbWorker } from './services/usbMount';
+import {
+  cookieBootReport,
+  startCookieKeepFreshWorker,
+  stopCookieKeepFreshWorker,
+} from './services/cookieHarvest';
+
+/**
+ * 开机自检：用户上传的 cookies.txt 还能不能用（不联网，只看结构与关键字段/过期时间）。
+ * 为什么要它：YouTube 的登录 cookies 一过期，下载就"各种报错又不会自愈"——
+ * 与其等用户去下东西才发现，不如开机就告诉他哪里过期了。
+ */
+async function checkUserCookies(): Promise<void> {
+  try {
+    const { getSettings } = await import('./services/settings');
+    const { cookiesPathOf, inspectCookiesFile } = await import('./modules/webvideo');
+    const file = cookiesPathOf(getSettings());
+    if (!file || !fs.existsSync(file)) return;
+    const r = inspectCookiesFile(file);
+    if (r.warnings.length) {
+      logger.mark('BOOT', `上传的 cookies 有问题：${r.warnings.join('；')}`);
+    } else {
+      logger.mark('BOOT', `上传的 cookies 检查通过（共 ${r.stats.total} 条，已过期 ${r.stats.expiredCount} 条）`);
+    }
+  } catch (e) {
+    logger.child('boot').warn(`[MARK:COOKIE_HARVEST] cookies 开机自检失败：${(e as Error).message}`);
+  }
+}
 
 async function main(): Promise<void> {
   ensureDirs();
@@ -61,6 +89,10 @@ async function main(): Promise<void> {
   startBtEvictWorker();
   startBtHarvestWorker();
   startUsbWorker();
+  // cookies 保鲜：开机预热（HTTP 途径的站点每次重启都换一份新的）+ 运行期定期换新
+  cookieBootReport();
+  startCookieKeepFreshWorker();
+  void checkUserCookies();
   kickScheduler();
 
   const app = createApp();
@@ -75,6 +107,8 @@ async function main(): Promise<void> {
     stopPipeline();
     stopBtEvictWorker();
     stopBtHarvestWorker();
+    stopUsbWorker();
+    stopCookieKeepFreshWorker();
     server.close(() => {
       logger.mark('BOOT', '已退出');
       process.exit(0);

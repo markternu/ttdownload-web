@@ -390,3 +390,275 @@ test('★回归：yt-dlp 会回写 cookies 文件 —— 所以只能给它副�
   if (savedChromium === undefined) delete process.env.CHROMIUM_PATH;
   else process.env.CHROMIUM_PATH = savedChromium;
 });
+
+/* ==================================================================== */
+/*  cookies 保鲜：开机预热 + 定期刷新（2026-10-03 用户反馈"老是到期、开机就失败"） */
+/*                                                                      */
+/*  原来只有「下单那一刻懒抓一次」，所以：                                */
+/*   ① 服务刚启动、cookies 还没有 → 第一单必然先失败一次；                 */
+/*   ② 跑着跑着过期了程序不知道 → 用户一下东西才报错，体验极差。           */
+/*  新增：开机强制换新（HTTP 途径的站点）+ 定期检查换新 + 串行化互斥。      */
+/* ==================================================================== */
+
+/** 把某个站点的抓取时间改成 N 分钟前（用来模拟"cookie 已经放旧了"） */
+function ageMetaMinutes(siteId, minutes) {
+  const f = cookies.harvestedMetaFile(siteId);
+  const meta = JSON.parse(fs.readFileSync(f, 'utf8'));
+  meta.fetchedAt = new Date(Date.now() - minutes * 60_000).toISOString();
+  fs.writeFileSync(f, JSON.stringify(meta));
+}
+
+function rmMeta(siteId) {
+  for (const f of [cookies.harvestedMetaFile(siteId), cookies.harvestedFile(siteId)]) {
+    try {
+      fs.rmSync(f);
+    } catch {
+      /* 不存在就算了 */
+    }
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 抖音的 HTTP 途径打桩（不联网）：返回一份 ttwid */
+function stubTtwidFetch() {
+  const real = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return {
+      status: 200,
+      headers: {
+        getSetCookie: () => [`ttwid=1%7Cfresh-${calls}%7C1; Path=/; Domain=bytedance.com; HttpOnly; Secure`],
+        get: () => null,
+      },
+    };
+  };
+  return { calls: () => calls, restore: () => { globalThis.fetch = real; } };
+}
+
+test('保鲜开关：默认开机预热开、每 30 分钟刷新一次；可用环境变量关掉/改小', () => {
+  const saved = { ...process.env };
+  try {
+    delete process.env.COOKIE_HARVEST_WARMUP;
+    delete process.env.COOKIE_HARVEST_REFRESH_MIN;
+    delete process.env.COOKIE_HARVEST_WARMUP_DELAY_MS;
+    assert.deepEqual(cookies.cookieKeepFreshEnv(), { warmup: true, refreshMin: 30, warmupDelayMs: 3000 });
+
+    process.env.COOKIE_HARVEST_WARMUP = '0';
+    assert.equal(cookies.cookieKeepFreshEnv().warmup, false, 'COOKIE_HARVEST_WARMUP=0 应关掉开机预热');
+
+    process.env.COOKIE_HARVEST_REFRESH_MIN = '0';
+    assert.equal(cookies.cookieKeepFreshEnv().refreshMin, 0, '0 = 关闭定期刷新');
+
+    process.env.COOKIE_HARVEST_REFRESH_MIN = 'abc';
+    assert.equal(cookies.cookieKeepFreshEnv().refreshMin, 30, '非法值必须回落到默认 30（不能变成 0=静默关闭）');
+
+    process.env.COOKIE_HARVEST_REFRESH_MIN = '5';
+    assert.equal(cookies.cookieKeepFreshEnv().refreshMin, 5);
+
+    process.env.COOKIE_HARVEST_WARMUP_DELAY_MS = '10';
+    assert.equal(cookies.cookieKeepFreshEnv().warmupDelayMs, 10);
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
+test('★判定口径：从没抓过要抓；HTTP 途径的站点按"刷新间隔"，要开浏览器的站点按 TTL', async () => {
+  const saved = { ...process.env };
+  const st = stubTtwidFetch();
+  try {
+    process.env.COOKIE_HARVEST_SITES = 'douyin,youtube';
+    process.env.CHROMIUM_PATH = '/bin/sh';
+    delete process.env.COOKIE_HARVEST_REFRESH_MIN; // 默认 30 分钟
+    cookies.__setHarvesterLauncher(null);
+
+    const douyin = cookies.profileFor('https://v.douyin.com/x/');
+    const youtube = cookies.profileFor('https://www.youtube.com/watch?v=x');
+
+    rmMeta('douyin');
+    rmMeta('youtube');
+    assert.equal(cookies.siteRefreshDue(douyin), true, '从没抓过 → 必须抓');
+    assert.equal(cookies.siteRefreshDue(youtube), true, '从没抓过 → 必须抓');
+
+    await cookies.harvestNow('douyin');
+    assert.equal(cookies.siteRefreshDue(douyin), false, '刚抓完 → 不用再抓');
+
+    // 放旧到 40 分钟前：抖音（HTTP 途径）超过 30 分钟 → 该换新了
+    ageMetaMinutes('douyin', 40);
+    assert.equal(cookies.siteRefreshDue(douyin), true, 'HTTP 途径超过刷新间隔 → 该换新');
+
+    // 刷新间隔调到 120 分钟 → 40 分钟还不算旧
+    process.env.COOKIE_HARVEST_REFRESH_MIN = '120';
+    assert.equal(cookies.siteRefreshDue(douyin), false, '间隔 120 分钟时 40 分钟不算旧');
+
+    // YouTube（要开浏览器，贵）：按 TTL（默认 6 小时），1 小时不算旧、7 小时才算
+    rmMeta('youtube');
+    cookies.writeCookieFile(cookies.harvestedFile('youtube'), [{ domain: '.youtube.com', includeSubdomains: true, path: '/', secure: false, expires: 1900000000, name: 'PREF', value: 'x', httpOnly: false }]);
+    fs.writeFileSync(
+      cookies.harvestedMetaFile('youtube'),
+      JSON.stringify({ site: 'youtube', name: 'YouTube', url: 'https://www.youtube.com/', file: cookies.harvestedFile('youtube'), fetchedAt: new Date(Date.now() - 60 * 60_000).toISOString(), cookieCount: 1, cookieNames: ['PREF'], ua: 'x', via: 'browser' }),
+    );
+    assert.equal(cookies.siteRefreshDue(youtube), false, '浏览器站点 1 小时不算旧（TTL 6 小时），别没事就开 chromium');
+    ageMetaMinutes('youtube', 7 * 60);
+    assert.equal(cookies.siteRefreshDue(youtube), true, '浏览器站点超过 TTL 6 小时 → 换新');
+  } finally {
+    st.restore();
+    cookies.__setHarvesterLauncher(null);
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
+test('★开机预热：HTTP 途径的站点即使没到期也换一份新的；要开浏览器的站点没到期就不白开', async () => {
+  const saved = { ...process.env };
+  const st = stubTtwidFetch();
+  try {
+    process.env.COOKIE_HARVEST_SITES = 'douyin,youtube';
+    process.env.CHROMIUM_PATH = '/bin/sh';
+    delete process.env.COOKIE_HARVEST_REFRESH_MIN;
+
+    // 先把抖音抓成"新鲜的"
+    cookies.__setHarvesterLauncher(null);
+    await cookies.harvestNow('douyin');
+    const before = st.calls();
+
+    // YouTube 也用假启动器抓一份"新鲜的"
+    // 注意：注入假启动器后，抖音的 HTTP 途径也会走这个启动器（测试脚手架的行为），
+    // 所以必须**按站点分别计数**，不能用一个总计数器。
+    const launches = { douyin: 0, youtube: 0 };
+    cookies.__setHarvesterLauncher(async (profile) => {
+      launches[profile.id] = (launches[profile.id] ?? 0) + 1;
+      return [{ domain: '.youtube.com', includeSubdomains: true, path: '/', secure: false, expires: 1900000000, name: 'PREF', value: 'fresh', httpOnly: false }];
+    });
+    await cookies.ensureHarvested(cookies.profileFor('https://www.youtube.com/watch?v=x'), { force: true });
+    assert.equal(launches.youtube, 1);
+
+    // 开机预热：forceCheap=true
+    const r = await cookies.refreshAutoCookies({ reason: '开机预热', forceCheap: true });
+    const yt = r.find((x) => x.site === 'youtube');
+    assert.equal(yt?.action, 'skipped', 'YouTube 是浏览器站点且刚抓过 → 开机不该白开一次 chromium');
+    assert.equal(launches.youtube, 1, 'YouTube 预热不该重复启动浏览器');
+    const dy = r.find((x) => x.site === 'douyin');
+    assert.equal(dy?.action, 'harvested', '抖音有 HTTP 途径 → 开机强制换新（哪怕没到期）');
+    assert.equal(launches.douyin, 1, '抖音应被抓一次');
+  } finally {
+    st.restore();
+    cookies.__setHarvesterLauncher(null);
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
+test('★开机预热真的会换新抖音 cookies（HTTP 途径，未到期也强制换）', async () => {
+  const saved = { ...process.env };
+  const st = stubTtwidFetch();
+  try {
+    process.env.COOKIE_HARVEST_SITES = 'douyin'; // 只留 HTTP 途径的站点，避免碰浏览器
+    process.env.CHROMIUM_PATH = '/nonexistent/no-chromium-installed';
+    delete process.env.COOKIE_HARVEST_REFRESH_MIN;
+    cookies.__setHarvesterLauncher(null);
+
+    await cookies.harvestNow('douyin'); // 先抓一份新鲜的
+    const before = st.calls();
+    assert.equal(cookies.siteRefreshDue(cookies.profileFor('https://v.douyin.com/x/')), false, '前提：现在是新鲜的');
+
+    const r = await cookies.refreshAutoCookies({ reason: '开机预热', forceCheap: true });
+    assert.equal(r.find((x) => x.site === 'douyin')?.action, 'harvested', '开机预热应强制换新');
+    assert.equal(st.calls(), before + 1, '应真的又请求了一次 ttwid 接口');
+
+    // 定期刷新（不强制）→ 没到期就跳过，不浪费请求
+    const r2 = await cookies.refreshAutoCookies({ reason: '定期刷新' });
+    assert.equal(r2.find((x) => x.site === 'douyin')?.action, 'skipped', '没到期 → 定期刷新应跳过');
+    assert.equal(st.calls(), before + 1, '跳过时不应产生请求');
+  } finally {
+    st.restore();
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
+test('★串行化：定时刷新 与 下单懒抓 两条入口并发时也绝不并发开浏览器（共享 profile 必撞锁）', async () => {
+  const saved = { ...process.env };
+  try {
+    process.env.COOKIE_HARVEST_SITES = 'douyin,youtube';
+    process.env.CHROMIUM_PATH = '/bin/sh';
+
+    let active = 0;
+    let maxActive = 0;
+    cookies.__setHarvesterLauncher(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await sleep(40); // 模拟"开浏览器抓 cookie"这段耗时
+      active -= 1;
+      return [{ domain: '.example.com', includeSubdomains: false, path: '/', secure: false, expires: 1900000000, name: 'c', value: 'v', httpOnly: false }];
+    });
+
+    rmMeta('douyin');
+    rmMeta('youtube');
+    const yt = cookies.profileFor('https://www.youtube.com/watch?v=x');
+
+    // 同时从两条**独立入口**发起：① 定时器刷新  ② 下单时的懒抓
+    // （只测 one 条入口是测不出问题的：for 循环本身就是顺序的）
+    await Promise.all([cookies.refreshAutoCookies({ reason: '并发测试-定时器' }), cookies.ensureHarvested(yt, { force: true })]);
+
+    assert.equal(maxActive, 1, `两条入口必须串行（实际同时最多 ${maxActive} 个）—— 并发会撞 ProcessSingleton 锁`);
+    assert.ok(cookies.readHarvestMeta('douyin'), '抖音应被抓到');
+    assert.ok(cookies.readHarvestMeta('youtube'), 'YouTube 应被抓到');
+  } finally {
+    cookies.__setHarvesterLauncher(null);
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
+test('★worker：启动后会自动预热（不等用户下单），且重复启动幂等、可停止', async () => {
+  const saved = { ...process.env };
+  const st = stubTtwidFetch();
+  try {
+    process.env.COOKIE_HARVEST_SITES = 'douyin';
+    process.env.CHROMIUM_PATH = '/nonexistent/no-chromium-installed';
+    process.env.COOKIE_HARVEST_WARMUP_DELAY_MS = '10';
+    process.env.COOKIE_HARVEST_REFRESH_MIN = '0'; // 关掉定时器，避免影响别的用例
+    cookies.__setHarvesterLauncher(null);
+    rmMeta('douyin');
+
+    cookies.startCookieKeepFreshWorker();
+    cookies.startCookieKeepFreshWorker(); // 幂等：第二次不应再排一个预热
+    await sleep(250);
+
+    assert.ok(st.calls() >= 1, '开机后应自动抓一次 cookies（用户还没下单）');
+    assert.ok(cookies.readHarvestMeta('douyin'), '应落盘成可用的 cookies');
+    cookies.stopCookieKeepFreshWorker();
+  } finally {
+    cookies.stopCookieKeepFreshWorker();
+    st.restore();
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
+test('保鲜开关：COOKIE_HARVEST_ENABLED 关掉时预热与刷新都不动手', async () => {
+  const saved = { ...process.env };
+  const st = stubTtwidFetch();
+  const { updateSettings, getSettings } = await import('../dist/services/settings.js');
+  try {
+    process.env.COOKIE_HARVEST_SITES = 'douyin';
+    process.env.CHROMIUM_PATH = '/nonexistent/no-chromium-installed';
+    cookies.__setHarvesterLauncher(null);
+    const prev = getSettings().cookieHarvestEnabled;
+    updateSettings({ cookieHarvestEnabled: false });
+    try {
+      const r = await cookies.refreshAutoCookies({ reason: '测试关闭', forceCheap: true });
+      assert.deepEqual(r, [], '关掉自动获取后不应抓任何站点');
+      assert.equal(st.calls(), 0, '不应发任何请求');
+    } finally {
+      updateSettings({ cookieHarvestEnabled: prev });
+    }
+  } finally {
+    st.restore();
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});

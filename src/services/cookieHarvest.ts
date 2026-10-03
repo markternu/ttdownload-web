@@ -575,7 +575,9 @@ export async function ensureHarvested(
   const existing = inflight.get(profile.id);
   if (existing) return existing;
 
-  const task = (async (): Promise<HarvestMeta | null> => {
+  // ⚠️ 全局互斥必须包在 ensureHarvested **自己**里面，而不是只包定期刷新那条路：
+  //    定时器刷新 与 「下单时的懒抓」是两个独立入口，二者并发时同样会抢同一个浏览器 profile。
+  const task = serializeHarvest(async (): Promise<HarvestMeta | null> => {
     const t0 = Date.now();
     scoped.info(`[MARK:${COOKIE_MARKER}] 开始自动获取 cookies：${profile.name}（${profile.harvestUrl}）`);
     try {
@@ -629,7 +631,7 @@ export async function ensureHarvested(
     } finally {
       inflight.delete(profile.id);
     }
-  })();
+  });
 
   inflight.set(profile.id, task);
   return task;
@@ -798,6 +800,199 @@ export function harvestStatus(): {
       };
     }),
   };
+}
+
+/* ------------------------------------------------------------------ */
+/*  保鲜：开机预热 + 定期刷新                                            */
+/*                                                                      */
+/*  为什么需要：ensureHarvested 只是在「下单那一刻」被懒调用，所以        */
+/*  ① 服务刚启动、cookies 还没有（或已过期）时，用户下的第一单必然先失败一次； */
+/*  ② 跑着跑着 cookie 到期了，程序自己不知道，直到用户去下东西才暴露。      */
+/*  这里补上「开机抓一次 + 运行期定期换新」，让 cookies 始终是热的。        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * YouTube 的机器人校验**不是**匿名 cookies 能解决的 —— 写进开机日志，避免用户以为是"没抓到 cookie"。
+ *
+ * 实测（2026-10-03，树莓派）：无头浏览器抓到的 26 条匿名 youtube.com cookies 喂给 yt-dlp 后，
+ * 依旧是 `Sign in to confirm you're not a bot`。这句是**出口 IP 信誉**触发的，
+ * 只有「登录态 cookies」或换出口 IP 才有用。所以 YouTube 不做自动抓取（那是假自愈）。
+ */
+export const YOUTUBE_ANON_HARVEST_NOTE =
+  'YouTube 若报「Sign in to confirm you\'re not a bot」：那是**出口 IP 信誉**触发的机器人校验，' +
+  '匿名访客 cookies 无效（实测过），只有登录态 cookies 或换出口 IP 有用 → 请在「设置 → 公开视频（yt-dlp）」' +
+  '上传登录后的 youtube.com cookies.txt（或填 --proxy 换出口）。因此 YouTube 不参与自动抓取。';
+
+/** 保鲜相关的开关（都可被环境变量覆盖；默认值写在代码里，不改用户 .env） */
+export function cookieKeepFreshEnv(): { warmup: boolean; refreshMin: number; warmupDelayMs: number } {
+  const warmup = String(process.env.COOKIE_HARVEST_WARMUP ?? '1') !== '0';
+  const raw = Number(process.env.COOKIE_HARVEST_REFRESH_MIN ?? 30);
+  const refreshMin = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 30;
+  // 预热延迟：默认 3 秒（让启动时的其它初始化先跑完）；测试里可调小
+  const rawDelay = Number(process.env.COOKIE_HARVEST_WARMUP_DELAY_MS ?? 3000);
+  const warmupDelayMs = Number.isFinite(rawDelay) && rawDelay >= 0 ? Math.floor(rawDelay) : 3000;
+  return { warmup, refreshMin, warmupDelayMs };
+}
+
+/**
+ * 这个站点现在该不该换新 cookies。
+ *   - 从没抓过 → 必须抓；
+ *   - 有 HTTP 途径（抖音/TikTok/B站：一次请求、1 秒、不招风控）→ 按 refreshMin 频繁换新；
+ *   - 只能走无头浏览器（贵、开 chromium）→ 按 TTL（默认 6 小时）换新，别没事就开浏览器。
+ */
+export function siteRefreshDue(profile: CookieSiteProfile, now = Date.now()): boolean {
+  const age = harvestAgeMs(profile.id);
+  if (age === null) return true;
+  const { refreshMin } = cookieKeepFreshEnv();
+  const limit = profile.httpProvider ? refreshMin * 60_000 : harvestTtlMs();
+  if (limit <= 0) return age >= harvestTtlMs();
+  return age >= limit;
+}
+
+/**
+ * 串行执行器：**所有**自动抓取都从这里过。
+ * 血案背景（犯错本 §5）：浏览器用的是**同一个持久化 profile**，两个站点同时抓必然撞
+ * `Failed to create a ProcessSingleton for your profile directory` —— 必须互斥。
+ */
+let harvestChain: Promise<unknown> = Promise.resolve();
+function serializeHarvest<T>(fn: () => Promise<T>): Promise<T> {
+  const run = harvestChain.then(() => fn());
+  harvestChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+export interface KeepFreshOutcome {
+  site: string;
+  name: string;
+  action: 'harvested' | 'skipped' | 'failed';
+  cookieCount: number;
+  ageMinutesBefore: number | null;
+  via: string | null;
+  error?: string;
+}
+
+/**
+ * 把「自动抓取」清单里的站点过一遍：到期的换新，没到期的跳过。
+ * @param opts.reason 日志用（「开机预热」/「定期刷新」）
+ * @param opts.forceCheap true=开机时连「还没到期」的 HTTP 途径站点也换一份新的
+ *        （用户要求：每次重启都拿一份新的；HTTP 途径只花 1 秒，不会招风控）
+ */
+export async function refreshAutoCookies(opts: { reason: string; forceCheap?: boolean } = { reason: '刷新' }): Promise<KeepFreshOutcome[]> {
+  if (!harvestEnabled()) {
+    scoped.info(`[MARK:${COOKIE_MARKER}] ${opts.reason}：自动获取已关闭（COOKIE_HARVEST_ENABLED=0），跳过`);
+    return [];
+  }
+  const auto = defaultHarvestSites();
+  if (!auto.length) return [];
+
+  const outcomes: KeepFreshOutcome[] = [];
+  for (const id of auto) {
+    const profile = SITE_PROFILES.find((p) => p.id === id);
+    if (!profile) continue;
+    const ageBefore = harvestAgeMs(id);
+    const ageMinutesBefore = ageBefore === null ? null : Math.round(ageBefore / 60000);
+
+    // 需要浏览器但机器上没有 → 明确记下来，别装作抓过了
+    if (!profile.httpProvider && !chromiumPath()) {
+      outcomes.push({
+        site: id, name: profile.name, action: 'skipped', cookieCount: 0, ageMinutesBefore, via: null,
+        error: '服务器上没有 chromium，无法用浏览器抓取',
+      });
+      continue;
+    }
+    const cheapOverride = !!opts.forceCheap && !!profile.httpProvider;
+    if (!cheapOverride && !siteRefreshDue(profile)) {
+      outcomes.push({ site: id, name: profile.name, action: 'skipped', cookieCount: readHarvestMeta(id)?.cookieCount ?? 0, ageMinutesBefore, via: readHarvestMeta(id)?.via ?? null });
+      continue;
+    }
+
+    // 互斥在 ensureHarvested 内部统一处理（避免"定时器"和"下单懒抓"两条入口并发）
+    const meta = await ensureHarvested(profile, { force: true });
+    if (meta) {
+      outcomes.push({ site: id, name: profile.name, action: 'harvested', cookieCount: meta.cookieCount, ageMinutesBefore, via: meta.via });
+    } else {
+      outcomes.push({ site: id, name: profile.name, action: 'failed', cookieCount: 0, ageMinutesBefore, via: null, error: '自动获取失败（详见上面 [MARK:COOKIE_HARVEST] 日志）' });
+    }
+  }
+
+  const got = outcomes.filter((o) => o.action === 'harvested');
+  const failed = outcomes.filter((o) => o.action === 'failed');
+  const skip = outcomes.filter((o) => o.action === 'skipped');
+  scoped.info(
+    `[MARK:${COOKIE_MARKER}] ${opts.reason}完成：换新 ${got.length} 个（${got.map((o) => `${o.name}(${o.cookieCount}条/${o.via})`).join('、') || '无'}）` +
+      `；跳过 ${skip.length} 个${failed.length ? `；失败 ${failed.length} 个（${failed.map((o) => o.name).join('、')}）` : ''}`,
+  );
+  return outcomes;
+}
+
+/** 开机自检：把「自动抓取站点」的 cookies 现状如实打出来（有没有、多久了、几条） */
+export function cookieBootReport(): void {
+  const auto = defaultHarvestSites();
+  const enabled = harvestEnabled();
+  scoped.mark('BOOT', `自动获取访客 cookies：${enabled ? '已开启' : '已关闭'}；站点=${auto.join('、') || '（无）'}；chromium=${chromiumPath() ?? '未安装'}`);
+  for (const id of auto) {
+    const p = SITE_PROFILES.find((x) => x.id === id);
+    if (!p) continue;
+    const meta = readHarvestMeta(id);
+    const age = harvestAgeMs(id);
+    if (!meta || age === null) {
+      scoped.mark('BOOT', `  ${p.name}：还没有 cookies（本次开机将自动获取）`);
+    } else {
+      scoped.mark('BOOT', `  ${p.name}：${meta.cookieCount} 条，${Math.round(age / 60000)} 分钟前抓的（via=${meta.via}）${siteRefreshDue(p) ? '，已过期 → 本次开机将换新' : ''}`);
+    }
+  }
+  if (!auto.includes('youtube')) scoped.mark('BOOT', YOUTUBE_ANON_HARVEST_NOTE);
+}
+
+let warmupTimer: NodeJS.Timeout | null = null;
+let keepFreshTimer: NodeJS.Timeout | null = null;
+
+/** 启动「开机预热 + 定期刷新」；与其它 worker 一样由 server.ts 调用 */
+export function startCookieKeepFreshWorker(): void {
+  if (warmupTimer || keepFreshTimer) return;
+  const { warmup, refreshMin, warmupDelayMs } = cookieKeepFreshEnv();
+  if (!harvestEnabled()) {
+    scoped.mark('BOOT', 'cookies 自动保鲜未启动（COOKIE_HARVEST_ENABLED=0）');
+    return;
+  }
+  const auto = defaultHarvestSites();
+  if (!auto.length) return;
+
+  if (warmup) {
+    // 延迟（默认 3 秒）：别和启动时的其它初始化抢资源（也让日志顺序好看）
+    warmupTimer = setTimeout(() => {
+      warmupTimer = null;
+      void refreshAutoCookies({ reason: '开机预热', forceCheap: true }).catch((e) =>
+        scoped.error(`[MARK:${COOKIE_MARKER}] 开机预热异常：${(e as Error).message}`),
+      );
+    }, warmupDelayMs);
+    warmupTimer.unref?.();
+    scoped.mark('BOOT', `cookies 开机预热已排队（启动 ${Math.round(warmupDelayMs / 1000)} 秒后抓取：${auto.join('、')}）`);
+  }
+
+  if (refreshMin > 0) {
+    keepFreshTimer = setInterval(() => {
+      void refreshAutoCookies({ reason: '定期刷新' }).catch((e) =>
+        scoped.error(`[MARK:${COOKIE_MARKER}] 定期刷新异常：${(e as Error).message}`),
+      );
+    }, refreshMin * 60_000);
+    scoped.mark(
+      'BOOT',
+      `cookies 定期刷新已启动（每 ${refreshMin} 分钟检查：HTTP 途径的站点按此间隔换新，需浏览器的站点按 TTL ${Math.round(harvestTtlMs() / 3600_000)} 小时换新）`,
+    );
+  } else {
+    scoped.mark('BOOT', 'cookies 定期刷新已关闭（COOKIE_HARVEST_REFRESH_MIN=0），仅在下单时按需获取');
+  }
+}
+
+export function stopCookieKeepFreshWorker(): void {
+  if (warmupTimer) clearTimeout(warmupTimer);
+  if (keepFreshTimer) clearInterval(keepFreshTimer);
+  warmupTimer = null;
+  keepFreshTimer = null;
 }
 
 /** 手动触发一次抓取（设置页「立即刷新」/自愈用） */

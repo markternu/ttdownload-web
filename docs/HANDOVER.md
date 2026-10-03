@@ -228,6 +228,29 @@ transmission 以 **`debian-transmission`** 用户运行，它的两个目录：
 
 排障手册（`docs/排查手册.md`）按现象分类，含 4.95「一堆任务全停住+磁盘满+零成品」那次的完整复盘。
 
+### 6.3 自动获取访客 cookies（开机预热 + 定期刷新）
+
+**背景（2026-10-03 用户反馈"cookies 老是到期、开机就失败、又无法自我修复"）**：原来
+`ensureHarvested()` 只在**下单那一刻**被懒调用，于是 ① 服务刚启动、cookies 还没有 → 第一单必然先失败一次；
+② 跑着跑着过期了程序不知道 → 等用户去下东西才报错。
+
+**现在的机制**（`src/services/cookieHarvest.ts`）：
+
+| 环节 | 行为 |
+| --- | --- |
+| 开机预热 | 启动 3 秒后自动抓一次；**HTTP 途径的站点（抖音/TikTok/B站）即使没到期也换新的**（一次请求、1 秒、不招风控）；需浏览器的站点只在过期时抓，不白开 chromium |
+| 定期刷新 | 默认每 30 分钟检查；HTTP 途径站点按此间隔换新，浏览器站点按 `COOKIE_HARVEST_TTL_HOURS`（默认 6h） |
+| 串行互斥 | **所有**抓取（含下单懒抓）都过同一个串行队列 —— 浏览器 profile 是共享的，并发必撞 `ProcessSingleton` 锁 |
+| 开机自检 | 如实打印每个站点的 cookies 条数/年龄/来源；用户上传的 cookies.txt 会做结构+过期检查 |
+
+开关（都有代码内默认值，**不改用户 .env**）：`COOKIE_HARVEST_WARMUP`（默认 1）、
+`COOKIE_HARVEST_REFRESH_MIN`（默认 30，0=关闭定时）、`COOKIE_HARVEST_WARMUP_DELAY_MS`（默认 3000）、
+`COOKIE_HARVEST_TTL_HOURS`（默认 6）。
+
+> ⚠️ **YouTube 不做自动抓取**：它的 `Sign in to confirm you're not a bot` 是**出口 IP 信誉**触发的，
+> 实测无头浏览器抓的 26 条匿名 cookies 喂给 yt-dlp 后**依旧失败** —— 只有「登录态 cookies」或换出口 IP 有用。
+> 所以开机日志会直接说明这一点，而不是假装自愈（见 §8.1 第 20 条）。
+
 ---
 
 ## 7. 测试与部署
@@ -365,6 +388,8 @@ git push origin --delete pi-verify             # ④ 删临时分支
 | 18 | **网页上的「修复脚本」通道风险过高**：任何能打开该页面的人都能上传 `.sh`，并以服务身份（root）在这台机器上执行任意命令（早期设计靠"默认关闭 + 维护令牌 + 上传前预览"兜底，但开关一旦打开就等于把 root shell 挂到 Web 上） | **整体移除**（业主决策）：删 `src/services/scriptRunner.ts`、`/api/scripts` 与 `/api/system/scripts*` 全部端点、`scriptUploadEnabled`/`scriptRunTimeoutSec` 设置与 env、`[MARK:SCRIPT_UPLOAD]`/`[MARK:SCRIPT_RUN]` 标记、前端页面与侧边栏入口；环境问题改为 SSH 执行 `deploy/scripts/*.sh`。**DB 未做破坏性迁移**（settings 表里遗留的旧键被忽略） | 新增 `test/no-script-module.test.mjs`（端点 404 + 设置/config 无 `script*` 字段；删除前 4/4 红） |
 
 | 19 | **全新机器部署后 YouTube 永远下不了**，而部署日志还打印"✅ YouTube 下载依赖齐全"：`deploy.sh` 把 deno 安装写成了 `DENO_INSTALL=/usr/local curl … \| sh -s -- -y` —— 变量只作用于**管道左边的 curl**，右边的 `sh` 收不到 → deno 装进 `$HOME/.deno`（sudo 下 `/root/.deno`），`ln -sf /usr/local/bin/deno` 只造出**断链**；yt-dlp 因此打出 `deno (unavailable)`。同时"如实汇报"那行用 `{ deno…; } \|\| … \|\| { node -v; }` 回落链，deno 断了就落到 node 20 打成非空 → 谎报"齐全"（而 `js_runtime_available()` 要求 node>=22） | `deploy.sh`：① 改写为 `curl … \| DENO_INSTALL="$DENO_DIR" sh -s -- -y`，并且**装完必须 `js_runtime_available` 才算成功**（可覆盖的 `DENO_INSTALL_DIR`/`DENO_LINK_DIR`）；② 新增 `js_runtime_version()`，「判定」与「打印」共用 `js_runtime_available` 口径。同类点一并修：`deploy/scripts/fix-ytdlp.sh` 装完也验证可执行、`使用教程.md` 里那条手工命令就是错写法 | `test/deploy-script.test.mjs` 新增 5 条（假 curl 模拟官方安装器只认 sh 侧变量、装完不可执行不许报成功、node<22 不算运行时、报告必须走 `js_runtime_available`、全仓库禁 `DENO_INSTALL=… curl`）。**未修复代码上 4 条必红**（已实测） |
+
+| 20 | **自动获取的 cookies 只在"下单那一刻"才懒抓** → ① 服务刚启动、cookies 还没有时，用户下的第一单必然先失败一次；② 跑着跑着 cookie 过期了程序不知道，等用户去下东西才报错，且"开机就失败、又不会自愈"，体验极差（用户原话）。此外浏览器用的是**同一个持久化 profile**，跨站点并发抓取会撞 `ProcessSingleton` 锁 | `src/services/cookieHarvest.ts` 新增：① `startCookieKeepFreshWorker()` —— 开机预热（3 秒后）+ 定期刷新（默认 30 分钟）；② HTTP 途径的站点（抖音/TikTok/B站）**开机强制换新**、浏览器站点按 TTL 换新（不白开 chromium）；③ 把串行互斥**放进 `ensureHarvested()` 内部**，让「定时刷新」和「下单懒抓」两条入口共用同一个队列；④ `cookieBootReport()` 开机如实打印各站点 cookies 条数/年龄/来源；⑤ `server.ts` 增加用户上传 cookies 的**结构+过期自检**。YouTube 明确**不做**自动抓取（见 §6.3 的实测结论） | `test/cookie-harvest.test.mjs` 新增 7 条（开关默认/非法值回落、刷新口径按途径分档、开机强制换新、串行互斥（两条入口并发）、worker 自动预热且幂等、关闭时不动手）。**拆掉互斥 → 串行用例必红；忽略 forceCheap → 两条预热用例必红**（已实测） |
 
 ### 8.2 还没做 / 需要你决定
 
