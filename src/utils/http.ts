@@ -24,6 +24,12 @@ export const badRequest = (message: string, code = 'BAD_REQUEST'): HttpError => 
 export const notFound = (message: string, code = 'NOT_FOUND'): HttpError => new HttpError(404, code, message);
 export const conflict = (message: string, code = 'CONFLICT'): HttpError => new HttpError(409, code, message);
 export const unauthorized = (message: string, code = 'UNAUTHORIZED'): HttpError => new HttpError(401, code, message);
+/**
+ * 403：已登录，但**这个动作**没被授权。
+ * ⚠️ 这里刻意不用 401：前端把「非登录接口的 401」统一当成会话过期并跳回登录页，
+ *    所以「下载密码不对 / 还没输密码」必须用 403，否则会把用户踢出登录态。
+ */
+export const forbidden = (message: string, code = 'FORBIDDEN'): HttpError => new HttpError(403, code, message);
 
 /**
  * 把磁盘文件流给客户端，并且**保证客户端断开时销毁读流**。

@@ -391,6 +391,9 @@ git push origin --delete pi-verify             # ④ 删临时分支
 
 | 20 | **自动获取的 cookies 只在"下单那一刻"才懒抓** → ① 服务刚启动、cookies 还没有时，用户下的第一单必然先失败一次；② 跑着跑着 cookie 过期了程序不知道，等用户去下东西才报错，且"开机就失败、又不会自愈"，体验极差（用户原话）。此外浏览器用的是**同一个持久化 profile**，跨站点并发抓取会撞 `ProcessSingleton` 锁 | `src/services/cookieHarvest.ts` 新增：① `startCookieKeepFreshWorker()` —— 开机预热（3 秒后）+ 定期刷新（默认 30 分钟）；② HTTP 途径的站点（抖音/TikTok/B站）**开机强制换新**、浏览器站点按 TTL 换新（不白开 chromium）；③ 把串行互斥**放进 `ensureHarvested()` 内部**，让「定时刷新」和「下单懒抓」两条入口共用同一个队列；④ `cookieBootReport()` 开机如实打印各站点 cookies 条数/年龄/来源；⑤ `server.ts` 增加用户上传 cookies 的**结构+过期自检**。YouTube 明确**不做**自动抓取（见 §6.3 的实测结论） | `test/cookie-harvest.test.mjs` 新增 7 条（开关默认/非法值回落、刷新口径按途径分档、开机强制换新、串行互斥（两条入口并发）、worker 自动预热且幂等、关闭时不动手）。**拆掉互斥 → 串行用例必红；忽略 forceCheap → 两条预热用例必红**（已实测） |
 
+| 21 | 「已入队种子」列表只能一个个删，不能全选批量删（用户要求补上）；「危险操作要多步确认」的弹窗原本只写在文件页里，第二处要用就得复制一份 | 抽出共用组件 `web/src/components/ui/DangerConfirmModal.tsx`（①核对范围 → ②确认影响 → ③输入确认词才启用最终按钮），文件页改用它（文案不变），`BtQueuedPage` 新增勾选列 + 全选当前页 + 全部删除。批量删复用既有 `POST /api/bt/seeds/actions`（**本来就支持数组**且逐条回报，后端未改）。⚠️ 同时纠正该页**与事实不符的文案**：入队时 `.torrent` 已被 `moveSeedToQueued()` **移动**到 `btzhongzi_yijingdownding/` 并更新了 `seeds.path`，而 delete 只在路径仍属**待入队目录**时才 `rm` —— 所以这个页面上删除**实际只删数据库记录**（留档 .torrent 还在、不释放空间、不动 transmission 任务），旧文案说反了 | `test/api.test.mjs` 新增 2 条（批量删多条 + 逐条回报 + 不存在的 id 不影响其它；空 ids 必须 400。打断"空 ids 必须 400"→ 用例变红，已实测）；`test/browser.smoke.mjs` 新增 1 条（全选→三步确认→输入确认词才可点，并断言第二步如实写"不会删留档 .torrent"） |
+| 22 | **鉴权用例 1/16 概率假红**（预先存在，与功能改动无关）：`cookie.replace(/.$/, 'x')` 想篡改会话，但签名是 base64url，末位只承载 4 个有效比特、索引必为 4 的倍数，而 base64 解码**丢弃末位那 2 个填充比特** —— 末位原本是 `w`(48) 时改成 `x`(49) 解码出来是**同一个字节**，签名照旧通过 → 随机变红，把人骗去看鉴权代码 | 改成篡改**参与 HMAC 的 payload 段**（必然对不上签名）+ 再单独篡改**签名中段**（避开末位填充比特），两条都断言 401 | `test/auth.test.mjs`。根因一行可证：`Buffer.from('w','base64').equals(Buffer.from('x','base64')) === true`。**修复前实测 40 次红 2 次、60 次红 2 次；修复后连跑 60 次全绿** |
+
 ### 8.2 还没做 / 需要你决定
 
 - **transmission 自己的队列**：它默认 `download-queue-size=5`（最多 5 个种子活跃下载）。

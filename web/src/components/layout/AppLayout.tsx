@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 import { Sidebar, NAV_ITEMS } from './Sidebar'
 import { Topbar } from './Topbar'
+import { OriginalDownloadProvider } from '../../context/OriginalDownloadContext'
 
 /** 路由 → 标题映射（未命中时回退为应用名） */
 function titleForPath(pathname: string): string {
@@ -21,6 +22,7 @@ export function AppLayout() {
   }, [location.pathname])
 
   return (
+    <OriginalDownloadProvider>
     <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       <Sidebar open={drawerOpen} onClose={() => setDrawerOpen(false)} />
 
@@ -34,5 +36,6 @@ export function AppLayout() {
         </footer>
       </div>
     </div>
+    </OriginalDownloadProvider>
   )
 }

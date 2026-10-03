@@ -17,6 +17,7 @@ import {
   startCookieKeepFreshWorker,
   stopCookieKeepFreshWorker,
 } from './services/cookieHarvest';
+import { startOriginalDownloadWorker, stopOriginalDownloadWorker } from './services/originalDownload';
 
 /**
  * 开机自检：用户上传的 cookies.txt 还能不能用（不联网，只看结构与关键字段/过期时间）。
@@ -92,6 +93,8 @@ async function main(): Promise<void> {
   // cookies 保鲜：开机预热（HTTP 途径的站点每次重启都换一份新的）+ 运行期定期换新
   cookieBootReport();
   startCookieKeepFreshWorker();
+  // 「下载原始文件」：开机清空临时目录 + 起超时清理线程
+  startOriginalDownloadWorker();
   void checkUserCookies();
   kickScheduler();
 
@@ -109,6 +112,7 @@ async function main(): Promise<void> {
     stopBtHarvestWorker();
     stopUsbWorker();
     stopCookieKeepFreshWorker();
+    stopOriginalDownloadWorker();
     server.close(() => {
       logger.mark('BOOT', '已退出');
       process.exit(0);

@@ -45,6 +45,7 @@ export const MARKERS: Record<string, string> = {
   CLEANUP: '消费者上报完成后的清理',
   FILE_DOWNLOAD: '成品文件被下载（区分安卓端 / 网页端）',
   FILE_DELETE: '批量删除成品文件（列表页「全选 → 全部删除」）',
+  ORIGINAL_DL: '下载原始文件：临时解密、6 位轮换密码、临时文件清理',
   AUTH: '鉴权：登录成功/失败、未授权访问被拒、鉴权开关状态',
   NGINX_PROXY: 'nginx 子路径反向代理开关（transmission 9091 外网访问：开启/关闭/回滚）',
   COOKIE_HARVEST: '自动获取访客 cookies（无头浏览器抓抖音/TikTok 等站点，含新鲜度与自愈重试）',

@@ -15,6 +15,7 @@
 #      sudo ./deploy.sh --port 8080  # 指定端口
 #      sudo ./deploy.sh --root /ttdownload
 #      sudo ./deploy.sh --check-deps # 只检查依赖（aria2/transmission/node/yt-dlp 等）是否已安装，不做任何改动
+#      sudo ./deploy.sh --orig-code  # 打印「下载原始文件」当前有效的 6 位密码（每 15 分钟换一次）
 #      sudo ./deploy.sh --update     # 【已部署过】拉取最新代码 + 重新构建 + 重启（最常用）
 #      sudo ./deploy.sh --status     # 查看服务状态
 #      sudo ./deploy.sh --restart    # 重启服务
@@ -112,6 +113,7 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     --root) DOWNLOAD_ROOT="$2"; shift 2 ;;
     --check-deps) ACTION="check-deps"; shift ;;
+    --orig-code) ACTION="orig-code"; shift ;;
     --update) ACTION="update"; shift ;;
     --status) ACTION="status"; shift ;;
     --restart) ACTION="restart"; shift ;;
@@ -754,6 +756,11 @@ case "$ACTION" in
   check-deps)
     print_dep_status
     exit 0 ;;
+  orig-code)
+    # 「下载原始文件」当前有效的 6 位密码（每 15 分钟自动换一次）
+    [[ -f "${PROJECT_DIR}/dist/tools/originalCode.js" ]] || die "还没构建过（缺 dist/tools/originalCode.js）。先跑一次：sudo ./deploy.sh --update"
+    cd "$PROJECT_DIR"
+    exec node dist/tools/originalCode.js ;;
   stop)
     log "停止服务 ${SERVICE_NAME} ..."
     systemctl stop "$SERVICE_NAME" || true
@@ -1061,6 +1068,8 @@ fi
 if [[ ! -f .env ]]; then
   log "生成 .env（首次部署）"
   ANDROID_TOKEN_VALUE="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  # 「下载原始文件」的密码种子：6 位密码每 15 分钟由它算出来（不是固定值，也不是明文密码）
+  ORIGINAL_DL_SECRET_VALUE="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   WEB_AUTH_USER_VALUE="${WEB_AUTH_USER:-admin}"
   WEB_AUTH_PASSWORD_VALUE="${WEB_AUTH_PASSWORD:-}"
   [[ -n "$WEB_AUTH_PASSWORD_VALUE" ]] || WEB_AUTH_PASSWORD_VALUE="$(gen_password || true)"
@@ -1083,6 +1092,8 @@ CONCURRENCY_WEBVIDEO=0
 BT_DOWNLOAD_DIR=/var/lib/transmission/downloads
 TRANSMISSION_INCOMPLETE_DIR=/var/lib/transmission/incomplete
 ANDROID_TOKEN=${ANDROID_TOKEN_VALUE}
+# 「下载原始文件」密码种子（每 15 分钟换一次的 6 位数字由它推导；改它 = 立刻换号）
+ORIGINAL_DL_SECRET=${ORIGINAL_DL_SECRET_VALUE}
 # 网页登录账号密码（全站鉴权；部署完成后终端会打印一次）
 WEB_AUTH_USER=${WEB_AUTH_USER_VALUE}
 WEB_AUTH_PASSWORD=${WEB_AUTH_PASSWORD_VALUE}
@@ -1133,7 +1144,8 @@ else
     "COOKIE_HARVEST_ENABLED=1" \
     "WEB_AUTH_USER=${WEB_AUTH_USER:-admin}" \
     "WEB_SESSION_HOURS=168" \
-    "WEB_SESSION_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    "WEB_SESSION_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" \
+    "ORIGINAL_DL_SECRET=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   # 密码单独处理：缺了就生成一个，并在下面显著打印出来
   if ! grep -q '^WEB_AUTH_PASSWORD=' .env; then
     GEN_PW="$(gen_password)"

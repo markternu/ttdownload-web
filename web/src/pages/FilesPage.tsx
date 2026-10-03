@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Clock, Download, FileVideo2, HardDrive, RefreshCw, Search, Trash2, X } from 'lucide-react'
+import { Clock, Download, FileOutput, FileVideo2, HardDrive, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import {
   Badge,
   Button,
@@ -19,6 +19,7 @@ import {
 import type { Column } from '../components/ui'
 import { useFileEvents } from '../context/AppDataContext'
 import { useToast } from '../context/ToastContext'
+import { useOriginalDownload } from '../context/OriginalDownloadContext'
 import { useDebouncedValue, useFiles } from '../hooks/useAsync'
 import { api, MODULE_LABELS } from '../lib/api'
 import { formatBytes, formatDateTime, humanizeError } from '../lib/format'
@@ -57,6 +58,7 @@ const CHECKBOX_CLASS =
  */
 export default function FilesPage() {
   const toast = useToast()
+  const original = useOriginalDownload()
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<FileStatusFilter>('all')
   const [page, setPage] = useState(1)
@@ -304,15 +306,28 @@ export default function FilesPage() {
       render: (file) => (
         <div className="flex flex-wrap items-center justify-end gap-1.5">
           {file.available ? (
-            <a
-              href={api.fileDownloadUrl(file.id, file.name)}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-slate-200 px-3 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <Download className="h-3.5 w-3.5" />
-              下载
-            </a>
+            <>
+              <a
+                href={api.fileDownloadUrl(file.id, file.name)}
+                target="_blank"
+                rel="noreferrer"
+                title="下载服务器上的加密归档文件（列表里这个文件本身）"
+                className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-slate-200 px-3 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <Download className="h-3.5 w-3.5" />
+                下载
+              </a>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => original.downloadOriginal(file)}
+                title="在服务器上临时解密成原始文件再下载（需 6 位下载密码；下载完自动删除临时文件）"
+              >
+                <FileOutput className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">下载原始文件</span>
+                <span className="sm:hidden">原始</span>
+              </Button>
+            </>
           ) : (
             <span
               title="安卓端已下载完成，服务器上的文件已被删除（数据库记录保留作为历史），无法再下载"

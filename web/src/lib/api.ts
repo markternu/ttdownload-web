@@ -15,6 +15,8 @@ import type {
   DebugStatus,
   FileListResponse,
   FileStatusFilter,
+  OriginalJob,
+  OriginalStatus,
   HealthStatus,
   LogLevel,
   LogsTail,
@@ -424,6 +426,37 @@ export const api = {
       { method: 'DELETE' },
       withFile ? { withFile: 1 } : undefined,
     ),
+
+  /* --------------------- 下载原始文件（临时解密） --------------------- */
+
+  /** 状态：功能是否启用、当前会话是否还在 15 分钟免问期内 */
+  originalStatus: () => request<OriginalStatus>('/api/original/status'),
+
+  /** 校验 6 位下载密码（每 15 分钟换一次）；成功后 15 分钟内不再问 */
+  originalUnlock: (code: string) =>
+    request<{ ok: boolean; unlockSecondsLeft: number }>('/api/original/unlock', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
+
+  /** 发起解密任务（后台跑，前端轮询进度） */
+  originalStart: (fileId: number) =>
+    request<{ job: OriginalJob }>('/api/original/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ fileId }),
+    }),
+
+  /** 当前会话还没结束的任务（页面刷新后也能看到"还在解密"） */
+  originalJobs: () => request<{ jobs: OriginalJob[] }>('/api/original/jobs'),
+
+  originalJob: (id: string) => request<{ job: OriginalJob }>(`/api/original/jobs/${id}`),
+
+  /** 取消并立刻删掉临时文件 */
+  originalCancel: (id: string) =>
+    request<{ ok: boolean }>(`/api/original/jobs/${id}`, { method: 'DELETE' }),
+
+  /** 解密完成后的下载地址（走浏览器原生下载，才能正确吃到 Content-Disposition 里的文件名） */
+  originalDownloadUrl: (id: string): string => `${API_BASE}/api/original/jobs/${encodeURIComponent(id)}/download`,
 
   /**
    * 批量删除（POST /api/files/bulk-delete）。列表页「全选当前页 → 全部删除」用。

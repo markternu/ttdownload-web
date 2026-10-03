@@ -46,6 +46,7 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
   );
   process.env.YTDLP_BIN = fakeYtdlp;
 
+  process.env.ORIGINAL_DL_SECRET = 'browser-test-secret-0123456789abcdef0123456789';
   const { createApp } = await import('../dist/app.js');
   const { filesRepo } = await import('../dist/core/db.js');
   // 造一个"已加密归档、安卓端还没取走"的成品，供「待下载」页测试
@@ -88,6 +89,28 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     path: path.join(consumerDir, doneName),
   });
   filesRepo.markDownloaded(doneId);
+
+  // 造一个**真实的加密归档**（用项目自己的加密代码），供「下载原始文件」用
+  {
+    const { markVlt, encryptFile } = await import('../dist/services/crypto.js');
+    const { config: cfg } = await import('../dist/core/config.js');
+    const origName = '原始文件 测试 #1 100%.mp4';
+    const plain = path.join(root, 'origdl.plain');
+    const bytes = Buffer.alloc(8192, 9);
+    fs.writeFileSync(plain, bytes);
+    markVlt(plain, origName);
+    await encryptFile(plain, plain + '.data', cfg.encryptPassword);
+    fs.rmSync(plain);
+    fs.renameSync(plain + '.data', path.join(consumerDir, 'origdl1'));
+    filesRepo.add({
+      taskId: null,
+      name: 'origdl1',
+      title: '下载原始文件测试',
+      module: 'webvideo',
+      sizeBytes: fs.statSync(path.join(consumerDir, 'origdl1')).size,
+      path: path.join(consumerDir, 'origdl1'),
+    });
+  }
 
   // BT：造两条"已入队"的种子，供「已入队种子」页的「全选 → 全部删除」用
   const { seedsRepo } = await import('../dist/core/db.js');
@@ -539,6 +562,56 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     assert.equal(await page.locator('text=bulkdel-b').count(), 0, '选中的文件应从列表消失');
 
     assert.deepEqual(pageErrors, [], `批量删除不应有 JS 报错：${pageErrors.join('; ')}`);
+    await page.close();
+  });
+
+  test('★下载原始文件：问 6 位密码 → 后台解密（切页不中断）→ 自动下载', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const { currentCode } = await import('../dist/services/originalCode.js');
+    const page = await newPage();
+    await page.goto(`${base}/files`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=文件清单', { timeout: 20000 });
+
+    // 列表里应有我们造的加密归档，并且带「下载原始文件」按钮
+    const row = page.locator('tr', { hasText: 'origdl1' }).first();
+    assert.ok((await row.count()) > 0, '应列出加密归档 origdl1');
+    const btn = row.getByRole('button', { name: /下载原始文件|原始/ }).first();
+    assert.ok(await btn.isVisible(), '每行应有「下载原始文件」按钮');
+
+    // 点它 → 必须先问 6 位密码（不是直接下载）
+    await btn.click();
+    await page.waitForSelector('text=请输入 6 位数字下载密码', { timeout: 10000 });
+    const input = page.getByPlaceholder('000000');
+    assert.ok(await input.isVisible(), '应弹出 6 位密码输入框');
+
+    // 输错 → 要有明确报错，且不开始解密
+    await input.fill('000000');
+    await page.getByRole('button', { name: '确认' }).click();
+    await page.waitForSelector('text=/密码不正确|不正确/', { timeout: 10000 });
+
+    // 输对 → 弹窗关掉、开始解密（悬浮面板出现）
+    await input.fill(currentCode());
+    await page.getByRole('button', { name: '确认' }).click();
+    await page.waitForSelector('text=/正在解密|已开始下载|原始文件/', { timeout: 20000 });
+
+    // ★关键：解密期间切到别的页面，面板必须还在（不能因为离开文件页就中断）
+    await page.goto(`${base}/bt`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(800);
+    assert.ok(
+      (await page.locator('text=/正在解密|已开始下载|原始文件/').count()) > 0,
+      '切到 BT 页后，解密进度面板必须仍然在（用户要求 loading 不能挡住去别的地方）',
+    );
+
+    // 回到文件页，等它就绪（会自动触发浏览器下载）
+    await page.goto(`${base}/files`, { waitUntil: 'networkidle' });
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 30000 }).catch(() => null),
+      page.waitForSelector('text=/已开始下载/', { timeout: 30000 }).catch(() => null),
+    ]);
+    if (download) {
+      assert.match(decodeURIComponent(download.url()), /\/api\/original\/jobs\/[0-9a-f]+\/download$/, '下载地址应指向原始文件接口');
+    }
+    assert.deepEqual(pageErrors, [], `下载原始文件不应有 JS 报错：${pageErrors.join('; ')}`);
     await page.close();
   });
 

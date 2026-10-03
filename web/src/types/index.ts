@@ -639,3 +639,36 @@ export interface NetworkReport {
   proxy: { env: Record<string, string>; extraArgs: string } // 服务端实际生效的代理配置
   checks: NetworkCheck[]
 }
+
+/* ---------------- 「下载原始文件」（临时解密后下载） ---------------- */
+
+export type OriginalJobState = 'decrypting' | 'ready' | 'failed' | 'cancelled'
+
+export interface OriginalJob {
+  id: string
+  fileId: number
+  /** 从 FKY996 标记里读出来的原始文件名 */
+  originalName: string
+  contentBytes: number
+  /** 预期大小（≈密文大小），用来算进度 */
+  expectedBytes: number
+  state: OriginalJobState
+  /** 0-100 */
+  progress: number
+  error: string | null
+  createdAt: string
+  readyAt: string | null
+}
+
+export interface OriginalStatus {
+  enabled: boolean
+  unlocked: boolean
+  unlockSecondsLeft: number
+  unlockTtlSec: number
+  /** 6 位密码多久换一次（秒） */
+  codeWindowSec: number
+  /** 当前这号还剩多少秒 */
+  codeValidSec: number
+  /** 临时文件最多保留多久（秒） */
+  tempMaxAgeSec: number
+}

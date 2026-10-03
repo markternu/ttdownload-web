@@ -9,7 +9,13 @@ import http from 'node:http';
 import { setupRuntime, startAria2Mock, tmpFile } from './helpers.mjs';
 
 const mock = await startAria2Mock({ workDir: '/tmp' });
-const root = setupRuntime({ env: { ARIA2_RPC_PORT: String(mock.port) } });
+const root = setupRuntime({
+  env: {
+    ARIA2_RPC_PORT: String(mock.port),
+    // 「下载原始文件」的密码种子（6 位密码由它 + 15 分钟窗口算出来）
+    ORIGINAL_DL_SECRET: 'test-secret-0123456789abcdef0123456789abcdef',
+  },
+});
 
 // 假 yt-dlp
 const fakeYtdlp = path.join(root, 'bin', 'yt-dlp');
@@ -819,4 +825,190 @@ test('已入队种子批量删除：空 ids 必须被挡住（不能让"全选"�
     body: JSON.stringify({ ids: [], action: 'delete' }),
   });
   assert.equal(res.status, 400);
+});
+
+/* ------------------------------------------------------------------ */
+/* 「下载原始文件」：6 位轮换密码 + 临时解密 + 下载完立刻删临时文件        */
+/* ------------------------------------------------------------------ */
+
+/** POST 便捷方法 */
+const post = (p, body, init = {}) =>
+  get(p, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+    ...init,
+  });
+
+/** 造一个真实的加密归档文件（用项目自己的加密代码，保证格式一致），返回 { id, path, content } */
+async function makeEncryptedArchive(name, originalName, contentBytes = 4096) {
+  const { markVlt, encryptFile } = await import('../dist/services/crypto.js');
+  const { config } = await import('../dist/core/config.js');
+  const content = Buffer.alloc(contentBytes, 7);
+  const plain = path.join(root, `plain-${name}`);
+  fs.writeFileSync(plain, content);
+  markVlt(plain, originalName);
+  const enc = plain + '.data';
+  await encryptFile(plain, enc, config.encryptPassword);
+  fs.rmSync(plain);
+  const finalPath = path.join(config.dirs.consumer, name);
+  fs.mkdirSync(config.dirs.consumer, { recursive: true });
+  fs.renameSync(enc, finalPath);
+  const id = filesRepo.add({
+    taskId: null,
+    name,
+    title: `标题-${name}`,
+    module: 'webvideo',
+    sizeBytes: fs.statSync(finalPath).size,
+    path: finalPath,
+  });
+  return { id, path: finalPath, content };
+}
+
+test('★下载原始文件：没输密码时不许解（401），密码对了才放行', async () => {
+  const { currentCode } = await import('../dist/services/originalCode.js');
+  const a = await makeEncryptedArchive('origlock1', '锁定测试.mp4');
+
+  const denied = await post('/api/original/jobs', { fileId: a.id });
+  // ⚠️ 必须是 403 而不是 401：前端把"非登录接口的 401"当成会话过期会跳回登录页
+  assert.equal(denied.status, 403, '没解锁时不许开始解密（403）');
+  assert.equal(denied.json.error.code, 'ORIGINAL_LOCKED');
+
+  const wrong = await post('/api/original/unlock', { code: '000000' });
+  assert.equal(wrong.status, 403, '错误密码必须被拒（403，别用 401 免得被当成会话过期）');
+  assert.match(wrong.json.error.message, /不正确/, '要给出"密码不正确"的中文原因');
+
+  const right = await post('/api/original/unlock', { code: currentCode() });
+  assert.equal(right.status, 200, `当前密码应被接受（${currentCode()}）`);
+  assert.ok(right.json.unlockSecondsLeft > 0);
+
+  // 解锁后 15 分钟内不再问：状态接口应显示 unlocked
+  const st = await get('/api/original/status');
+  assert.equal(st.json.enabled, true);
+  assert.equal(st.json.unlocked, true);
+  assert.equal(st.json.unlockTtlSec, 900, '免问时长应为 15 分钟');
+  assert.equal(st.json.codeWindowSec, 900, '密码每 15 分钟换一次');
+});
+
+test('★下载原始文件：解密出来就是原文件（字节一致），文件名按 RFC5987 百分号转义，下完立刻删临时文件', async () => {
+  const { config } = await import('../dist/core/config.js');
+  const { currentCode } = await import('../dist/services/originalCode.js');
+  const { getJob, tempDir } = await import('../dist/services/originalDownload.js');
+
+  // 文件名故意放空格、#、%、中文、以及 RFC5987 的保留字符 ' ( ) *
+  const originalName = "我的 视频 #1 100% 'ok' (测试)*.mp4";
+  const a = await makeEncryptedArchive('origdl1', originalName);
+
+  await post('/api/original/unlock', { code: currentCode() });
+  const started = await post('/api/original/jobs', { fileId: a.id });
+  assert.equal(started.status, 200);
+  const jobId = started.json.job.id;
+
+  // 轮询到 ready（解密 4KB 很快，但给足时间）
+  let job = null;
+  for (let i = 0; i < 60; i += 1) {
+    const r = await get(`/api/original/jobs/${jobId}`);
+    if (r.status !== 200) break;
+    job = r.json.job;
+    if (job.state === 'ready' || job.state === 'failed') break;
+    await new Promise((r2) => setTimeout(r2, 100));
+  }
+  assert.ok(job, '应能查到任务');
+  assert.equal(job.state, 'ready', `解密应成功，实际：${JSON.stringify(job)}`);
+  assert.equal(job.originalName, originalName, '原始文件名必须从 FKY996 标记里原样读回');
+  assert.equal(job.contentBytes, a.content.length, '还原出来的内容长度应与原始一致');
+
+  // 临时文件在下载前确实存在
+  const t = tempDir();
+  const tempBefore = fs.readdirSync(t).length;
+  assert.ok(tempBefore >= 1, '应有临时文件');
+
+  // 下载
+  const res = await fetch(`${base}/api/original/jobs/${jobId}/download`);
+  assert.equal(res.status, 200);
+  const got = Buffer.from(await res.arrayBuffer());
+  assert.deepEqual(got, a.content, '下载到的字节必须与原始文件完全一致');
+
+  const cd = res.headers.get('content-disposition') ?? '';
+  assert.match(cd, /filename\*=UTF-8''/, '必须给 filename*（RFC 5987）');
+  // 空格 → %20；中文 → UTF-8 百分号编码；' ( ) * 必须被转义
+  assert.ok(cd.includes('%20'), '空格必须转义成 %20');
+  assert.ok(cd.includes('%E6%88%91'), '中文应做 UTF-8 百分号编码');
+  assert.ok(cd.includes('%27') && cd.includes('%28') && cd.includes('%29') && cd.includes('%2A'), "' ( ) * 必须额外转义（RFC5987 的 attr-char 不含它们）");
+  assert.ok(!/filename="[^"]*[\u4e00-\u9fa5]/.test(cd), 'filename= 兜底里不能塞非 ASCII');
+
+  // 响应写完 → 立刻删临时文件
+  await new Promise((r2) => setTimeout(r2, 300));
+  assert.equal(fs.existsSync(path.join(t, `${jobId}.part`)), false, '下载完成后临时文件必须被删除');
+  const after = await get(`/api/original/jobs/${jobId}`);
+  assert.equal(after.status, 404, '任务记录也应被清掉');
+});
+
+test('★下载原始文件：临时文件有两条兜底清理（1 小时超时 + 开机清空）', async () => {
+  const { sweepOnce, tempDir, getJob, TEMP_MAX_AGE_MS } = await import('../dist/services/originalDownload.js');
+  const { currentCode } = await import('../dist/services/originalCode.js');
+  const a = await makeEncryptedArchive('origdl2', '超时清理.mp4');
+
+  await post('/api/original/unlock', { code: currentCode() });
+  const started = await post('/api/original/jobs', { fileId: a.id });
+  const jobId = started.json.job.id;
+
+  let job = null;
+  for (let i = 0; i < 60; i += 1) {
+    job = getJob(jobId);
+    if (!job || job.state === 'ready' || job.state === 'failed') break;
+    await new Promise((r2) => setTimeout(r2, 100));
+  }
+  assert.equal(getJob(jobId)?.state, 'ready', '先要解出来');
+  const t = tempDir();
+  assert.ok(fs.existsSync(path.join(t, `${jobId}.part`)), '临时文件应在');
+
+  // 模拟"没能确认下载完成、已经放了 1 小时以上" → 清理线程必须删掉它
+  const live = getJob(jobId);
+  live.readyAt = Date.now() - TEMP_MAX_AGE_MS - 1000;
+  sweepOnce();
+  assert.equal(fs.existsSync(path.join(t, `${jobId}.part`)), false, '超过 1 小时的临时文件必须被清理');
+  assert.equal(getJob(jobId), undefined, '任务记录也要清掉');
+
+  // 开机清空：往临时目录里丢文件，purgeTempOnBoot 应清干净
+  const stray = path.join(t, 'stray-from-power-loss.part');
+  fs.writeFileSync(stray, 'leftover');
+  const { purgeTempOnBoot } = await import('../dist/services/originalDownload.js');
+  const r = purgeTempOnBoot();
+  assert.ok(r.removed >= 1, '开机应清掉遗留文件');
+  assert.equal(fs.existsSync(stray), false, '断电遗留的临时文件必须被清掉');
+});
+
+test('★下载原始文件：6 位密码的窗口语义（当前窗口有效、上个窗口容忍、更早的作废）', async () => {
+  const { CODE_WINDOW_MS, codeForWindow, currentCode, secondsLeftInWindow, verifyCode, windowIndexOf } = await import(
+    '../dist/services/originalCode.js'
+  );
+  const secret = process.env.ORIGINAL_DL_SECRET;
+  const now = Date.now();
+  const w = windowIndexOf(now);
+
+  assert.match(currentCode(now), /^\d{6}$/, '必须是 6 位数字（含前导零）');
+  assert.equal(currentCode(now), codeForWindow(secret, w), '当前密码应等于本窗口的推导值');
+  assert.ok(secondsLeftInWindow(now) > 0 && secondsLeftInWindow(now) <= CODE_WINDOW_MS / 1000);
+
+  // 换窗口必须换号（同一个窗口内必须稳定）
+  assert.equal(currentCode(now + 1000), currentCode(now), '同一窗口内密码不变');
+  assert.notEqual(currentCode(now + CODE_WINDOW_MS), currentCode(now), '跨窗口密码必须变');
+
+  assert.equal(verifyCode(currentCode(now), now), true, '当前窗口应通过');
+  assert.equal(verifyCode(codeForWindow(secret, w - 1), now), true, '上一个窗口应容忍（用户看到后切过来可能已跨窗口）');
+  assert.equal(verifyCode(codeForWindow(secret, w - 2), now), false, '更早的窗口必须作废');
+  assert.equal(verifyCode('12345', now), false, '不是 6 位必须拒');
+  assert.equal(verifyCode('abcdef', now), false, '非数字必须拒');
+});
+
+test('★下载原始文件：同一个文件重复点不再重复解密（复用已有任务）', async () => {
+  const { currentCode } = await import('../dist/services/originalCode.js');
+  const a = await makeEncryptedArchive('origdl3', '复用任务.mp4', 200000);
+  await post('/api/original/unlock', { code: currentCode() });
+  const first = await post('/api/original/jobs', { fileId: a.id });
+  const second = await post('/api/original/jobs', { fileId: a.id });
+  assert.equal(second.json.job.id, first.json.job.id, '同一个文件应复用同一个任务，不重复解密');
+  // 收尾：取消掉，别影响后面的用例
+  await get(`/api/original/jobs/${first.json.job.id}`, { method: 'DELETE' });
 });

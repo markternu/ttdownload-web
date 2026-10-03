@@ -13,6 +13,7 @@ import { aria2Router } from './routes/aria2';
 import { btRouter } from './routes/bt';
 import { webvideoRouter } from './routes/webvideo';
 import { filesRouter } from './routes/files';
+import { originalRouter } from './routes/original';
 import { androidRouter } from './routes/android';
 import { usbRouter } from './routes/usb';
 
@@ -63,6 +64,7 @@ export function createApp(): express.Express {
   app.use('/api/bt', btRouter);
   app.use('/api/webvideo', webvideoRouter);
   app.use('/api/files', filesRouter);
+  app.use('/api/original', originalRouter);
   app.use('/api/android', androidRouter);
   app.use('/api', usbRouter);
 
