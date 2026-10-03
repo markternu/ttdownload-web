@@ -13,6 +13,9 @@ export type { ProgressBarProps } from './ProgressBar'
 export { Modal, ConfirmDialog } from './Modal'
 export type { ModalProps, ConfirmDialogProps } from './Modal'
 
+export { DangerConfirmModal } from './DangerConfirmModal'
+export type { DangerConfirmItem, DangerConfirmModalProps } from './DangerConfirmModal'
+
 export { Table } from './Table'
 export type { Column, TableProps } from './Table'
 

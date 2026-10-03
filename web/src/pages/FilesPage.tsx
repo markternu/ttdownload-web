@@ -1,21 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import {
-  AlertTriangle,
-  Clock,
-  Download,
-  FileVideo2,
-  HardDrive,
-  RefreshCw,
-  Search,
-  ShieldAlert,
-  Trash2,
-  X,
-} from 'lucide-react'
+import { Clock, Download, FileVideo2, HardDrive, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import {
   Badge,
   Button,
   Card,
   CardHeader,
+  DangerConfirmModal,
   EmptyState,
   ErrorState,
   Input,
@@ -37,8 +27,6 @@ import type { FileStatusFilter, PublishedFile } from '../types'
 const PAGE_SIZE = 20
 /** 自动刷新间隔（静默，不打断当前操作） */
 const AUTO_REFRESH_MS = 10_000
-/** 危险操作最终确认要输入的字 */
-const CONFIRM_WORD = '删除'
 
 /** 秒 → 「12 分钟 / 3 小时 / 2 天」 */
 function formatWaiting(seconds: number | null | undefined): string {
@@ -86,12 +74,10 @@ export default function FilesPage() {
   const [withFile, setWithFile] = useState(false)
   const [deleting, setDeleting] = useState(false)
 
-  /* ---------------- 批量删除（新增，三步确认） ---------------- */
+  /* ---------------- 批量删除（新增，三步确认；弹窗由 DangerConfirmModal 承担） ---------------- */
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [bulkOpen, setBulkOpen] = useState(false)
-  const [bulkStep, setBulkStep] = useState<1 | 2 | 3>(1)
   const [bulkWithFile, setBulkWithFile] = useState(false)
-  const [bulkConfirm, setBulkConfirm] = useState('')
   const [bulkBusy, setBulkBusy] = useState(false)
 
   const selectedFiles = useMemo(() => items.filter((file) => selected.has(file.id)), [items, selected])
@@ -171,20 +157,17 @@ export default function FilesPage() {
 
   const openBulk = (): void => {
     if (!selected.size) return
-    setBulkStep(1)
     setBulkWithFile(false)
-    setBulkConfirm('')
     setBulkOpen(true)
   }
 
   const closeBulk = (): void => {
     if (bulkBusy) return
     setBulkOpen(false)
-    setBulkConfirm('')
   }
 
   const handleBulkDelete = useCallback(async () => {
-    if (bulkConfirm.trim() !== CONFIRM_WORD || bulkBusy) return
+    if (bulkBusy) return
     const ids = selectedFiles.map((file) => file.id)
     if (!ids.length) return
     setBulkBusy(true)
@@ -202,7 +185,6 @@ export default function FilesPage() {
         )
       }
       setBulkOpen(false)
-      setBulkConfirm('')
       setSelected(new Set())
       void refresh()
     } catch (err) {
@@ -210,7 +192,7 @@ export default function FilesPage() {
     } finally {
       setBulkBusy(false)
     }
-  }, [bulkConfirm, bulkBusy, bulkWithFile, refresh, selectedFiles, toast])
+  }, [bulkBusy, bulkWithFile, refresh, selectedFiles, toast])
 
   const oldestWaitingSec = counts?.oldestPendingAt
     ? Math.max(0, Math.round((Date.now() - Date.parse(counts.oldestPendingAt)) / 1000))
@@ -573,163 +555,70 @@ export default function FilesPage() {
         </div>
       </Modal>
 
-      {/* ---------------- 批量删除：三步确认 ---------------- */}
-      <Modal
+      {/* ---------------- 批量删除：三步确认（共用组件） ---------------- */}
+      <DangerConfirmModal
         open={bulkOpen}
         title="全部删除（危险操作）"
         description={`已选中当前页 ${selectedFiles.length} 个文件 · 共 ${formatBytes(selectedBytes, '0 B')}`}
-        onClose={closeBulk}
-        size="md"
-        footer={
-          bulkStep === 1 ? (
-            <>
-              <Button variant="outline" onClick={closeBulk} disabled={bulkBusy}>
-                取消
-              </Button>
-              <Button variant="secondary" onClick={() => setBulkStep(2)}>
-                继续（第 2/3 步）
-              </Button>
-            </>
-          ) : bulkStep === 2 ? (
-            <>
-              <Button variant="outline" onClick={() => setBulkStep(1)} disabled={bulkBusy}>
-                上一步
-              </Button>
-              <Button variant="secondary" onClick={() => setBulkStep(3)}>
-                继续（第 3/3 步）
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button variant="outline" onClick={() => setBulkStep(2)} disabled={bulkBusy}>
-                上一步
-              </Button>
-              <Button
-                variant="danger"
-                loading={bulkBusy}
-                disabled={bulkConfirm.trim() !== CONFIRM_WORD}
-                onClick={() => void handleBulkDelete()}
-              >
-                确认全部删除（{selectedFiles.length} 个）
-              </Button>
-            </>
-          )
+        items={selectedFiles.map((file) => ({
+          id: file.id,
+          name: file.name,
+          hint: formatBytes(file.sizeBytes, '未知'),
+        }))}
+        rangeWarning={
+          <>
+            你即将删除 <strong>{selectedFiles.length}</strong> 个文件（共 {formatBytes(selectedBytes, '0 B')}）。
+            这是不可撤销的危险操作，请先核对下面的清单。
+          </>
         }
-      >
-        <div className="space-y-3 text-sm text-slate-600 dark:text-slate-300">
-          {/* 步骤指示 */}
-          <div className="flex items-center gap-2 text-[11px] font-medium">
-            {[
-              { n: 1 as const, label: '确认范围' },
-              { n: 2 as const, label: '选择方式' },
-              { n: 3 as const, label: '输入确认' },
-            ].map((s) => (
-              <span
-                key={s.n}
-                className={
-                  'rounded-full px-2 py-0.5 ' +
-                  (bulkStep === s.n
-                    ? 'bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-300'
-                    : bulkStep > s.n
-                      ? 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-200'
-                      : 'bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500')
-                }
-              >
-                {s.n}. {s.label}
+        step2Label="选择方式"
+        step2Content={
+          <>
+            <p className="text-xs text-slate-500 dark:text-slate-400">选择删除方式（两种都不可撤销）：</p>
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-slate-200 px-3 py-2.5 dark:border-slate-800">
+              <input
+                type="radio"
+                name="bulk-mode"
+                className="mt-0.5 h-4 w-4"
+                checked={!bulkWithFile}
+                onChange={() => setBulkWithFile(false)}
+              />
+              <span>
+                <span className="font-medium text-slate-800 dark:text-slate-100">仅删除记录</span>
+                <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
+                  数据库记录会消失，<strong>磁盘文件保留、空间不释放</strong>（之后可用「孤儿文件」排查找回）。
+                </span>
               </span>
-            ))}
-          </div>
-
-          {bulkStep === 1 ? (
-            <>
-              <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50/70 px-3 py-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-300">
-                <AlertTriangle className="mt-px h-4 w-4 shrink-0" />
-                <span>
-                  你即将删除 <strong>{selectedFiles.length}</strong> 个文件（共 {formatBytes(selectedBytes, '0 B')}）。
-                  这是不可撤销的危险操作，请先核对下面的清单。
+            </label>
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-red-200 bg-red-50/50 px-3 py-2.5 dark:border-red-900/50 dark:bg-red-950/20">
+              <input
+                type="radio"
+                name="bulk-mode"
+                className="mt-0.5 h-4 w-4"
+                checked={bulkWithFile}
+                onChange={() => setBulkWithFile(true)}
+              />
+              <span>
+                <span className="font-medium text-red-700 dark:text-red-300">同时删除磁盘文件</span>
+                <span className="mt-0.5 block text-xs text-red-600/90 dark:text-red-300/80">
+                  记录 + 文件一起删，<strong>立即释放空间</strong>；文件不可恢复，安卓端也再拿不到。
                 </span>
-              </div>
-              <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800">
-                <ul className="divide-y divide-slate-100 text-xs dark:divide-slate-800">
-                  {selectedFiles.slice(0, 30).map((file) => (
-                    <li key={file.id} className="flex items-center justify-between gap-3 px-3 py-2">
-                      <span className="min-w-0 truncate font-mono text-slate-700 dark:text-slate-200" title={file.title}>
-                        {file.name}
-                      </span>
-                      <span className="shrink-0 tabular-nums text-slate-400">{formatBytes(file.sizeBytes, '未知')}</span>
-                    </li>
-                  ))}
-                  {selectedFiles.length > 30 ? (
-                    <li className="px-3 py-2 text-slate-400">…等共 {selectedFiles.length} 个</li>
-                  ) : null}
-                </ul>
-              </div>
-            </>
-          ) : null}
-
-          {bulkStep === 2 ? (
-            <>
-              <p className="text-xs text-slate-500 dark:text-slate-400">选择删除方式（两种都不可撤销）：</p>
-              <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-slate-200 px-3 py-2.5 dark:border-slate-800">
-                <input
-                  type="radio"
-                  name="bulk-mode"
-                  className="mt-0.5 h-4 w-4"
-                  checked={!bulkWithFile}
-                  onChange={() => setBulkWithFile(false)}
-                />
-                <span>
-                  <span className="font-medium text-slate-800 dark:text-slate-100">仅删除记录</span>
-                  <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
-                    数据库记录会消失，<strong>磁盘文件保留、空间不释放</strong>（之后可用「孤儿文件」排查找回）。
-                  </span>
-                </span>
-              </label>
-              <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-red-200 bg-red-50/50 px-3 py-2.5 dark:border-red-900/50 dark:bg-red-950/20">
-                <input
-                  type="radio"
-                  name="bulk-mode"
-                  className="mt-0.5 h-4 w-4"
-                  checked={bulkWithFile}
-                  onChange={() => setBulkWithFile(true)}
-                />
-                <span>
-                  <span className="font-medium text-red-700 dark:text-red-300">同时删除磁盘文件</span>
-                  <span className="mt-0.5 block text-xs text-red-600/90 dark:text-red-300/80">
-                    记录 + 文件一起删，<strong>立即释放空间</strong>；文件不可恢复，安卓端也再拿不到。
-                  </span>
-                </span>
-              </label>
-            </>
-          ) : null}
-
-          {bulkStep === 3 ? (
-            <>
-              <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50/70 px-3 py-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-300">
-                <ShieldAlert className="mt-px h-4 w-4 shrink-0" />
-                <span>
-                  最后确认：将删除 <strong>{selectedFiles.length}</strong> 个文件（
-                  {formatBytes(selectedBytes, '0 B')}），方式为
-                  <strong>{bulkWithFile ? '记录 + 磁盘文件（不可恢复）' : '仅删除记录（磁盘文件保留）'}</strong>。
-                </span>
-              </div>
-              <label className="block space-y-1.5">
-                <span className="text-xs text-slate-500 dark:text-slate-400">
-                  请输入「{CONFIRM_WORD}」两个字以启用删除按钮：
-                </span>
-                <input
-                  type="text"
-                  value={bulkConfirm}
-                  onChange={(event) => setBulkConfirm(event.target.value)}
-                  placeholder={CONFIRM_WORD}
-                  autoComplete="off"
-                  className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-800 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                />
-              </label>
-            </>
-          ) : null}
-        </div>
-      </Modal>
+              </span>
+            </label>
+          </>
+        }
+        finalSummary={
+          <>
+            最后确认：将删除 <strong>{selectedFiles.length}</strong> 个文件（
+            {formatBytes(selectedBytes, '0 B')}），方式为
+            <strong>{bulkWithFile ? '记录 + 磁盘文件（不可恢复）' : '仅删除记录（磁盘文件保留）'}</strong>。
+          </>
+        }
+        executeLabel={`确认全部删除（${selectedFiles.length} 个）`}
+        busy={bulkBusy}
+        onClose={closeBulk}
+        onConfirm={() => void handleBulkDelete()}
+      />
     </div>
   )
 }

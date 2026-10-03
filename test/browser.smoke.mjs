@@ -88,6 +88,18 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     path: path.join(consumerDir, doneName),
   });
   filesRepo.markDownloaded(doneId);
+
+  // BT：造两条"已入队"的种子，供「已入队种子」页的「全选 → 全部删除」用
+  const { seedsRepo } = await import('../dist/core/db.js');
+  const btQueuedDir = path.join(root, 'transmission', 'btzhongzi_yijingdownding');
+  fs.mkdirSync(btQueuedDir, { recursive: true });
+  for (const n of ['queued-del-a.torrent', 'queued-del-b.torrent']) {
+    const p = path.join(btQueuedDir, n);
+    fs.writeFileSync(p, 'd4:infod4:name4:testee');
+    const s = seedsRepo.upsertByPath({ name: n, path: p });
+    // 入队后的种子：状态 queued，且 .torrent 已归档到 btQueued（与真实流程一致）
+    seedsRepo.update(s.id, { status: 'queued', path: p });
+  }
   const server = http.createServer(createApp());
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -527,6 +539,45 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     assert.equal(await page.locator('text=bulkdel-b').count(), 0, '选中的文件应从列表消失');
 
     assert.deepEqual(pageErrors, [], `批量删除不应有 JS 报错：${pageErrors.join('; ')}`);
+    await page.close();
+  });
+
+  test('★已入队种子：全选当前页 → 全部删除（三步确认，且如实说明"只删记录"）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/bt-queued`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=已入队种子', { timeout: 20000 });
+    assert.ok((await page.locator('text=queued-del-a.torrent').count()) > 0, '应列出已入队种子');
+
+    await page.getByRole('checkbox', { name: '全选当前页' }).first().check();
+    await page.waitForTimeout(200);
+    assert.ok((await page.locator('text=/已选\\s*2/').count()) > 0, '应显示已选 2 个');
+
+    await page.getByRole('button', { name: /全部删除/ }).first().click();
+    await page.waitForSelector('text=确认范围', { timeout: 10000 });
+    await page.getByRole('button', { name: /继续（第 2\/3 步）/ }).click();
+    await page.waitForSelector('text=确认影响', { timeout: 10000 });
+    // 关键：这一步必须**如实**说明留档的 .torrent 不会被删（不能沿用旧的错误说法）
+    assert.ok(
+      (await page.locator('text=/留档|仍在磁盘上|不删留档/').count()) > 0,
+      '要说明留档的 .torrent 不会被删除',
+    );
+    assert.ok((await page.locator('text=/不会删除/').count()) > 0, '要写清"不会删除"什么');
+
+    await page.getByRole('button', { name: /继续（第 3\/3 步）/ }).click();
+    await page.waitForSelector('text=最后确认', { timeout: 10000 });
+    const danger = page.getByRole('button', { name: /确认全部删除/ });
+    assert.equal(await danger.isDisabled(), true, '未输入确认词时必须禁用');
+    await page.getByPlaceholder('删除').fill('删除');
+    await page.waitForTimeout(200);
+    assert.equal(await danger.isDisabled(), false, '输入确认词后才可用');
+    await danger.click();
+
+    await page.waitForSelector('text=最后确认', { state: 'detached', timeout: 15000 });
+    await page.waitForTimeout(700);
+    assert.equal(await page.locator('text=queued-del-a.torrent').count(), 0, '删除后应从列表消失');
+    assert.equal(await page.locator('text=queued-del-b.torrent').count(), 0, '删除后应从列表消失');
+    assert.deepEqual(pageErrors, [], `已入队种子页不应有 JS 报错：${pageErrors.join('; ')}`);
     await page.close();
   });
 

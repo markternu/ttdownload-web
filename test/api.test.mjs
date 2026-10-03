@@ -757,3 +757,66 @@ test('★批量删除：拒绝删除消费者目录之外的文件（安全护�
   assert.ok(fs.existsSync(outside), '磁盘文件必须原封不动');
   assert.ok(filesRepo.get(id), '记录也应保留（避免"记录没了文件还在"的半截状态）');
 });
+
+/* ------------------------------------------------------------------ */
+/* 「已入队种子」批量删除（列表页 全选 → 全部删除）                       */
+/* ------------------------------------------------------------------ */
+
+test('★已入队种子批量删除：一次删多条记录，逐条回报结果（不存在的 id 不影响其它）', async () => {
+  const { seedsRepo } = await import('../dist/core/db.js');
+  const { config } = await import('../dist/core/config.js');
+  fs.mkdirSync(config.dirs.btPending, { recursive: true });
+  fs.mkdirSync(config.dirs.btQueued, { recursive: true });
+
+  // ① 还在「待入队」目录的种子：删除时应连 .torrent 一起删（既有行为）
+  const pendingPath = path.join(config.dirs.btPending, 'queue-bulk-pending.torrent');
+  fs.writeFileSync(pendingPath, 'd4:infod4:name4:testee');
+  const pendingSeed = seedsRepo.upsertByPath({ name: 'queue-bulk-pending.torrent', path: pendingPath });
+
+  // ② 已经入队、.torrent 归档到 btQueued 的种子（入队时 moveSeedToQueued 会更新 seed.path）
+  const queuedPaths = ['queue-bulk-a.torrent', 'queue-bulk-b.torrent'].map((n) => {
+    const p = path.join(config.dirs.btQueued, n);
+    fs.writeFileSync(p, 'd4:infod4:name4:testee');
+    const s = seedsRepo.upsertByPath({ name: n, path: p });
+    seedsRepo.update(s.id, { status: 'queued', path: p });
+    return { seed: seedsRepo.get(s.id) ?? s, path: p };
+  });
+
+  const ids = [pendingSeed.id, ...queuedPaths.map((x) => x.seed.id), 999999];
+
+  const res = await get('/api/bt/seeds/actions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, action: 'delete' }),
+  });
+  assert.equal(res.status, 200);
+
+  // 每条都有结果；不存在的那个明确失败，但**不影响**其它条目
+  const results = res.json.results;
+  assert.equal(results.length, ids.length, '每个 id 都应有一条结果');
+  assert.equal(results.filter((r) => r.ok).length, 3, '三条真实记录都应删除成功');
+  const missing = results.find((r) => r.id === 999999);
+  assert.equal(missing.ok, false);
+  assert.match(missing.message, /不存在/);
+
+  // 记录都没了
+  for (const id of ids.slice(0, 3)) {
+    assert.equal(seedsRepo.get(id), null, `种子 #${id} 的记录应被删除`);
+  }
+  // 待入队目录里的 .torrent 被删（既有行为）
+  assert.equal(fs.existsSync(pendingPath), false, '仍在待入队目录的 .torrent 应被删除');
+  // 已入队留档的 .torrent **不会**被删（当前行为：只删记录）—— 这一条锁住现状，
+  // 将来若改成"连留档一起删"，这个断言会红，提醒同步更新页面文案与这里。
+  for (const x of queuedPaths) {
+    assert.equal(fs.existsSync(x.path), true, '留档目录的 .torrent 当前不会被删除（只删记录）');
+  }
+});
+
+test('已入队种子批量删除：空 ids 必须被挡住（不能让"全选"空选时误清空）', async () => {
+  const res = await get('/api/bt/seeds/actions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [], action: 'delete' }),
+  });
+  assert.equal(res.status, 400);
+});

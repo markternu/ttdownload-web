@@ -106,9 +106,34 @@ test('登录：错误密码 401；正确密码下发 HttpOnly 会话 Cookie 并�
   // 伪造/篡改的 Cookie 无效
   const forged = await req('/api/stats', { headers: { Cookie: 'ttd_session=abc.def' } });
   assert.equal(forged.status, 401, '伪造会话必须被拒绝');
-  const tampered = cookie.replace(/.$/, 'x');
+
+  // ⚠️ 这里**不能**用 `cookie.replace(/.$/, 'x')` 来"篡改"：
+  //   签名是 base64url，末位只承载 4 个有效比特（索引必为 4 的倍数），而 base64 解码会
+  //   **丢弃末位那 2 个填充比特** —— 末位原本是 'w'(48) 时改成 'x'(49) 解码出来是**同一个字节**，
+  //   签名照样验证通过 → 这条用例会以 1/16 的概率假红（实测 40 次红 2 次）。
+  //   改成篡改 **payload 段**：它参与 HMAC，改了必然对不上签名。
+  const tampered = (() => {
+    const dot = cookie.indexOf('.');
+    const head = cookie.slice(0, dot + 1);
+    const body = cookie.slice(dot + 1);
+    const flipped = (body[0] === 'A' ? 'B' : 'A') + body.slice(1);
+    return head + flipped;
+  })();
+  assert.notEqual(tampered, cookie, '篡改后的 cookie 必须与原值不同');
   const tamperedRes = await req('/api/stats', { headers: { Cookie: tampered } });
   assert.equal(tamperedRes.status, 401, '被篡改的会话必须被拒绝');
+
+  // 再单独篡改**签名段**的中段字符（避开末位的填充比特，保证解码后的字节真的变了）
+  const sigTampered = (() => {
+    const dot = cookie.indexOf('.');
+    const sig = cookie.slice(dot + 1);
+    const mid = Math.floor(sig.length / 2);
+    const ch = sig[mid] === 'A' ? 'B' : 'A';
+    return cookie.slice(0, dot + 1) + sig.slice(0, mid) + ch + sig.slice(mid + 1);
+  })();
+  assert.notEqual(sigTampered, cookie, '签名篡改后必须与原值不同');
+  const sigRes = await req('/api/stats', { headers: { Cookie: sigTampered } });
+  assert.equal(sigRes.status, 401, '签名被改的会话必须被拒绝');
 });
 
 test('程序化访问：HTTP Basic 与安卓 Token 都可以（方便 curl / aria2 拉文件）', async () => {

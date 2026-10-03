@@ -324,11 +324,16 @@ export const api = {
 
   btSeeds: () => request<SeedListResponse>('/api/bt/seeds'),
 
+  /**
+   * 种子批量操作（入队 / 删除 / 刷新）。
+   * 后端**逐条**处理并在 `results` 里回报每一条的成功与否（某个 id 不存在不会中断整批）。
+   */
   btSeedsAction: (ids: number[], action: SeedAction) =>
-    request<{ ok?: boolean; items?: SeedItem[] }>(
-      '/api/bt/seeds/actions',
-      jsonBody({ ids, action }),
-    ),
+    request<{
+      ok?: boolean
+      items?: SeedItem[]
+      results?: { id: number; ok: boolean; message?: string; taskId?: number }[]
+    }>('/api/bt/seeds/actions', jsonBody({ ids, action })),
 
   btStatus: () => request<BtStatus>('/api/bt/status'),
 
