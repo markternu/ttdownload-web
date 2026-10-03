@@ -10,6 +10,7 @@ import {
   profileFor,
   SITE_PROFILES,
 } from '../services/cookieHarvest';
+import { acquireSiteSlot, siteGateFor } from '../services/siteGate';
 import { logger, taskLog } from '../core/logger';
 import { tailText } from '../core/procLog';
 import { toolStatus } from '../core/disk';
@@ -856,6 +857,8 @@ interface RunningJob {
   attemptIndex: number;
   attemptStartedAt: number;
   attemptErrors: AttemptFailure[];
+  /** 累计被要求「新鲜 cookies」的次数（决定何时停手，避免把出口 IP 越捶越封） */
+  cookieFails?: number;
   /** 每个方式已原地重试次数（瞬时错误用） */
   attemptRetries?: Record<number, number>;
   /** 重建策略阶梯所需的信息（cookie 失效时用新 cookie 重来一轮） */
@@ -917,8 +920,14 @@ export function buildFinalErrorForTest(job: {
 /** 最终文案里的标记：调度器看到它就**延后重试**（别立刻重试，那只会让限流更久） */
 export const THROTTLE_RETRY_MARK = '【出口 IP 可能被临时限流】';
 
-/** 启动当前 attemptIndex 指向的那次尝试 */
-function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): void {
+/**
+ * 启动当前 attemptIndex 指向的那次尝试。
+ *
+ * ⚠️ 这里要**先过站点节流闸门**：抖音这类平台按 IP 风控，一次入队多条视频时
+ * 会同时把几十个请求砸过去（实测一分钟 26~31 次）→ 立刻被限流、全部失败。
+ * 闸门保证**同站点的启动按间隔排队**，服务端自己吸收这个等待，不用用户管。
+ */
+async function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): Promise<void> {
   const attempt = job.attempts[job.attemptIndex];
   job.attemptStartedAt = Date.now();
   job.stdout = '';
@@ -939,7 +948,21 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
     cookies: args.includes('--cookies') ? args[args.indexOf('--cookies') + 1] : args.includes('--cookies-from-browser') ? `browser:${args[args.indexOf('--cookies-from-browser') + 1]}` : '(无)',
     url: ctx.url,
   });
+  // 过闸门：同站点启动排队 + 最小间隔（不受风控影响的站点间隔为 0，直通）
+  const gate = siteGateFor(ctx.url);
+  const { release: releaseSlot, waitedMs } = await acquireSiteSlot(gate.site, { minGapMs: gate.minGapMs });
+  if (job.cancelled) {
+    releaseSlot();
+    return;
+  }
+  if (waitedMs > 3000) {
+    scoped.mark(
+      'SITE_GATE',
+      `${gate.site} 站点节流：等了 ${Math.round(waitedMs / 1000)}s 才启动本次请求（避免同一 IP 的请求打太密被平台风控）`,
+    );
+  }
   const child = spawn(config.bins.ytdlp, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  releaseSlot();   // 只是"启动许可"，放行后立刻释放（下载本身可以并行）
   job.child = child;
   child.stdout?.on('data', (d: Buffer) => {
     const text = d.toString();
@@ -977,16 +1000,21 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
     //   ② **cookies 真的过期**：每次都被拒 → 才需要重新抓（下面的自愈分支）。
     //   ③ **出口 IP 被临时限流**：换了新 cookies 仍被拒 → 早点停手（再往下看）。
     const cookieErrNow = isCookieRequiredError(`${job.stderr}\n${job.stdout}`);
-    const cookieRetryMax = envMs('YTDLP_COOKIE_RETRY_MAX', 2);
+    if (cookieErrNow) job.cookieFails = (job.cookieFails ?? 0) + 1;
+    // 每个方式内原地重试 1 次（配合下面的 15s 退避）；再不行就换方式，整体由站点闸门拉开间隔
+    const cookieRetryMax = envMs('YTDLP_COOKIE_RETRY_MAX', 1);
     const cookieRetries = job.attemptRetries?.[job.attemptIndex] ?? 0;
     if (cookieErrNow && cookieRetries < cookieRetryMax && !job.cancelled) {
       job.attemptRetries = { ...(job.attemptRetries ?? {}), [job.attemptIndex]: cookieRetries + 1 };
+      // 分级退避：实测"连打"是没用的（同一分钟几十个请求就是被限流的原因），
+      // 而静默 ~2 分钟后成功率能回到 3/3。所以这里按 15s / 30s / 45s… 拉开重试。
+      const backoff = envMs('YTDLP_COOKIE_RETRY_GAP_MS', 15_000) * (cookieRetries + 1);
       scoped.warn(
-        `[MARK:YTDLP_ATTEMPT] 站点报「需要新鲜 cookies」，但这个报错是间歇性的 —— 用同一份 cookies 原地重试（第 ${cookieRetries + 1}/${cookieRetryMax} 次）`,
+        `[MARK:YTDLP_ATTEMPT] 站点报「需要新鲜 cookies」（多为临时风控限流）—— ${Math.round(backoff / 1000)}s 后用同一份 cookies 重试（第 ${cookieRetries + 1}/${cookieRetryMax} 次）`,
       );
       setTimeout(() => {
-        if (!job.cancelled && job.exitCode === null) launchAttempt(taskId, job, ctx);
-      }, envMs('YTDLP_COOKIE_RETRY_GAP_MS', 1000));
+        if (!job.cancelled && job.exitCode === null) void launchAttempt(taskId, job, ctx);
+      }, backoff);
       return;
     }
 
@@ -1011,7 +1039,7 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
             job.exitCode = null;
             jobs.set(taskId, job);
             scoped.mark('YTDLP_ATTEMPT', `已用新获取的 ${profile.name} cookies 重新开始（${meta.cookieCount} 条）`);
-            launchAttempt(taskId, job, ctx);
+            void launchAttempt(taskId, job, ctx);
           } catch (e) {
             scoped.error(`[MARK:${COOKIE_MARKER}] 自动重新获取 cookies 失败：${(e as Error).message}`);
             job.exitCode = exit;
@@ -1045,7 +1073,7 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
         `[MARK:YTDLP_EXIT] 方式「${failedLabel}」遇到瞬时错误，${delay / 1000}s 后原地重试（第 ${retries + 1}/2 次）：${message}`,
       );
       setTimeout(() => {
-        if (!job.cancelled && job.exitCode === null) launchAttempt(taskId, job, ctx);
+        if (!job.cancelled && job.exitCode === null) void launchAttempt(taskId, job, ctx);
       }, delay);
       return;
     }
@@ -1068,15 +1096,14 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
     // ★ 已经**换过一次新 cookies** 了，还是被要求「新鲜 cookies」→ 剩下的档只差格式/UA，
     //   用的是同一份 cookie，必然同样被拒。实测（2026-10-03 树莓派）：继续跑完要白耗 ~35 秒，
     //   而且是在反复捶同一个已被限流的出口 IP，只会让限流更久。直接停手，结论交给 buildFinalError。
-    const cookieStops = job.attemptErrors.filter((e) => isCookieRequiredError(e.raw || e.message)).length;
+    const cookieFails = job.cookieFails ?? 0;
     if (
-      job.reharvested &&
       next < job.attempts.length &&
-      isCookieRequiredError(`${job.stderr}\n${job.stdout}`) &&
-      cookieStops >= envMs('YTDLP_COOKIE_MAX_ATTEMPTS', 5)
+      cookieErrNow &&
+      cookieFails >= envMs('YTDLP_COOKIE_MAX_ATTEMPTS', 6)
     ) {
       scoped.error(
-        `[MARK:TASK_FAIL] 已重新抓过 cookies、并累计失败 ${cookieStops} 次仍被要求「新鲜 cookies」，停止继续尝试（后面只会重复同一个失败）`,
+        `[MARK:TASK_FAIL] 连续 ${cookieFails} 次被要求「新鲜 cookies」（已按站点节流放宽间隔重试过），停止继续尝试 —— 继续捶只会让风控更久`,
       );
       job.exitCode = exit;
       return;
@@ -1088,10 +1115,10 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
       if (gap > 0) {
         scoped.warn(`[MARK:YTDLP_ATTEMPT] 疑似被限流，等待 ${gap / 1000}s 后再换下一种方式（避免加剧风控）`);
         setTimeout(() => {
-          if (!job.cancelled && job.exitCode === null) launchAttempt(taskId, job, ctx);
+          if (!job.cancelled && job.exitCode === null) void launchAttempt(taskId, job, ctx);
         }, gap);
       } else {
-        launchAttempt(taskId, job, ctx);
+        void launchAttempt(taskId, job, ctx);
       }
       return;
     }

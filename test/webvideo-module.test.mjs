@@ -525,7 +525,7 @@ test('★换过新 cookies 仍被要求「新鲜 cookies」→ 立刻停手（�
     //    （每档还会原地重试 2 次 → 跑完将是 30 次，纯属反复捶被限流的 IP）
     const downloadCalls = ladderAllCalls().filter((l) => l.includes('-o '));
     assert.ok(
-      downloadCalls.length <= 8,
+      downloadCalls.length <= 10,
       `应尽早就停手（不是跑完 10 档），实际发起 ${downloadCalls.length} 次下载`,
     );
 

@@ -37,6 +37,9 @@ export function setupRuntime(extra = {}) {
   process.env.ENV_FILE = path.join(root, 'no-such.env');
   process.env.BT_DOWNLOAD_DIR = path.join(root, 'transmission', 'downloads');
   process.env.TRANSMISSION_INCOMPLETE_DIR = path.join(root, 'transmission', 'incomplete');
+  // 站点节流闸门：真机上抖音是 20 秒起步（防同一 IP 打太密被风控），但测试里必须置 0，
+  // 否则每个抖音用例都要白等几十秒（闸门本身另有专门用例覆盖）。
+  process.env.YTDLP_SITE_GAP_MS = '0';
   process.env.WEB_AUTH_USER = '';
   process.env.WEB_AUTH_PASSWORD = '';
   process.env.WEB_SESSION_SECRET = '';
