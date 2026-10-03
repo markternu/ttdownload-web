@@ -112,7 +112,7 @@ async function runWebvideoTask({ url = 'https://www.youtube.com/watch?v=f6kl3G_e
   await webvideo.webvideoModule.prepare(tasksRepo.get(task.id));
   await webvideo.webvideoModule.start(tasksRepo.get(task.id));
   let result = null;
-  for (let i = 0; i < 60; i += 1) {
+  for (let i = 0; i < 120; i += 1) {
     result = await webvideo.webvideoModule.poll(tasksRepo.get(task.id));
     if (result.done || result.error) break;
     await new Promise((r) => setTimeout(r, 150));
@@ -272,7 +272,7 @@ test('解析阶段遇到会员限制不再直接判任务失败（prepare 容错
   process.env.LADDER_PARSE_FAIL = '';
   await webvideo.webvideoModule.start(prepared);
   let result = null;
-  for (let i = 0; i < 60; i += 1) {
+  for (let i = 0; i < 120; i += 1) {
     result = await webvideo.webvideoModule.poll(tasksRepo.get(task.id));
     if (result.done || result.error) break;
     await new Promise((r) => setTimeout(r, 150));
@@ -501,6 +501,77 @@ test('★抖音「需要新鲜 cookies」是间歇性抽风：用同一份 cooki
   }
 });
 
+test('★自愈重抓后必须**重新合并**（用户上传的登录态不能被丢掉）—— 真机 bug 回归', async () => {
+  // 真机现象（2026-10-03）：用户上传了登录态 cookies，任务却仍然失败；日志里
+  // 第一档的 --cookies 是 cookies-merged/douyin-*.txt（登录态 + 匿名），
+  // 但触发自愈重抓之后变成了 cookies-harvested/douyin.txt（**只剩匿名，登录态被丢了**）。
+  const cookieHarvest = await import('../dist/services/cookieHarvest.js');
+  const { getSettings, updateSettings } = await import('../dist/services/settings.js');
+  const { config } = await import('../dist/core/config.js');
+  // ⚠️ 这个用例会改全局设置 → 必须记下原值、结束时原样恢复，否则会污染后面的用例
+  const prevCookies = getSettings().webvideoCookiesFile;
+
+  // 用户上传的 cookies（带抖音登录态）
+  const userFile = path.join(root, 'state', 'user-cookies.txt');
+  fs.mkdirSync(path.dirname(userFile), { recursive: true });
+  fs.writeFileSync(
+    userFile,
+    '# Netscape HTTP Cookie File\n.douyin.com\tTRUE\t/\tTRUE\t0\tsessionid\tLOGIN-STATE\n',
+  );
+  updateSettings({ webvideoCookiesFile: userFile });
+
+  process.env.CHROMIUM_PATH = '/bin/sh';
+  process.env.COOKIE_HARVEST_SITES = 'douyin';
+  cookieHarvest.__setHarvesterLauncher(async () => [
+    { domain: '.douyin.com', includeSubdomains: true, path: '/', secure: true, expires: 1900000000, name: 'ttwid', value: 'anon-1', httpOnly: true },
+  ]);
+
+  resetLadder({ failTimes: 999 });   // 一直失败 → 必然走一次自愈重抓
+  process.env.LADDER_DOWNLOAD_ERROR =
+    'ERROR: [Douyin] 7680875970777135534: Fresh cookies (not necessarily logged in) are needed';
+  process.env.YTDLP_COOKIE_RETRY_MAX = '0';
+  process.env.YTDLP_SITE_GAP_MS = '0';
+  try {
+    const { result } = await runWebvideoTask({ url: 'https://v.douyin.com/wxkLrzmtN6M/' });
+    assert.ok(result.error, '一直失败时应报错');
+
+    // 只看**下载**调用（带 -o 的那些）；解析调用可以只带工作副本
+    const cookieArgs = ladderAllCalls()
+      .filter((l) => l.includes('-o '))
+      .map((l) => /--cookies (\S+)/.exec(l)?.[1])
+      .filter(Boolean);
+    assert.ok(cookieArgs.length >= 2, `应该发生过多次尝试（含自愈重抓），实际 ${cookieArgs.length} 次`);
+    assert.ok(
+      cookieArgs.some((p) => p.includes('cookies-merged')),
+      `自愈重抓后必须用**合并**文件（登录态 + 新抓的匿名），实际用过：\n${[...new Set(cookieArgs)].join('\n')}`,
+    );
+    assert.equal(
+      cookieArgs.some((p) => p.includes('cookies-harvested')),
+      false,
+      '绝不能直接用 cookies-harvested/（那等于把用户上传的登录态丢掉）',
+    );
+    // ★ 关键：自愈之后**最后一次**下载用的必须是合并文件（登录态在）
+    assert.ok(cookieArgs[cookieArgs.length - 1].includes('cookies-merged'), '最后一次尝试必须带登录态');
+
+    // 合并结果里必须真的带着用户的登录态 cookie
+    const merged = [...new Set(cookieArgs)].find((p) => fs.existsSync(p));
+    assert.ok(merged, '合并文件应该存在');
+    assert.match(fs.readFileSync(merged, 'utf8'), /sessionid/, '合并文件里必须保留用户的登录态 cookie');
+    assert.match(fs.readFileSync(merged, 'utf8'), /ttwid/, '也要带上新抓的访客 cookie');
+    assert.equal(config.webvideo.defaultCookiesFile.endsWith('cookies.txt'), true);
+  } finally {
+    delete process.env.LADDER_DOWNLOAD_ERROR;
+    delete process.env.YTDLP_COOKIE_RETRY_MAX;
+    delete process.env.YTDLP_COOKIE_MAX_ATTEMPTS;
+    process.env.YTDLP_SITE_GAP_MS = '0';   // 恢复成测试环境的 0（delete 会把脚手架的 0 也抹掉 → 后面用例白等 20 秒）
+    delete process.env.CHROMIUM_PATH;
+    delete process.env.COOKIE_HARVEST_SITES;
+    cookieHarvest.__setHarvesterLauncher(null);
+    updateSettings({ webvideoCookiesFile: prevCookies });
+    fs.rmSync(userFile, { force: true });
+  }
+});
+
 test('★换过新 cookies 仍被要求「新鲜 cookies」→ 立刻停手（不再跑完剩下 9 档），并给出准确结论', async () => {
   // 真机背景（2026-10-03 树莓派）：抖音在短时间连下几个之后会**临时限流这个出口 IP**，
   // 此时纯 HTTP 的 ttwid 与浏览器抓的 19 条富 cookies **全部被拒**。旧逻辑会：
@@ -513,7 +584,13 @@ test('★换过新 cookies 仍被要求「新鲜 cookies」→ 立刻停手（�
     { domain: '.douyin.com', includeSubdomains: true, path: '/', secure: true, expires: 1900000000, name: 'ttwid', value: 'ttwid-x', httpOnly: true },
   ]);
   resetLadder({ failTimes: 999 });
-  process.env.YTDLP_COOKIE_RETRY_MAX = '0';   // 本用例测的是重抓/早停路径，先关掉间歇性重试
+  process.env.YTDLP_COOKIE_RETRY_MAX = '0';    // 本用例测的是重抓/早停路径，先关掉间歇性重试
+  process.env.YTDLP_COOKIE_MAX_ATTEMPTS = '2';  // 阈值调小 → 不用真等到第 6 次
+  // ⚠️ 显式声明"这次没有用户上传 cookies"：默认 cookies 路径可能被别的用例建出来，
+    //    否则会走"合并"分支，本用例就测不到"只有访客 cookies"这条路径了（顺序依赖 → 全量跑才红）。
+  const { getSettings: gs2, updateSettings: us2 } = await import('../dist/services/settings.js');
+  const prevCookies2 = gs2().webvideoCookiesFile;
+  us2({ webvideoCookiesFile: path.join(root, 'state', 'no-such-cookies.txt') });
   process.env.LADDER_DOWNLOAD_ERROR = DY_ERROR;
   process.env.YTDLP_ATTEMPT_GAP_MS = '20';
   process.env.YTDLP_RATE_LIMIT_BACKOFF_MS = '20';
@@ -535,6 +612,8 @@ test('★换过新 cookies 仍被要求「新鲜 cookies」→ 立刻停手（�
     assert.match(result.error, /不要再反复点重试/, '要劝住用户别连打');
   } finally {
     delete process.env.YTDLP_COOKIE_RETRY_MAX;
+    delete process.env.YTDLP_COOKIE_MAX_ATTEMPTS;
+    us2({ webvideoCookiesFile: prevCookies2 });
     delete process.env.LADDER_DOWNLOAD_ERROR;
     delete process.env.YTDLP_ATTEMPT_GAP_MS;
     delete process.env.YTDLP_RATE_LIMIT_BACKOFF_MS;
@@ -561,7 +640,13 @@ test('★抖音「需要新鲜 cookies」时：自动抓 cookies 并带上 refer
   });
 
   resetLadder({ failTimes: 999 });
-  process.env.YTDLP_COOKIE_RETRY_MAX = '0';   // 本用例测的是重抓/早停路径，先关掉间歇性重试
+  process.env.YTDLP_COOKIE_RETRY_MAX = '0';    // 本用例测的是重抓/早停路径，先关掉间歇性重试
+  process.env.YTDLP_COOKIE_MAX_ATTEMPTS = '2';  // 阈值调小 → 不用真等到第 6 次
+  // ⚠️ 显式声明"这次没有用户上传 cookies"：默认 cookies 路径可能被别的用例建出来，
+    //    否则会走"合并"分支，本用例就测不到"只有访客 cookies"这条路径了（顺序依赖 → 全量跑才红）。
+  const { getSettings: gs2, updateSettings: us2 } = await import('../dist/services/settings.js');
+  const prevCookies2 = gs2().webvideoCookiesFile;
+  us2({ webvideoCookiesFile: path.join(root, 'state', 'no-such-cookies.txt') });
   process.env.LADDER_DOWNLOAD_ERROR = DY_ERROR;
   process.env.YTDLP_RATE_LIMIT_BACKOFF_MS = '20';
   process.env.YTDLP_ATTEMPT_GAP_MS = '20';
@@ -580,6 +665,8 @@ test('★抖音「需要新鲜 cookies」时：自动抓 cookies 并带上 refer
     assert.match(result.error, /抖音|cookies/, `应说明是抖音的 cookies 问题：${result.error}`);
   } finally {
     delete process.env.YTDLP_COOKIE_RETRY_MAX;
+    delete process.env.YTDLP_COOKIE_MAX_ATTEMPTS;
+    us2({ webvideoCookiesFile: prevCookies2 });
     delete process.env.LADDER_DOWNLOAD_ERROR;
     delete process.env.YTDLP_RATE_LIMIT_BACKOFF_MS;
     delete process.env.YTDLP_ATTEMPT_GAP_MS;

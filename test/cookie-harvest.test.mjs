@@ -662,3 +662,40 @@ test('保鲜开关：COOKIE_HARVEST_ENABLED 关掉时预热与刷新都不动手
     Object.assign(process.env, saved);
   }
 });
+
+test('★cookies 工作副本：源变了就必须重拷（yt-dlp 回写副本的 mtime 不能骗过判断）', async () => {
+  // 真机风险（2026-10-03 排查时发现，和"合并文件名戳坏掉"是同一类坑）：
+  // 老实现是 `副本.mtime < 源.mtime → 重拷`。而 yt-dlp 跑完会**回写** cookies 文件，
+  // 副本的 mtime 因此比源更新；之后用户重新上传新 cookies（源的 mtime 反而更旧）时，
+  // 判断为"副本更新，不用拷" → **新 cookies 永远不生效**，用户就会觉得"我传了也没用"。
+  const { workingCopyOf } = await import('../dist/services/cookieHarvest.js');
+  const dir = path.join(root, 'state', 'wc-test');
+  fs.mkdirSync(dir, { recursive: true });
+  const src = path.join(dir, 'user.txt');
+  // ⚠️ 三个版本必须**长度相同**，否则旧实现里的 `size !== size` 也会兜住，
+  //    测不出"只看 mtime"这个真正的坑。
+  const line = (v) => `# Netscape HTTP Cookie File\n.douyin.com\tTRUE\t/\tTRUE\t0\tsessionid\t${v}\n`;
+  fs.writeFileSync(src, line('AAA'));
+
+  const copy1 = workingCopyOf(src);
+  assert.match(fs.readFileSync(copy1, 'utf8'), /AAA/, '第一次应拷到源内容');
+
+  // 模拟 yt-dlp 回写副本（同长度），并把副本 mtime 设到"未来"
+  const future = new Date(Date.now() + 3600_000);
+  fs.writeFileSync(copy1, line('RRR'));
+  fs.utimesSync(copy1, future, future);
+
+  // 用户重新上传：内容变了（同长度），但源的 mtime 比副本**旧**
+  fs.writeFileSync(src, line('BBB'));
+  const past = new Date(Date.now() - 86400_000);
+  fs.utimesSync(src, past, past);
+
+  const copy2 = workingCopyOf(src);
+  assert.match(fs.readFileSync(copy2, 'utf8'), /BBB/, '源内容变了就必须重拷（不能被副本的新 mtime / 同长度骗过去）');
+  assert.doesNotMatch(fs.readFileSync(copy2, 'utf8'), /RRR/, '副本必须被覆盖回源内容');
+
+  // 内容没变时不该反复重拷（避免每次任务都白写）
+  const before = fs.statSync(copy2).mtimeMs;
+  workingCopyOf(src);
+  assert.equal(fs.statSync(copy2).mtimeMs, before, '源没变就不该重拷');
+});

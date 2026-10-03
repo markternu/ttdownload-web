@@ -22,6 +22,7 @@
  *
  * 安全性：只访问站点首页/视频页拿匿名 cookie，不登录、不提交任何表单、不复用用户凭据。
  */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../core/config';
@@ -668,14 +669,22 @@ export function workingCopyOf(source: string): string {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const base = path.basename(source).replace(/[^\w.-]/g, '_') || 'cookies.txt';
   const out = path.join(dir, base);
+  const stampFile = `${out}.src`;
+  const digestOf = (f: string): string => crypto.createHash('sha1').update(fs.readFileSync(f)).digest('hex');
   try {
     const src = fs.statSync(source);
-    const dst = fs.existsSync(out) ? fs.statSync(out) : null;
-    // 源文件更新了（用户重新上传）或副本丢了/大小不符 → 重新拷贝
-    if (!dst || dst.mtimeMs < src.mtimeMs || dst.size !== src.size) {
-      fs.copyFileSync(source, out);
-      fs.chmodSync(out, 0o600);
-    }
+    const srcDigest = digestOf(source);
+    const want = `${src.size}:${Math.round(src.mtimeMs)}:${srcDigest}`;
+    const have = fs.existsSync(stampFile) ? fs.readFileSync(stampFile, 'utf8').trim() : '';
+    // 副本内容也必须和源一致 —— ⚠️ 不能只看源文件的 mtime：
+    //    yt-dlp 跑完会**回写** cookies 文件，副本的 mtime 会比源更新；
+    //    如果之后就"副本比源新 → 不用重新拷贝"，用户重新上传的 cookies 永远不会生效
+    //    （和已修的「合并文件名戳」是同一类"用时间戳当缓存键"的坑）。
+    const copyOk = fs.existsSync(out) && digestOf(out) === srcDigest;
+    if (have === want && copyOk) return out;
+    fs.copyFileSync(source, out);
+    fs.chmodSync(out, 0o600);
+    fs.writeFileSync(stampFile, want, { mode: 0o600 });
   } catch (e) {
     scoped.warn(`[MARK:${COOKIE_MARKER}] 建立 cookies 工作副本失败，退回原件：${(e as Error).message}`);
     return source;
@@ -686,8 +695,32 @@ export function workingCopyOf(source: string): string {
 /** 合并后的临时文件路径（每个站点一份，避免每次请求都新建） */
 function mergedFileFor(profile: CookieSiteProfile | null, userFile: string | null, harvested: string | null): string {
   const tag = profile?.id ?? 'generic';
-  const stamp = [userFile, harvested].filter(Boolean).map((f) => fs.statSync(f as string).mtimeMs).join('-');
-  return path.join(config.dirs.state, 'cookies-merged', `${tag}-${Math.round(Number(stamp) || 0)}.txt`);
+  // ⚠️ 这里以前是 [mtime1, mtime2].join('-') 再 Number() —— "1712-1713" → NaN → 永远 0，
+  //    于是文件名恒为 douyin-0.txt，而下面又有「文件存在就不重建」的判断 →
+  //    **合并文件被永久缓存**：重抓了新 cookies 也不会刷新（用户上传了登录态却一直用旧的）。
+  const mtimes = [userFile, harvested].filter(Boolean).map((f) => Math.round(fs.statSync(f as string).mtimeMs));
+  const stamp = mtimes.length ? Math.max(...mtimes) : 0;
+  return path.join(config.dirs.state, 'cookies-merged', `${tag}-${stamp}.txt`);
+}
+
+/** 合并文件里含登录态，属于敏感文件；只保留最近几份，别越堆越多 */
+export function pruneMergedFiles(keep = 5): number {
+  const dir = path.join(config.dirs.state, 'cookies-merged');
+  let removed = 0;
+  try {
+    const files = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.txt'))
+      .map((f) => ({ f, m: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.m - a.m);
+    for (const { f } of files.slice(keep)) {
+      fs.rmSync(path.join(dir, f), { force: true });
+      removed += 1;
+    }
+  } catch {
+    /* ignore */
+  }
+  return removed;
 }
 
 /**
@@ -746,6 +779,7 @@ export async function cookiesForUrl(
     if (!fs.existsSync(out)) {
       fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });
       mergeCookieFiles([userCookiesFile, harvestedPath], out);
+      pruneMergedFiles();   // 里面含登录态，旧的别留着
     }
     base.cookiesFile = out;
     base.harvested = true;

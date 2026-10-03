@@ -5,10 +5,10 @@ import { config } from '../core/config';
 import {
   COOKIE_MARKER,
   cookiesForUrl,
-  harvestNow,
   harvestStatus,
   profileFor,
   SITE_PROFILES,
+  workingCopyOf,
 } from '../services/cookieHarvest';
 import { acquireSiteSlot, siteGateFor } from '../services/siteGate';
 import { logger, taskLog } from '../core/logger';
@@ -482,7 +482,10 @@ export function parseOptionsFromSettings(settings?: {
 }): ParseOptions {
   const cookiesFile = resolveCookiesFile(settings);
   return {
-    cookiesFile,
+    // ⚠️ 解析阶段也必须用**工作副本**：yt-dlp 跑完会**回写** cookies 文件，
+    //    直接把用户上传的原件交给它，可能把那份多站点导出改小、丢掉别的站点
+    //    （下载路径早就换成工作副本了，只有这里以前漏了）。
+    cookiesFile: cookiesFile ? workingCopyOf(cookiesFile) : null,
     cookiesFromBrowser: cookiesFile ? '' : String(settings?.webvideoCookiesFromBrowser ?? '').trim(),
     extraArgs: parseExtraArgs(String(settings?.webvideoExtraArgs ?? '')),
   };
@@ -846,6 +849,8 @@ interface AttemptFailure {
 interface LaunchContext {
   commonArgs: string[];
   url: string;
+  /** 用户上传的 cookies 原件（自愈重抓后要**重新合并**，不能只用抓来的匿名 cookies） */
+  userCookiesFile?: string | null;
 }
 
 interface RunningJob {
@@ -1027,9 +1032,13 @@ async function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext
         scoped.mark('YTDLP_ATTEMPT', `${profile.name} 提示 cookie 失效/需要新鲜 cookies —— 自动重新获取后重试`);
         void (async () => {
           try {
-            const meta = await harvestNow(profile.id);
-            if (!meta?.file) throw new Error('没有拿到新的 cookies');
-            job.attemptCtx = { ...job.attemptCtx!, cookiesFile: meta.file, cookiesFromBrowser: '' };
+            // ⚠️ 必须重新**合并**（用户登录态 + 新抓的访客 cookies），不能直接用抓来的那一份：
+            //    以前这里用 harvestNow 的原始文件，等于把用户上传的登录态**丢了**
+            //    （真机现象：日志里 --cookies 从 cookies-merged/… 变成 cookies-harvested/…，
+            //      "登录态 + 最佳画质"那一档其实根本没带登录态）。
+            const again = await cookiesForUrl(ctx.url, ctx.userCookiesFile ?? null, { forceHarvest: true });
+            if (!again.cookiesFile) throw new Error('没有拿到新的 cookies');
+            job.attemptCtx = { ...job.attemptCtx!, cookiesFile: again.cookiesFile, cookiesFromBrowser: '' };
             job.attempts = buildDownloadAttempts(job.attemptCtx);
             job.attemptIndex = 0;
             job.attemptErrors = [];
@@ -1038,7 +1047,7 @@ async function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext
             job.stdout = '';
             job.exitCode = null;
             jobs.set(taskId, job);
-            scoped.mark('YTDLP_ATTEMPT', `已用新获取的 ${profile.name} cookies 重新开始（${meta.cookieCount} 条）`);
+            scoped.mark('YTDLP_ATTEMPT', `已用新凭据重新开始：${again.note}`);
             void launchAttempt(taskId, job, ctx);
           } catch (e) {
             scoped.error(`[MARK:${COOKIE_MARKER}] 自动重新获取 cookies 失败：${(e as Error).message}`);
@@ -1330,7 +1339,7 @@ export const webvideoModule: ModuleAdapter = {
       cancelled: false,
     };
     jobs.set(task.id, job);
-    launchAttempt(task.id, job, { commonArgs, url });
+    void launchAttempt(task.id, job, { commonArgs, url, userCookiesFile: userCookies });
 
     const { tasksRepo } = await import('../core/db');
     tasksRepo.update(task.id, {
