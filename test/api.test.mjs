@@ -1012,3 +1012,64 @@ test('★下载原始文件：同一个文件重复点不再重复解密（复�
   // 收尾：取消掉，别影响后面的用例
   await get(`/api/original/jobs/${first.json.job.id}`, { method: 'DELETE' });
 });
+
+/* ------------------------------------------------------------------ */
+/* 2026-10-03 真机排查：抖音下载失败的两类"看不出来"的原因                */
+/* ------------------------------------------------------------------ */
+
+test('★阶梯不该加"模拟浏览器指纹"这一档（没装 curl_cffi 时它 100% 失败、还会误导原因）', async () => {
+  const { buildDownloadAttempts } = await import('../dist/modules/webvideo.js');
+  const base = { formatId: '', cookiesFile: '/tmp/x.txt', cookiesFromBrowser: '', isYouTube: false };
+
+  // 已知不可用 → 不应该出现这一档
+  const withoutIt = buildDownloadAttempts({ ...base, impersonateOk: false });
+  assert.equal(
+    withoutIt.some((a) => a.args.includes('--impersonate')),
+    false,
+    'impersonateOk=false 时不许再排「模拟浏览器指纹」',
+  );
+
+  // 可用（或未知）→ 保留这一档（不能把本来能用的环境砍掉）
+  const withIt = buildDownloadAttempts({ ...base, impersonateOk: true });
+  assert.ok(withIt.some((a) => a.args.includes('--impersonate')), '可用时必须保留这一档');
+  const unknown = buildDownloadAttempts({ ...base });
+  assert.ok(unknown.some((a) => a.args.includes('--impersonate')), '未知时保守保留（老版本没有这个子命令）');
+});
+
+test('★"impersonate 不可用"必须翻译成真原因，不能报"视频不可访问"', async () => {
+  const { humanizeYtDlpError } = await import('../dist/modules/webvideo.js');
+  const raw =
+    'ERROR: Impersonate target "chrome" is not available. Use --list-impersonate-targets to see available targets. ' +
+    'You may be missing dependencies required to support this target.';
+  const msg = humanizeYtDlpError(raw, 'https://v.douyin.com/abc/');
+  assert.match(msg, /curl_cffi/, '要指出缺的是 curl_cffi');
+  assert.match(msg, /fix-ytdlp\.sh/, '要给出修复命令');
+  assert.doesNotMatch(msg, /视频不可访问/, '绝不能再报"视频不可访问"（那是完全错的方向）');
+});
+
+test('★重抓 cookies 仍被拒 → 最终文案要指出"多半是出口 IP 被风控"（而不是让人去传 cookies）', async () => {
+  const { buildFinalErrorForTest } = await import('../dist/modules/webvideo.js');
+  const msgs = buildFinalErrorForTest({
+    url: 'https://v.douyin.com/abc/',
+    reharvested: true,
+    attemptErrors: Array.from({ length: 10 }, (_, i) => ({
+      label: `方式${i + 1}`,
+      message: '抖音需要「新鲜的访客 cookies」（不需要登录）',
+      raw: 'ERROR: [Douyin] 123: Fresh cookies (not necessarily logged in) are needed',
+    })),
+  });
+  assert.match(msgs, /已经自动重新抓过一次 cookies 仍被拒绝/, '要说明"重抓也没用"');
+  assert.match(msgs, /出口 IP/, '要指出真正的原因在出口 IP');
+  assert.match(msgs, /延后重试/, '要说明程序会延后重试（而不是立刻重试把 IP 打得更封）');
+  assert.match(msgs, /不要再反复点重试/, '要明确劝用户别连打');
+});
+
+test('★没重抓过的失败，不该甩"出口 IP 被风控"的结论（保持原来的建议）', async () => {
+  const { buildFinalErrorForTest } = await import('../dist/modules/webvideo.js');
+  const msgs = buildFinalErrorForTest({
+    url: 'https://v.douyin.com/abc/',
+    reharvested: false,
+    attemptErrors: [{ label: 'x', message: '需要新鲜 cookies', raw: 'Fresh cookies are needed' }],
+  });
+  assert.doesNotMatch(msgs, /已经自动重新抓过一次/, '没重抓过就别下这个结论');
+});

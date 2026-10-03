@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../core/config';
 import {
   COOKIE_MARKER,
@@ -312,6 +312,12 @@ export function humanizeYtDlpError(raw: string, url = ''): string {
       `首页「网络自检」里新增了「出口 IP 归属」「B站可达性」两项，可直接看到当前出口是哪里`
     );
   }
+  // --impersonate 的目标没装（缺 curl_cffi）：别翻译成"视频不可访问"，那是完全错的方向
+  if (has('impersonate target') && has('not available')) {
+    return '服务器上缺 curl_cffi，无法使用「模拟浏览器指纹」（--impersonate）：' +
+      '在服务器上执行 sudo bash deploy/scripts/fix-ytdlp.sh 装上它，或把「设置 → 公开视频（yt-dlp）→ 额外参数」里的 --impersonate 去掉。' +
+      '（这一档会被程序自动跳过，不影响其它尝试）';
+  }
   if (has('unsupported url')) return '当前平台不支持解析该链接';
   if (has('video unavailable') || s.includes('not available')) return '视频不可访问（可能已删除、地区限制或需要登录）';
   if (has('drm')) return '该视频受 DRM 保护（Widevine 等），任何下载工具都无法直接下载';
@@ -593,6 +599,13 @@ export interface AttemptContext {
   isYouTube: boolean;
   /** 站点专用额外参数（Referer/UA 等；抖音必需，实测不带 referer 就一定失败） */
   siteExtraArgs?: string[];
+  /**
+   * `--impersonate` 目标是否可用（也就是装没装 curl_cffi）。
+   * undefined = 未知（测试里会当成可用，保持阶梯稳定）；false = 已知不可用 → **不要**加那一档，
+   * 否则每次下载都白跑一次，还会报出「Impersonate target "chrome" is not available」这种
+   * 被误翻译成"视频不可访问"的假原因（真机实测踩到）。
+   */
+  impersonateOk?: boolean;
 }
 
 /**
@@ -684,7 +697,8 @@ export function buildDownloadAttempts(ctx: AttemptContext): DownloadAttempt[] {
     '--geo-bypass',
     ...best,
   ]);
-  push('模拟浏览器指纹', ['--impersonate', 'chrome', ...best]);
+  // 只有确实装了 curl_cffi 才加这一档（没装的话它 100% 失败，纯粹浪费一轮 + 给出误导性报错）
+  if (ctx.impersonateOk !== false) push('模拟浏览器指纹', ['--impersonate', 'chrome', ...best]);
   if (ctx.isYouTube) push('内嵌播放器客户端', [...embedded, ...singleFile]);
   push('单文件直下（跳过合并）', singleFile);
   push('仅视频流（可能无音轨）', videoOnly);
@@ -753,6 +767,30 @@ const envInt = (name: string, def: number): number => {
   const n = Number(process.env[name] ?? def);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : def;
 };
+
+/**
+ * `--impersonate chrome` 能不能用（要装 curl_cffi）。
+ * 结果缓存：一次进程只探一次。探不出来（老版本 yt-dlp 没这个子命令等）**保守当成可用**，
+ * 免得把本来能用的环境判死。
+ */
+let impersonateProbe: boolean | null = null;
+export function impersonateAvailable(bin: string = config.bins.ytdlp): boolean {
+  if (impersonateProbe !== null) return impersonateProbe;
+  try {
+    const out = execFileSync(bin, ['--list-impersonate-targets'], {
+      encoding: 'utf8',
+      timeout: 20000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    // 有 curl_cffi 时表里会列出 chrome；没有时该行带 (unavailable)
+    impersonateProbe = out
+      .split('\n')
+      .some((line) => /^\s*chrome\b/i.test(line) && !/unavailable/i.test(line));
+  } catch {
+    impersonateProbe = true;   // 探不出来就别乱判，保持原来的行为
+  }
+  return impersonateProbe;
+}
 
 /** 这个可执行文件在不在 PATH 上（用于决定要不要用 aria2c 当外部下载器） */
 function binOnPath(bin: string): boolean {
@@ -845,15 +883,39 @@ function buildFinalError(job: RunningJob): string {
       ? ''
       : `（已自动尝试 ${job.attemptErrors.length} 种方式：${job.attemptErrors.map((e) => e.label).join('、')}）`;
   const site = profileFor(job.url ?? '');
+  // 「需要新鲜 cookies」占多数、而且**已经自动重抓过一次**仍然被拒 → 拦的多半不是 cookies 而是 IP。
+  // 真机实测（2026-10-03）：同一个出口连续下了几个抖音之后，纯 HTTP 的 ttwid 与浏览器抓的 19 条
+  // 富 cookies **全部被拒**，连今天成功过的链接也一起失败；换时间/换出口就好。
+  const cookieBlocked = job.attemptErrors.filter((e) => isCookieRequiredError(e.raw || e.message)).length;
+  // 换过 cookies 之后**只要**再出现一次「需要新鲜 cookies」就成立：说明 cookie 换新没用，
+  // 拦的是出口 IP。（提前停手时 attemptErrors 可能只有 1 条，所以这里不能用"过半"这种比例判断。）
+  const freshHarvestFailed = job.reharvested === true && cookieBlocked >= 1;
   const advice =
     rateLimited >= Math.max(2, Math.ceil(job.attemptErrors.length / 2))
       ? site?.id === 'youtube'
         ? '。多数失败都是「YouTube 判定为机器人/限流」：请等待 10~30 分钟再重试（短时间内反复重试会让该 IP 被限流更久），' +
           '并确认已安装 JS 运行时（deno，见首页网络自检的「yt-dlp JS 运行时」一项）；如有代理，可在设置里加 --proxy 换出口 IP'
         : '。看起来是出口 IP 被该平台限流：请等待 10~30 分钟再试，或在设置里配置代理换出口 IP'
-      : '';
+      : freshHarvestFailed
+        ? `。${THROTTLE_RETRY_MARK}程序**已经自动重新抓过一次 cookies 仍被拒绝** → 拦的多半不是 cookies 而是这个出口 IP：` +
+          '该平台在短时间内连续下几个之后会**临时限流**（实测：2026-10-03 连续下到第 5 个开始全拒，' +
+          '约 20 分钟后同一条链接又能下）。**已自动安排延后重试**（约 10 分钟后再来），' +
+          '期间请不要再反复点重试 —— 连打会让限流更久。'
+        : '';
   return `${base}${suffix}${advice}`;
 }
+
+/** 仅供测试：把 buildFinalError 的结论暴露出来（它是模块内私有函数） */
+export function buildFinalErrorForTest(job: {
+  url?: string;
+  reharvested?: boolean;
+  attemptErrors: { label: string; message: string; raw?: string }[];
+}): string {
+  return buildFinalError(job as unknown as RunningJob);
+}
+
+/** 最终文案里的标记：调度器看到它就**延后重试**（别立刻重试，那只会让限流更久） */
+export const THROTTLE_RETRY_MARK = '【出口 IP 可能被临时限流】';
 
 /** 启动当前 attemptIndex 指向的那次尝试 */
 function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): void {
@@ -980,6 +1042,16 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
     if (next < job.attempts.length && rateLimitHits >= envMs('YTDLP_RATE_LIMIT_MAX_ATTEMPTS', 2)) {
       scoped.error(
         `[MARK:TASK_FAIL] 连续 ${rateLimitHits} 种方式被判定为机器人/限流，停止继续尝试（避免加剧风控，请等待 10~30 分钟后重试）`,
+      );
+      job.exitCode = exit;
+      return;
+    }
+    // ★ 已经**换过一次新 cookies** 了，还是被要求「新鲜 cookies」→ 剩下的档只差格式/UA，
+    //   用的是同一份 cookie，必然同样被拒。实测（2026-10-03 树莓派）：继续跑完要白耗 ~35 秒，
+    //   而且是在反复捶同一个已被限流的出口 IP，只会让限流更久。直接停手，结论交给 buildFinalError。
+    if (job.reharvested && next < job.attempts.length && isCookieRequiredError(`${job.stderr}\n${job.stdout}`)) {
+      scoped.error(
+        `[MARK:TASK_FAIL] 已重新抓过 cookies 仍被要求「新鲜 cookies」，停止继续尝试（剩余 ${job.attempts.length - next} 档只会重复同一个失败）`,
       );
       job.exitCode = exit;
       return;
@@ -1179,6 +1251,8 @@ export const webvideoModule: ModuleAdapter = {
     const platform = task.platform || detectPlatform(url);
     const attemptCtx: AttemptContext = {
       formatId,
+      // 没装 curl_cffi 时「模拟浏览器指纹」必然失败，直接不加这一档（省一轮 + 免得误报原因）
+      impersonateOk: impersonateAvailable(),
       cookiesFile,
       cookiesFromBrowser,
       isYouTube: platform === 'YouTube',

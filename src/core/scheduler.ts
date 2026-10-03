@@ -10,6 +10,7 @@ import { conflict, notFound } from '../utils/http';
 import { handoffToArchive } from '../services/pipeline';
 import { HIDDEN_NAME, hideText } from '../services/btAnon';
 import { aria2Module } from '../modules/aria2';
+import { THROTTLE_RETRY_MARK } from '../modules/webvideo';
 import { transmissionModule } from '../modules/transmission';
 import { webvideoModule } from '../modules/webvideo';
 import type { ModuleAdapter, PollResult, TaskWithPayload } from '../modules/types';
@@ -40,6 +41,18 @@ function isPermanentError(msg: string): boolean {
   return /URL 格式错误|不支持该链|没有视频或图片|DRM|种子文件不存在|未安装|找不到文件/.test(msg);
 }
 
+/**
+ * 「出口 IP 被临时限流」这类失败**不能立刻重试** —— 连打只会让限流更久（这正是平台的风控逻辑）。
+ * 实测（2026-10-03 树莓派）：抖音连续下到第 5 个开始全拒，约 20 分钟后同一条链接又能下。
+ * 所以第一次重试延后 10 分钟，配合默认 autoRetry=2 就是 +10min / +20min。
+ * （时间点只放内存：重启后任务会重新排队，那时延后也没意义了。）
+ */
+const THROTTLE_RETRY_DELAY_MS = 10 * 60_000;
+const retryNotBefore = new Map<number, number>();
+export function retryNotBeforeOf(taskId: number): number {
+  return retryNotBefore.get(taskId) ?? 0;
+}
+
 function failTask(task: TaskWithPayload, message: string): void {
   const settings = getSettings();
   const retryCount = Number(task.retryCount ?? 0);
@@ -53,7 +66,14 @@ function failTask(task: TaskWithPayload, message: string): void {
       error: `${message}（第 ${retryCount + 1} 次重试）`,
       speedBps: 0,
     });
-    taskLog(task.id).mark('TASK_RETRY', `失败，将自动重试(${retryCount + 1}/${settings.autoRetry})：${logMessage}`);
+    const throttled = message.includes(THROTTLE_RETRY_MARK);
+    if (throttled) retryNotBefore.set(task.id, Date.now() + THROTTLE_RETRY_DELAY_MS);
+    taskLog(task.id).mark(
+      'TASK_RETRY',
+      throttled
+        ? `失败，将**延后 ${THROTTLE_RETRY_DELAY_MS / 60000} 分钟**自动重试(${retryCount + 1}/${settings.autoRetry})（出口 IP 疑似被临时限流，立刻重试会让限流更久）：${logMessage}`
+        : `失败，将自动重试(${retryCount + 1}/${settings.autoRetry})：${logMessage}`,
+    );
     logger.child('scheduler').mark('TASK_FAIL', `任务 #${task.id} 失败（可重试）`, {
       module: task.module,
       retryCount: retryCount + 1,
@@ -219,6 +239,19 @@ async function startWaiting(): Promise<void> {
   for (const task of waiting) {
     // 0 = 不限：只让磁盘空间当"闸门"（用户要的就是这个：有空间就下）
     if (settings.maxConcurrent > 0 && running.length >= settings.maxConcurrent) break;
+
+    // 出口 IP 被临时限流 → 还没到该重试的时间点，先别放行（放行就是再撞一次，只会封得更久）
+    const notBefore = retryNotBefore.get(task.id) ?? 0;
+    if (notBefore > Date.now()) {
+      const mins = Math.max(1, Math.ceil((notBefore - Date.now()) / 60000));
+      const msg = `出口 IP 疑似被临时限流，约 ${mins} 分钟后自动重试（这期间请不要再点重试）`;
+      if (task.error !== msg) {
+        tasksRepo.update(task.id, { error: msg });
+        emit(task.id);
+      }
+      continue;
+    }
+    if (notBefore) retryNotBefore.delete(task.id);
     const limit = settings.moduleConcurrency[task.module] ?? 0;
     if (limit > 0 && moduleCount(task.module) >= limit) {
       // ⚠️ 这里以前是静默 continue：用户传 10 多个种子只跑一个，界面上只有"等待"、
@@ -404,6 +437,7 @@ export async function pauseTask(taskId: number): Promise<void> {
   const task = tasksRepo.get(taskId) as TaskWithPayload | null;
   if (!task) throw notFound('任务不存在');
   if (task.status === 'waiting') {
+    retryNotBefore.delete(task.id);
     tasksRepo.update(taskId, { status: 'paused', error: null });
   } else if (task.status === 'downloading' || task.status === 'parsing') {
     await adapters[task.module]?.pause(task);
