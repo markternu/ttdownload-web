@@ -627,3 +627,51 @@ test('【血案回归】全仓库不许再出现 `DENO_INSTALL=… curl … | sh
     }
   }
 });
+
+test('★.env 顶部必须写清"6 位下载密码怎么拿"（忘了也找得回来）', () => {
+  // 用户要求：程序生成/维护 .env 时，要在最顶上用注释写好获取 6 位数字的方法，否则下次就忘了
+  const start = deploySrc.indexOf("ENV_HEADER='# ===");
+  const end = deploySrc.indexOf('log()  { printf');
+  assert.ok(start > 0 && end > start, 'deploy.sh 里应有 .env 头部说明块');
+  const block = deploySrc.slice(start, end);
+  assert.match(block, /--orig-code/, '头部注释必须写明「怎么拿 6 位数字」＝ --orig-code');
+  assert.match(block, /6 位数字密码/, '要写清楚那是"下载原始文件"的 6 位数字密码');
+  assert.match(block, /每 15 分钟/, '要说明它每 15 分钟换一次');
+
+  // 新装生成的 .env 也要带上
+  const heredocAt = deploySrc.indexOf('cat > .env <<EOF');
+  assert.ok(heredocAt > 0, '应有生成 .env 的 heredoc');
+  assert.ok(deploySrc.slice(heredocAt, heredocAt + 400).includes('${ENV_HEADER}'), '新装的 .env 顶部要写入这段说明');
+
+  // "已存在"分支与 --update 分支都要补（否则老机器永远看不到这段说明）
+  const calls = (deploySrc.match(/^\s*ensure_env_header\s*$/gm) ?? []).length;
+  assert.ok(calls >= 2, `ensure_env_header 至少在 2 处被调用（老部署 + --update），实际 ${calls} 处`);
+});
+
+test('★.env 补注释：只加注释、不动任何配置值、幂等、权限保持 600', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ttdl-envhead-'));
+  const envPath = path.join(dir, '.env');
+  const original = 'HOST=0.0.0.0\nPORT=8080\nANDROID_TOKEN=abc123\nRESERVE_FREE_BYTES=10737418240\n';
+  fs.writeFileSync(envPath, original, { mode: 0o600 });
+
+  const start = deploySrc.indexOf("ENV_HEADER='# ===");
+  const end = deploySrc.indexOf('log()  { printf');
+  const block = deploySrc.slice(start, end);
+  const harness = path.join(dir, 'harness.sh');
+  fs.writeFileSync(
+    harness,
+    `#!/bin/bash\ncd "${dir}"\nlog() { :; }\n${block}\nensure_env_header\nensure_env_header\n`,
+    { mode: 0o755 },
+  );
+  execFileSync('bash', [harness], { encoding: 'utf8' });
+
+  const after = fs.readFileSync(envPath, 'utf8');
+  assert.ok(after.includes('ttdownload-web 配置文件（.env）'), '应写入头部说明');
+  assert.match(after, /--orig-code/, '头部要有获取 6 位数字的命令');
+  assert.equal(after.split('ttdownload-web 配置文件（.env）').length - 1, 1, '跑两次也只能有一份（幂等）');
+
+  // 关键：值一个字节都不能变
+  const stripComments = (t) => t.split('\n').filter((l) => !l.startsWith('#')).join('\n');
+  assert.equal(stripComments(after), original, '只许加注释，任何配置值都不许动');
+  assert.equal(fs.statSync(envPath).mode & 0o777, 0o600, '权限必须仍是 600');
+});

@@ -102,6 +102,38 @@ gen_password() {
   printf '%s' "${raw:0:16}"
 }
 
+# .env 顶部的说明注释（新装时写入；老部署升级时若缺就补上）。
+# 目的：以后忘了「下载原始文件」的 6 位数字怎么拿，打开 .env 第一眼就能看到。
+ENV_HEADER='# =============================================================================
+#  ttdownload-web 配置文件（.env）
+#
+#  ❓ 忘了「下载原始文件」要用的 6 位数字密码怎么拿？在**服务器上**执行：
+#         sudo ./deploy.sh --orig-code
+#     它每 15 分钟自动换一次（不需要改本文件、不需要重启）；
+#     输对后 15 分钟内不会再问。数字由下面的 ORIGINAL_DL_SECRET 当"种子"算出来，
+#     改那个种子 = 立刻换号。
+#
+#  其它常用命令：
+#         sudo ./deploy.sh --status        查看服务状态
+#         sudo ./deploy.sh --logs          看最近日志
+#         sudo ./deploy.sh --check-deps    依赖体检
+#         sudo ./deploy.sh --update        更新代码并重新部署
+#
+#  ⚠️ 本文件含密码/令牌，权限已设为 600。贴给别人前请先删掉敏感值。
+# ============================================================================='
+ENV_HEADER_MARK='ttdownload-web 配置文件（.env）'
+
+# 老部署升级时补注释：**只加注释、不动任何配置值**（幂等）
+ensure_env_header() {
+  [[ -f .env ]] || return 0
+  grep -qF "$ENV_HEADER_MARK" .env && return 0
+  local tmp; tmp="$(mktemp)"
+  { printf '%s\n' "$ENV_HEADER"; cat .env; } > "$tmp" && cat "$tmp" > .env
+  rm -f "$tmp"
+  chmod 600 .env 2>/dev/null || true
+  log "已在 .env 顶部补上说明注释（含"怎么拿 6 位下载密码"；只加注释，未改动任何配置值）"
+}
+
 log()  { printf '\033[1;32m[deploy]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[deploy]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[deploy]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -888,6 +920,8 @@ case "$ACTION" in
     # 会直接 "npm: command not found" 中断更新（真机踩过：全新机器 Node 没装上，
     # update 分支不装 Node，只会在这里失败）。放在 re-exec 之后 → 用的是刚拉下来的新逻辑。
     if [[ $SKIP_APT -eq 0 ]]; then ensure_node; fi
+    # 老部署升级：给 .env 顶部补说明注释（只加注释，不动任何值）
+    ensure_env_header
     # 老部署升级时自愈：补 .env 里**新增**的键（只加缺失的，绝不改已有值）。
     # 「下载原始文件」需要 ORIGINAL_DL_SECRET —— --update 不走主流程的 .env 段，必须在这里补。
     if [[ -f .env ]]; then
@@ -1085,6 +1119,7 @@ if [[ ! -f .env ]]; then
   [[ -n "$WEB_AUTH_PASSWORD_VALUE" ]] || WEB_AUTH_PASSWORD_VALUE="ChangeMe$(date +%s)"
   WEB_SESSION_SECRET_VALUE="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   cat > .env <<EOF
+${ENV_HEADER}
 HOST=0.0.0.0
 PORT=${PORT}
 DOWNLOAD_ROOT=${DOWNLOAD_ROOT}
@@ -1133,6 +1168,7 @@ EOF
   log "已生成 .env（安卓 Token 见文件内 ANDROID_TOKEN）"
 else
   log ".env 已存在，保留现有配置（端口/Token/密码不会被覆盖）"
+  ensure_env_header
   # 补齐可能缺失的项（老部署升级后也能用上新功能）
   backfill_env() {
     local kv key
