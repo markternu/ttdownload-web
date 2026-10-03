@@ -615,6 +615,45 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
+  test('★回归：本地缓存"以为已解锁"但服务端已重启 → 必须弹出密码框（而不是只报一句错）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    // 真实场景：解锁状态只存在服务端内存里，服务端一重启（部署/断电）就没了，
+    // 而浏览器缓存的 status 还写着 unlocked:true → 旧版直接建任务拿到 403
+    // 「请先输入下载密码」，只弹一句 error toast、**永远不弹密码框**，用户彻底卡死。
+    // 这里把两个接口都打桩，做成确定性复现（不依赖服务端当前是否解锁）：
+    const page = await newPage();
+    let statusHits = 0;
+    await page.route('**/api/original/status', (route) => {
+      statusHits += 1;
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ enabled: true, unlocked: true, unlockSecondsLeft: 900, unlockTtlSec: 900, codeWindowSec: 900, codeValidSec: 900, tempMaxAgeSec: 3600 }),
+      });
+    });
+    await page.route('**/api/original/jobs', (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      return route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { code: 'ORIGINAL_LOCKED', message: '请先输入下载密码' } }),
+      });
+    });
+
+    await page.goto(`${base}/files`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('text=文件清单', { timeout: 20000 });
+    assert.ok(statusHits > 0, '前提：伪造的"已解锁"状态必须真被前端取到（否则这条测试是空测试）');
+
+    const row = page.locator('tr', { hasText: 'origdl1' }).first();
+    await row.getByRole('button', { name: /下载原始文件|原始/ }).first().click();
+    // 关键断言：必须弹出密码框，而不是只报一句错
+    await page.waitForSelector('text=请输入 6 位数字下载密码', { timeout: 10000 });
+    assert.ok(await page.getByPlaceholder('000000').isVisible(), '必须弹出 6 位密码输入框');
+    await page.unroute('**/api/original/status');
+    await page.unroute('**/api/original/jobs');
+    await page.close();
+  });
+
   test('★已入队种子：全选当前页 → 全部删除（三步确认，且如实说明"只删记录"）', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     const page = await newPage();

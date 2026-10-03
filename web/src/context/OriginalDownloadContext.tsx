@@ -66,6 +66,24 @@ export function OriginalDownloadProvider({ children }: { children: ReactNode }) 
     void refreshJobs()
   }, [refreshStatus, refreshJobs])
 
+  /**
+   * 解锁状态只存在服务端**内存**里（进程重启即清空），所以本地缓存必须定期/回到前台时刷新，
+   * 否则一旦服务端重启过，这边会一直"以为已解锁"，点按钮就报"请先输入下载密码"。
+   */
+  useEffect(() => {
+    const bump = (): void => {
+      if (document.visibilityState === 'visible') void refreshStatus()
+    }
+    const timer = window.setInterval(() => void refreshStatus(), 60_000)
+    window.addEventListener('focus', bump)
+    document.addEventListener('visibilitychange', bump)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', bump)
+      document.removeEventListener('visibilitychange', bump)
+    }
+  }, [refreshStatus])
+
   // 有任务在跑就轮询（1 秒一次）；全都结束后停止轮询，别空转
   const active = jobs.some((j) => j.state === 'decrypting')
   useEffect(() => {
@@ -95,6 +113,14 @@ export function OriginalDownloadProvider({ children }: { children: ReactNode }) 
     }
   }, [jobs, toast])
 
+  /**
+   * 发起解密任务。
+   *
+   * ⚠️ 必须能**自愈**：`status.unlocked` 是浏览器里缓存的值，而服务端的解锁记录只存在内存里
+   *（进程重启即清空）。只要服务端重启过（部署 / 断电 / 崩溃），本地缓存就会"以为已解锁"，
+   * 直接建任务必拿到 403 ORIGINAL_LOCKED —— 旧版这里只弹了个 error toast、**永远不弹密码框**，
+   * 用户就彻底卡住了。所以：拿到 ORIGINAL_LOCKED 就刷新状态并**把密码框弹出来**。
+   */
   const startJob = useCallback(
     async (file: PublishedFile) => {
       try {
@@ -102,10 +128,24 @@ export function OriginalDownloadProvider({ children }: { children: ReactNode }) 
         toast.info('正在临时解密…', `${file.name} · 可以去做别的事，解完会自动开始下载`)
         await refreshJobs()
       } catch (e) {
-        toast.error('无法开始解密', (e as Error).message)
+        const err = e as { code?: string; message?: string }
+        if (err.code === 'ORIGINAL_LOCKED') {
+          // 服务端说"还没输密码" → 立刻让用户输，而不是干报错
+          await refreshStatus()
+          setPending(file)
+          setCode('')
+          setCodeError('需要下载密码（服务端重启后需要重新输入）')
+          return
+        }
+        if (err.code === 'ORIGINAL_DL_DISABLED') {
+          await refreshStatus()
+          toast.error('该功能未启用', '服务器 .env 里没有 ORIGINAL_DL_SECRET，请先在服务器上生成并重启服务')
+          return
+        }
+        toast.error('无法开始解密', err.message ?? '未知错误')
       }
     },
-    [refreshJobs, toast],
+    [refreshJobs, refreshStatus, toast],
   )
 
   const downloadOriginal = useCallback(
