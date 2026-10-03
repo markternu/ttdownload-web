@@ -34,6 +34,9 @@ export const APP_ROUTES = [
   'bt',
   'bt-queued',
   'files',
+  // ⚠️ pending 页面已并入 files（同一张表的 downloaded=0 视图），这里**必须继续留着**：
+  //    /pending 现在是一条重定向路由，子路径部署（/tt/pending）要靠它推导 basename，
+  //    否则老书签会被当成 404，而不是跳到 /files。
   'pending',
   'settings',
   'logs',

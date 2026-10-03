@@ -6,7 +6,7 @@ import { config } from '../core/config';
 import { filesRepo } from '../core/db';
 import { deletePublished } from '../services/cleanup';
 import { logger } from '../core/logger';
-import { asyncHandler, notFound, streamFileTo } from '../utils/http';
+import { asyncHandler, badRequest, notFound, streamFileTo } from '../utils/http';
 import type { PublishedFile } from '../types';
 
 export const filesRouter = Router();
@@ -44,15 +44,23 @@ function toApi(row: NonNullable<ReturnType<typeof filesRepo.get>>): PublishedFil
   };
 }
 
+/**
+ * 已发布文件清单。
+ * 「已发布」与「待下载」是**同一张表的两个视图**（待下载 = downloaded=0），所以合并成一个列表页，
+ * 用 `status` 参数筛选：all（默认）/ pending（待下载）/ downloaded（已被取走）。
+ */
 filesRouter.get('/', (req, res) => {
   const page = Number(req.query.page ?? 1) || 1;
   const pageSize = Number(req.query.pageSize ?? 20) || 20;
+  const status = String(req.query.status ?? 'all');
   const { rows, total, sum } = filesRepo.list({
     q: req.query.q ? String(req.query.q) : undefined,
     page,
     pageSize,
+    pendingOnly: status === 'pending',
+    downloadedOnly: status === 'downloaded',
   });
-  res.json({ items: rows.map(toApi), total, totalBytes: sum, page, pageSize });
+  res.json({ items: rows.map(toApi), total, totalBytes: sum, page, pageSize, status, counts: filesRepo.counts() });
 });
 
 /**
@@ -86,6 +94,49 @@ filesRouter.delete(
     const result = deletePublished(id, withFile);
     if (!result.ok) throw notFound(result.error ?? '删除失败');
     res.json(result);
+  }),
+);
+
+/** 批量删除一次最多处理多少个（列表页分页最大 500，留点余量） */
+export const BULK_DELETE_MAX = 500;
+
+/**
+ * 批量删除（列表页「全选当前页 → 全部删除」用）。
+ *
+ * 为什么不在前端循环调 DELETE /:id：① 一次请求就能拿到汇总结果；② 单个失败不影响其它，
+ * 失败原因逐条回给用户；③ 危险操作的上限与参数校验应该由后端把住，而不是只靠前端自觉。
+ */
+filesRouter.post(
+  '/bulk-delete',
+  asyncHandler(async (req, res) => {
+    const raw: unknown[] = Array.isArray(req.body?.ids) ? (req.body.ids as unknown[]) : [];
+    const ids: number[] = [
+      ...new Set(raw.map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0)),
+    ];
+    if (!ids.length) throw badRequest('请提供要删除的文件 id 列表', 'MISSING_IDS');
+    if (ids.length > BULK_DELETE_MAX) {
+      throw badRequest(`一次最多删除 ${BULK_DELETE_MAX} 个文件（收到 ${ids.length} 个）`, 'TOO_MANY_IDS');
+    }
+    const withFile = req.body?.withFile === true || String(req.body?.withFile ?? '') === '1';
+
+    const failed: { id: number; error: string }[] = [];
+    let deleted = 0;
+    let deletedFiles = 0;
+    for (const id of ids) {
+      const r = deletePublished(id, withFile);
+      if (r.ok) {
+        deleted += 1;
+        if (r.deletedFile) deletedFiles += 1;
+      } else {
+        failed.push({ id, error: r.error ?? '删除失败' });
+      }
+    }
+    logger.child('files').mark(
+      'FILE_DELETE',
+      `批量删除成品文件：请求 ${ids.length} 个，成功 ${deleted} 个${withFile ? '（含磁盘文件）' : '（仅记录）'}`,
+      { requested: ids.length, deleted, deletedFiles, failed: failed.length, withFile },
+    );
+    res.json({ ok: failed.length === 0, requested: ids.length, deleted, deletedFiles, withFile, failed });
   }),
 );
 

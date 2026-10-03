@@ -16,7 +16,6 @@ const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const Aria2Page = lazy(() => import('./pages/Aria2Page'))
 const BtPage = lazy(() => import('./pages/BtPage'))
 const FilesPage = lazy(() => import('./pages/FilesPage'))
-const PendingFilesPage = lazy(() => import('./pages/PendingFilesPage'))
 const LogsPage = lazy(() => import('./pages/LogsPage'))
 const ReportPage = lazy(() => import('./pages/ReportPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
@@ -137,11 +136,12 @@ export default function App() {
             />
             <Route
               path="/pending"
-              element={
-                <Suspense fallback={<LoadingBlock text="正在加载待下载页…" />}>
-                  <PendingFilesPage />
-                </Suspense>
-              }
+              /**
+               * 「待下载」已并入 /files（同一张表的 downloaded=0 视图）。
+               * 这里保留成**重定向**而不是直接删掉：老书签/收藏夹不会 404。
+               * 路径也仍留在 APP_ROUTES 里 —— 子路径部署（/tt/pending）要靠它推导 basename。
+               */
+              element={<Navigate to="/files" replace />}
             />
             <Route
               path="/logs"

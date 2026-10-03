@@ -587,3 +587,173 @@ test('已发布文件：磁盘文件被删后必须标记 available=false（前�
   fs.rmSync(`${config.dirs.consumer}/gone1`, { force: true });
   filesRepo.remove(id);
 });
+
+/* ------------------------------------------------------------------ */
+/* 「已发布」与「待下载」合并成一个列表：状态筛选 + 批量删除              */
+/* ------------------------------------------------------------------ */
+
+/** 造一个成品记录（可选标记"已被下载"）；返回 { id, path } */
+function makePublished(name, { downloaded = false } = {}) {
+  const consumers = path.join(root, 'xiaofeizhe_downd');
+  fs.mkdirSync(consumers, { recursive: true });
+  const filePath = path.join(consumers, name);
+  fs.writeFileSync(filePath, `content-${name}`);
+  const id = filesRepo.add({
+    taskId: null,
+    name,
+    title: `标题-${name}`,
+    module: 'webvideo',
+    sizeBytes: fs.statSync(filePath).size,
+    path: filePath,
+  });
+  if (downloaded) filesRepo.markDownloaded(id);
+  return { id, path: filePath };
+}
+
+test('★状态筛选：合并后的列表能用 status 分开「待下载 / 已被下载」，并给出各状态计数', async () => {
+  const pendingOne = makePublished('merge-pending-1');
+  const doneOne = makePublished('merge-done-1', { downloaded: true });
+
+  const all = await get('/api/files?pageSize=500&status=all');
+  assert.equal(all.status, 200);
+  assert.ok(all.json.items.some((f) => f.id === pendingOne.id));
+  assert.ok(all.json.items.some((f) => f.id === doneOne.id));
+
+  const pending = await get('/api/files?pageSize=500&status=pending');
+  assert.ok(pending.json.items.some((f) => f.id === pendingOne.id), '待下载视图应包含未取走的');
+  assert.equal(pending.json.items.some((f) => f.id === doneOne.id), false, '待下载视图不应包含已被下载的');
+
+  const downloaded = await get('/api/files?pageSize=500&status=downloaded');
+  assert.ok(downloaded.json.items.some((f) => f.id === doneOne.id), '已被下载视图应包含已取走的');
+  assert.equal(downloaded.json.items.some((f) => f.id === pendingOne.id), false, '已被下载视图不应包含待下载的');
+
+  // 三个视图必须与 /pending 老接口口径一致（同一份数据，别再出现两套数）
+  const legacy = await get('/api/files/pending?pageSize=500');
+  assert.deepEqual(
+    pending.json.items.map((f) => f.id).sort((a, b) => a - b),
+    legacy.json.items.map((f) => f.id).sort((a, b) => a - b),
+    'status=pending 必须与 /api/files/pending 完全一致',
+  );
+
+  // 计数：all = pending + downloaded；且 oldestPendingAt 取全量最早的那个
+  const c = all.json.counts;
+  assert.ok(c, '列表接口应返回 counts');
+  assert.equal(c.all, c.pending + c.downloaded, 'all 必须等于 pending + downloaded');
+  assert.ok(c.pending >= 1 && c.downloaded >= 1);
+  assert.ok(c.oldestPendingAt, '有待下载时应给出最早的待下载时间');
+  assert.ok(Date.parse(c.oldestPendingAt) > 0, 'oldestPendingAt 应是可解析的 ISO 时间');
+});
+
+test('★批量删除：删掉所选记录，默认不动磁盘文件', async () => {
+  const a = makePublished('bulk-a');
+  const b = makePublished('bulk-b');
+  const keep = makePublished('bulk-keep');
+
+  const res = await get('/api/files/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [a.id, b.id] }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.deleted, 2);
+  assert.equal(res.json.failed.length, 0);
+  assert.equal(res.json.withFile, false);
+  assert.equal(res.json.deletedFiles, 0, '默认只删记录，不删磁盘文件');
+
+  assert.equal(filesRepo.get(a.id), null, '记录应被删除');
+  assert.equal(filesRepo.get(b.id), null);
+  assert.ok(filesRepo.get(keep.id), '没选中的记录不能被动到');
+  assert.ok(fs.existsSync(a.path), '默认不删磁盘文件（空间不释放）');
+  assert.ok(fs.existsSync(b.path));
+});
+
+test('★批量删除：withFile=1 时连磁盘文件一起删（真正释放空间）', async () => {
+  const a = makePublished('bulk-file-a');
+  const b = makePublished('bulk-file-b');
+
+  const res = await get('/api/files/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [a.id, b.id], withFile: true }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.deleted, 2);
+  assert.equal(res.json.deletedFiles, 2, '应报告删掉了 2 个磁盘文件');
+  assert.equal(fs.existsSync(a.path), false, '磁盘文件应被删除');
+  assert.equal(fs.existsSync(b.path), false);
+});
+
+test('★批量删除：单个失败不影响其它（不存在的 id 逐条回报，而不是整批失败）', async () => {
+  const ok = makePublished('bulk-partial-ok');
+  const res = await get('/api/files/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [ok.id, 999999] }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.ok, false, '有失败项时 ok 应为 false');
+  assert.equal(res.json.deleted, 1, '存在的那条应被删掉');
+  assert.equal(res.json.failed.length, 1);
+  assert.equal(res.json.failed[0].id, 999999);
+  assert.ok(res.json.failed[0].error, '失败要给出原因');
+  assert.equal(filesRepo.get(ok.id), null);
+});
+
+test('★批量删除：参数校验（空列表 / 非法值 / 超上限）都必须被挡住', async () => {
+  const empty = await get('/api/files/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [] }),
+  });
+  assert.equal(empty.status, 400, '空列表应 400');
+
+  const invalid = await get('/api/files/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: ['abc', -1, 0, null] }),
+  });
+  assert.equal(invalid.status, 400, '全是非法值时应 400（而不是静默删 0 个）');
+
+  // 去重 + 忽略非法项：['1','1',-5] → 只处理 1 个
+  const dedup = await get('/api/files/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: ['999998', '999998', -5, 'x'] }),
+  });
+  assert.equal(dedup.status, 200);
+  assert.equal(dedup.json.requested, 1, '同一个 id 重复出现只算一次');
+
+  const tooMany = await get('/api/files/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: Array.from({ length: 501 }, (_, i) => i + 1) }),
+  });
+  assert.equal(tooMany.status, 400, '超过上限应 400');
+  assert.match(tooMany.json?.error?.message ?? tooMany.text, /最多/, '应说明上限');
+});
+
+test('★批量删除：拒绝删除消费者目录之外的文件（安全护栏不能只靠前端）', async () => {
+  const outside = path.join(root, 'not-consumer', 'sneaky');
+  fs.mkdirSync(path.dirname(outside), { recursive: true });
+  fs.writeFileSync(outside, 'should-not-be-deleted');
+  const id = filesRepo.add({
+    taskId: null,
+    name: 'sneaky',
+    title: '越界文件',
+    module: 'webvideo',
+    sizeBytes: 20,
+    path: outside,
+  });
+
+  const res = await get('/api/files/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [id], withFile: true }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.deleted, 0, '越界文件不应被删除');
+  assert.equal(res.json.failed.length, 1);
+  assert.match(res.json.failed[0].error, /消费者目录/, '要给出真实原因');
+  assert.ok(fs.existsSync(outside), '磁盘文件必须原封不动');
+  assert.ok(filesRepo.get(id), '记录也应保留（避免"记录没了文件还在"的半截状态）');
+});

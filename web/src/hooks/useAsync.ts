@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../lib/api'
+import type { FileCounts, FileStatusFilter } from '../types'
 
 /** 通用异步数据加载（含 loading / error / 手动刷新） */
 export function useAsync<T>(
@@ -40,35 +41,40 @@ export function useAsync<T>(
   return { data, loading, error, refresh: run, setData }
 }
 
-/** 发布文件列表（GET /api/files） */
-export function useFiles(query: { q?: string; page?: number; pageSize?: number }) {
-  const { q = '', page = 1, pageSize = 20 } = query
+/**
+ * 发布文件列表（GET /api/files）。
+ * 「已发布」与「待下载」已合并成一个列表页，用 status 切换视图（all/pending/downloaded）。
+ */
+export function useFiles(query: { q?: string; page?: number; pageSize?: number; status?: FileStatusFilter }) {
+  const { q = '', page = 1, pageSize = 20, status = 'all' } = query
   const [items, setItems] = useState<Awaited<ReturnType<typeof api.files>>['items']>([])
   const [total, setTotal] = useState(0)
   const [totalBytes, setTotalBytes] = useState(0)
+  const [counts, setCounts] = useState<FileCounts | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await api.files({ q: q || undefined, page, pageSize })
+      const res = await api.files({ q: q || undefined, page, pageSize, status })
       setItems(res.items ?? [])
       setTotal(res.total ?? 0)
       setTotalBytes(res.totalBytes ?? 0)
+      setCounts(res.counts ?? null)
       setError(null)
     } catch (err) {
       setError((err as Error).message)
     } finally {
       setLoading(false)
     }
-  }, [q, page, pageSize])
+  }, [q, page, pageSize, status])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  return { items, total, totalBytes, loading, error, refresh: load, setItems }
+  return { items, total, totalBytes, counts, loading, error, refresh: load, setItems }
 }
 
 /** 防抖值（搜索框用） */

@@ -8,11 +8,13 @@ import type {
   BtProxyStatus,
   BtStatus,
   BtUploadResponse,
+  BulkDeleteResult,
   CookieHarvestMeta,
   CookieHarvestStatus,
   CookiesStatus,
   DebugStatus,
   FileListResponse,
+  FileStatusFilter,
   HealthStatus,
   LogLevel,
   LogsTail,
@@ -399,7 +401,12 @@ export const api = {
 
   /* ------------------------------ 文件 ------------------------------ */
 
-  files: (query: { q?: string; page?: number; pageSize?: number } = {}) =>
+  /**
+   * 已发布文件清单（GET /api/files）。
+   * 「已发布」与「待下载」是同一份数据的两个视图，用 status 筛选：
+   * all（全部）/ pending（待下载，安卓还没取走）/ downloaded（已被取走）。
+   */
+  files: (query: { q?: string; page?: number; pageSize?: number; status?: FileStatusFilter } = {}) =>
     request<FileListResponse>('/api/files', {}, query),
 
   /** 待下载清单（GET /api/files/pending）：已加密归档但安卓端还没取走的成品 + 等待时长统计 */
@@ -412,6 +419,16 @@ export const api = {
       { method: 'DELETE' },
       withFile ? { withFile: 1 } : undefined,
     ),
+
+  /**
+   * 批量删除（POST /api/files/bulk-delete）。列表页「全选当前页 → 全部删除」用。
+   * 单个失败不会中断其它，失败原因逐条返回。
+   */
+  bulkDeleteFiles: (ids: number[], withFile = false) =>
+    request<BulkDeleteResult>('/api/files/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids, withFile }),
+    }),
 
   fileDownloadUrl: (id: number, name?: string): string => {
     const base = `${API_BASE}/api/files/${id}/download`

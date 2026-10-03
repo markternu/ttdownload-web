@@ -349,10 +349,33 @@ export interface TaskListResponse {
   }
 }
 
+/** 列表页的状态筛选：「已发布」与「待下载」已合并成一个列表，用这个区分 */
+export type FileStatusFilter = 'all' | 'pending' | 'downloaded'
+
+/** 各状态计数（筛选徽章 + 「等待最久」用） */
+export interface FileCounts {
+  all: number
+  pending: number
+  downloaded: number
+  /** 全量待下载里最早那一个的创建时间（ISO）；没有则为 null */
+  oldestPendingAt: string | null
+}
+
 export interface FileListResponse {
   items: PublishedFile[]
   total: number
   totalBytes: number
+  counts?: FileCounts
+}
+
+/** 批量删除结果（POST /api/files/bulk-delete） */
+export interface BulkDeleteResult {
+  ok: boolean
+  requested: number
+  deleted: number
+  deletedFiles: number
+  withFile: boolean
+  failed: { id: number; error: string }[]
 }
 
 /** 待下载清单（GET /api/files/pending）：已完成加密归档、安卓端还没取走的成品 */

@@ -61,6 +61,33 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     sizeBytes: 24,
     path: path.join(consumerDir, pendingName),
   });
+
+  // 另造两个"批量删除"专用成品：页面上用搜索框把它们单独筛出来，再对它们全选，
+  // 这样既验证了「全选当前页 → 全部删除」，又不会误删别的用例依赖的 fixture。
+  const bulkNames = ['bulkdel-a', 'bulkdel-b'];
+  const bulkIds = bulkNames.map((name) => {
+    fs.writeFileSync(path.join(consumerDir, name), `encrypted-${name}`);
+    return filesRepo.add({
+      taskId: null,
+      name,
+      title: `批量删除测试-${name}.mp4`,
+      module: 'webvideo',
+      sizeBytes: 24,
+      path: path.join(consumerDir, name),
+    });
+  });
+  // 再造一个"已被下载"的，验证状态筛选能把两种分开
+  const doneName = 'bulkdone-1';
+  fs.writeFileSync(path.join(consumerDir, doneName), 'encrypted-done');
+  const doneId = filesRepo.add({
+    taskId: null,
+    name: doneName,
+    title: '已被下载测试文件.mp4',
+    module: 'webvideo',
+    sizeBytes: 24,
+    path: path.join(consumerDir, doneName),
+  });
+  filesRepo.markDownloaded(doneId);
   const server = http.createServer(createApp());
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -406,28 +433,100 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
-  test('待下载页：列出已加密归档但安卓未取走的成品，并提供下载按钮', async (t) => {
+  test('文件页（已合并「已发布 + 待下载」）：列表、状态筛选与下载按钮', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/files`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=文件清单', { timeout: 20000 });
+
+    // 统计卡（合并后是四块）
+    assert.ok(
+      (await page.locator('text=/文件总数|总占用空间|待下载|等待最久/').count()) >= 4,
+      '应有四块统计卡（文件总数 / 总占用空间 / 待下载 / 等待最久）',
+    );
+
+    // 「全部」视图里能看到待下载的那条
+    assert.ok((await page.locator(`text=${pendingName}`).count()) > 0, '全部视图应列出成品文件名');
+    assert.ok((await page.locator('text=待下载页测试文件.mp4').count()) > 0, '应显示原始标题');
+
+    // 切到「待下载」：待下载的在、已被下载的不在
+    await page.getByRole('button', { name: /^待下载/ }).first().click();
+    await page.waitForTimeout(400);
+    assert.ok((await page.locator(`text=${pendingName}`).count()) > 0, '待下载视图应包含未取走的成品');
+    assert.equal(await page.locator(`text=${doneName}`).count(), 0, '待下载视图不应包含已被下载的');
+
+    // 切到「已被下载」：反过来
+    await page.getByRole('button', { name: /^已被下载/ }).first().click();
+    await page.waitForTimeout(400);
+    assert.ok((await page.locator(`text=${doneName}`).count()) > 0, '已被下载视图应包含已取走的');
+    assert.equal(await page.locator(`text=${pendingName}`).count(), 0, '已被下载视图不应包含待下载的');
+
+    // 回到全部，验证行内下载按钮指向管理端下载接口
+    await page.getByRole('button', { name: /^全部/ }).first().click();
+    await page.waitForTimeout(400);
+    const row = page.locator('tr', { hasText: pendingName }).first();
+    const dl = row.getByRole('link', { name: /下载/ }).first();
+    assert.ok(await dl.isVisible(), '每行应有「下载」入口');
+    assert.match(dl ? await dl.getAttribute('href') : '', new RegExp(`/api/files/${pendingId}/download`), '下载入口应指向管理端下载接口');
+
+    assert.deepEqual(pageErrors, [], `文件页不应有 JS 报错：${pageErrors.join('; ')}`);
+    await page.close();
+  });
+
+  test('老书签：/pending 会重定向到 /files（而不是白屏或 404）', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     const page = await newPage();
     await page.goto(`${base}/pending`, { waitUntil: 'networkidle' });
-    await page.waitForSelector('text=待下载文件', { timeout: 20000 });
-    // 统计卡
-    assert.ok((await page.locator('text=/待下载文件数|总大小|等待最久/').count()) >= 3, '应有三块统计卡');
-    // 我们造的那条记录
-    assert.ok((await page.locator(`text=${pendingName}`).count()) > 0, '应列出待下载的成品文件名');
-    assert.ok((await page.locator('text=待下载页测试文件.mp4').count()) > 0, '应显示原始标题');
-    assert.ok((await page.locator('text=/安卓尚未下载/').count()) > 0, '应显示安卓端状态');
-    // 行内「下载」按钮（页面用临时 <a> 触发下载，所以是 button 而不是 link）
-    const dl = page.getByRole('button', { name: /^下载$/ }).first();
-    assert.ok(await dl.isVisible(), '每行应有「下载」按钮');
-    // 点一下应触发浏览器下载（Playwright 会以 download 事件捕获）
-    const [download] = await Promise.all([
-      page.waitForEvent('download', { timeout: 15000 }).catch(() => null),
-      dl.click(),
-    ]);
-    assert.ok(download, '点击下载应触发浏览器下载');
-    assert.match(decodeURIComponent(download.url()), new RegExp(`/api/files/${pendingId}/download$`), `下载地址应为管理端下载接口，实际 ${download.url()}`);
-    assert.deepEqual(pageErrors, [], `待下载页不应有 JS 报错：${pageErrors.join('; ')}`);
+    await page.waitForSelector('text=文件清单', { timeout: 20000 });
+    assert.match(page.url(), /\/files$/, `应重定向到 /files，实际 ${page.url()}`);
+    assert.deepEqual(pageErrors, [], `重定向不应有 JS 报错：${pageErrors.join('; ')}`);
+    await page.close();
+  });
+
+  test('★全选当前页 → 全部删除：三步确认，未输入确认词时按钮不可点', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/files`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=文件清单', { timeout: 20000 });
+
+    // 用搜索把批量删除专用 fixture 单独筛出来，避免误选别的用例的数据
+    await page.getByPlaceholder('搜索文件名或标题').fill('bulkdel');
+    await page.waitForTimeout(600);
+    assert.ok((await page.locator('text=bulkdel-a').count()) > 0, '应筛出 bulkdel-a');
+    assert.equal(await page.locator(`text=${pendingName}`).count(), 0, '搜索后不应再显示其它文件');
+
+    // 全选当前页
+    await page.getByRole('checkbox', { name: '全选当前页' }).first().check();
+    await page.waitForTimeout(200);
+    assert.ok((await page.locator('text=/已选\\s*2/').count()) > 0, '应显示已选 2 个');
+
+    // 打开危险操作弹窗
+    await page.getByRole('button', { name: /全部删除/ }).first().click();
+    await page.waitForSelector('text=确认范围', { timeout: 10000 });
+    assert.ok((await page.locator('text=/即将删除|你即将删除/').count()) > 0, '第一步应显示删除范围');
+
+    await page.getByRole('button', { name: /继续（第 2\/3 步）/ }).click();
+    await page.waitForSelector('text=选择删除方式', { timeout: 10000 });
+
+    await page.getByRole('button', { name: /继续（第 3\/3 步）/ }).click();
+    await page.waitForSelector('text=最后确认', { timeout: 10000 });
+
+    // 关键：没输入确认词之前，删除按钮必须是禁用的
+    const danger = page.getByRole('button', { name: /确认全部删除/ });
+    assert.equal(await danger.isDisabled(), true, '未输入确认词时「确认全部删除」必须禁用');
+
+    await page.getByPlaceholder('删除').fill('删除');
+    await page.waitForTimeout(200);
+    assert.equal(await danger.isDisabled(), false, '输入确认词后按钮才可用');
+    await danger.click();
+
+    // 等弹窗关闭，并确认列表里那两条真的没了
+    await page.waitForSelector('text=最后确认', { state: 'detached', timeout: 15000 });
+    await page.waitForTimeout(600);
+    assert.equal(await page.locator('text=bulkdel-a').count(), 0, '选中的文件应从列表消失');
+    assert.equal(await page.locator('text=bulkdel-b').count(), 0, '选中的文件应从列表消失');
+
+    assert.deepEqual(pageErrors, [], `批量删除不应有 JS 报错：${pageErrors.join('; ')}`);
     await page.close();
   });
 
@@ -448,7 +547,7 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     assert.ok((await page.getByPlaceholder('请输入密码').count()) > 0, '应有密码输入框');
     // 关键：不能看到系统内容
     assert.equal(await page.locator('text=在线视频下载管理器').count(), 0, '未登录不应看到首页内容');
-    assert.equal(await page.locator('text=待下载文件').count(), 0, '未登录不应看到业务页面');
+    assert.equal(await page.locator('text=全选当前页').count(), 0, '未登录不应看到业务页面');
     // 业务接口一个都不能成功（401/403）；未登录时前端守卫甚至会完全不发这些请求，两种都算通过
     assert.ok(
       apiStatus.every((code) => code === 401 || code === 403 || code === 404),

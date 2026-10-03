@@ -403,10 +403,12 @@ export const filesRepo = {
   getByPath(p: string): PublishedRow | null {
     return (db.prepare('SELECT * FROM published_files WHERE path=?').get(p) as PublishedRow | undefined) ?? null;
   },
-  list(opts: { q?: string; page?: number; pageSize?: number; pendingOnly?: boolean }) {
+  list(opts: { q?: string; page?: number; pageSize?: number; pendingOnly?: boolean; downloadedOnly?: boolean }) {
     const where: string[] = [];
     const args: unknown[] = [];
     if (opts.pendingOnly) where.push('downloaded=0');
+    // 「已发布」与「待下载」合并成一个列表页后，用状态筛选区分（pendingOnly / downloadedOnly 互斥）
+    if (opts.downloadedOnly) where.push('downloaded=1');
     if (opts.q) {
       where.push('(name LIKE ? OR title LIKE ?)');
       args.push(`%${opts.q}%`, `%${opts.q}%`);
@@ -431,6 +433,23 @@ export const filesRepo = {
   /** 待下载清单（安卓还没上报完成 = 还没被取走的成品） */
   pending(opts: { q?: string; page?: number; pageSize?: number } = {}) {
     return this.list({ ...opts, pendingOnly: true });
+  },
+
+  /**
+   * 各状态的计数（合并列表页的筛选项徽章 + 「等待最久」用）。
+   * `oldestPendingAt` 取的是**全量**待下载里最早的那个（不是当前页），避免"按页估算"的假数字。
+   */
+  counts(): { all: number; pending: number; downloaded: number; oldestPendingAt: string | null } {
+    const r = db
+      .prepare(
+        `SELECT COUNT(*) AS all_c,
+                COALESCE(SUM(CASE WHEN downloaded=0 THEN 1 ELSE 0 END),0) AS pending_c,
+                COALESCE(SUM(CASE WHEN downloaded=1 THEN 1 ELSE 0 END),0) AS downloaded_c,
+                MIN(CASE WHEN downloaded=0 THEN created_at END) AS oldest_pending
+           FROM published_files`,
+      )
+      .get() as { all_c: number; pending_c: number; downloaded_c: number; oldest_pending: string | null };
+    return { all: r.all_c, pending: r.pending_c, downloaded: r.downloaded_c, oldestPendingAt: r.oldest_pending ?? null };
   },
 
   markDownloaded(id: number): void {
