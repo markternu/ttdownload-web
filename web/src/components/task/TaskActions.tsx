@@ -1,8 +1,10 @@
 import { useState } from 'react'
-import { Ban, Pause, Play, RotateCcw, Trash2 } from 'lucide-react'
+import { Ban, Copy, Pause, Play, RotateCcw, Trash2 } from 'lucide-react'
 import { api } from '../../lib/api'
 import { humanizeError } from '../../lib/format'
 import type { Task, TaskAction } from '../../types'
+import { copyText } from '../../lib/clipboard'
+import { useToast } from '../../context/ToastContext'
 import { Button, Modal } from '../ui'
 import { cn } from '../../lib/cn'
 
@@ -53,6 +55,7 @@ export function TaskActions({
 }: TaskActionsProps) {
   const [pending, setPending] = useState<TaskAction | null>(null)
   const [showDelete, setShowDelete] = useState(false)
+  const toast = useToast()
 
   const run = async (action: TaskAction, deleteFile = false) => {
     setPending(action)
@@ -67,8 +70,34 @@ export function TaskActions({
     }
   }
 
+  /** 复制「这个资源的下载链接」（就是提交任务时的来源链接，方便贴到别处再下/分享） */
+  const copyLink = async () => {
+    const url = (task.url ?? '').trim()
+    if (!url) {
+      toast.warning('没有链接可复制', '这个任务没有记录来源链接')
+      return
+    }
+    try {
+      await copyText(url)
+      toast.success('已复制下载链接', url)
+    } catch (err) {
+      toast.error('复制失败', `请手动复制：${url}（${(err as Error).message}）`)
+    }
+  }
+
   return (
     <div className={cn('flex flex-wrap items-center gap-1.5', className)}>
+      {task.url ? (
+        <Button
+          size={size}
+          variant="ghost"
+          onClick={() => void copyLink()}
+          title="复制这个资源的下载链接"
+          aria-label="复制下载链接"
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+      ) : null}
       {actionsFor(task)
         .filter((item) => item.show)
         .map((item) => {

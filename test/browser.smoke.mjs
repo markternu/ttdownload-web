@@ -48,7 +48,19 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
 
   process.env.ORIGINAL_DL_SECRET = 'browser-test-secret-0123456789abcdef0123456789';
   const { createApp } = await import('../dist/app.js');
-  const { filesRepo } = await import('../dist/core/db.js');
+  const { filesRepo, tasksRepo } = await import('../dist/core/db.js');
+  // 供「复制下载链接」测试：一条带来源链接的下载任务
+  {
+    const t = tasksRepo.create({
+      module: 'webvideo',
+      title: '复制链接测试视频',
+      platform: '抖音',
+      url: 'https://v.douyin.com/COPYLINK1/',
+      payload: {},
+    });
+    // /tasks 页只显示「正在下载 / 已下载」两档 → 置为 completed 才会出现在列表里
+    tasksRepo.update(t.id, { status: 'completed', progress: 100 });
+  }
   // 造一个"已加密归档、安卓端还没取走"的成品，供「待下载」页测试
   const consumerDir = path.join(root, 'xiaofeizhe_downd');
   fs.mkdirSync(consumerDir, { recursive: true });
@@ -651,6 +663,67 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     assert.ok(await page.getByPlaceholder('000000').isVisible(), '必须弹出 6 位密码输入框');
     await page.unroute('**/api/original/status');
     await page.unroute('**/api/original/jobs');
+    await page.close();
+  });
+
+  test('★任务行「复制下载链接」：点一下就复制走这个资源的链接（纯图标，不挤别的控件）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']).catch(() => {});
+    await page.goto(`${base}/tasks`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('text=复制链接测试视频', { timeout: 20000 });
+
+    // 找到"包含这条任务、并且带复制按钮"的最内层容器
+    const scoped = page
+      .locator('tr, div')
+      .filter({ hasText: '复制链接测试视频' })
+      .filter({ has: page.locator('button[aria-label="复制下载链接"]') })
+      .last();
+    const btn = scoped.locator('button[aria-label="复制下载链接"]').first();
+    assert.equal(await btn.count(), 1, '每条任务都应有「复制下载链接」按钮');
+
+    // ★ 用户要求：按钮不要用长文字（怕把行撑宽、挤到别的控件）
+    assert.equal((await btn.innerText()).trim(), '', '必须是纯图标按钮，文字只放 tooltip');
+    assert.ok(((await btn.getAttribute('title')) ?? '').includes('复制'), 'tooltip 要说清楚复制的是什么');
+
+    await btn.click();
+    await page.waitForSelector('text=已复制下载链接', { timeout: 5000 });
+    const clip = await page.evaluate(() => navigator.clipboard.readText());
+    assert.equal(clip, 'https://v.douyin.com/COPYLINK1/', `剪贴板里应该是这个资源的链接，实际：${clip}`);
+
+    // 加了按钮之后别把同行其它控件挤掉
+    assert.ok(
+      (await scoped.getByRole('button', { name: '删除' }).count()) >= 1,
+      '同一行的其它控件（删除）必须还在',
+    );
+    await page.close();
+  });
+
+  test('★复制在 http 局域网访问下也要能用（没有 Clipboard API 时走 execCommand 兜底）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    // 真机就是这么用的：http://192.168.1.163:8080 —— 非安全上下文里 navigator.clipboard 是 undefined，
+    // 只写 clipboard API 的话按钮会"点了没反应"。这里把 API 拿掉，验证兜底路径。
+    const page = await newPage();
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'clipboard', { get: () => undefined, configurable: true });
+    });
+    await page.goto(`${base}/tasks`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('text=复制链接测试视频', { timeout: 20000 });
+    assert.equal(
+      await page.evaluate(() => Boolean(navigator.clipboard)),
+      false,
+      '前提：这条用例里必须真的没有 Clipboard API',
+    );
+    const btn = page
+      .locator('tr, div')
+      .filter({ hasText: '复制链接测试视频' })
+      .filter({ has: page.locator('button[aria-label="复制下载链接"]') })
+      .last()
+      .locator('button[aria-label="复制下载链接"]')
+      .first();
+    await btn.click();
+    await page.waitForSelector('text=已复制下载链接', { timeout: 5000 });
+    assert.equal(await page.locator('text=复制失败').count(), 0, '兜底路径不该报"复制失败"');
     await page.close();
   });
 

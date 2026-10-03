@@ -15,6 +15,7 @@ import type { Column } from '../components/ui'
 import { useToast } from '../context/ToastContext'
 import { api, MODULE_LABELS } from '../lib/api'
 import { cn } from '../lib/cn'
+import { copyText } from '../lib/clipboard'
 import { seedStatusMeta, formatBytes, humanizeError } from '../lib/format'
 import type { BtEvictSummary, BtProxyPreview, BtProxyStatus, BtStatus, SeedItem } from '../types'
 
@@ -358,26 +359,7 @@ export default function BtPage() {
       return
     }
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text)
-      } else {
-        // 非安全上下文（http）下没有 clipboard API → select + execCommand 兜底
-        const area = document.createElement('textarea')
-        area.value = text
-        area.setAttribute('readonly', '')
-        area.style.position = 'fixed'
-        area.style.top = '-1000px'
-        area.style.opacity = '0'
-        document.body.appendChild(area)
-        area.select()
-        let ok = false
-        try {
-          ok = document.execCommand('copy')
-        } finally {
-          document.body.removeChild(area)
-        }
-        if (!ok) throw new Error('当前浏览器不允许自动复制')
-      }
+      await copyText(text)
       toast.success('已复制', text)
     } catch (err) {
       toast.error('复制失败', `请手动复制：${text}（${errText(err)}）`)
