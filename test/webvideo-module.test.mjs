@@ -473,6 +473,34 @@ test('抖音/哔哩哔哩等非 YouTube 平台不会带上 youtube 专用参数'
 /* 自动获取访客 cookies（抖音这类站点）—— 自愈链路                        */
 /* ------------------------------------------------------------------ */
 
+test('★抖音「需要新鲜 cookies」是间歇性抽风：用同一份 cookies 原地重试就成功，不该去重抓或换方式', async () => {
+  // 真机实测（2026-10-03）：同一条链接、**同一份 cookies** 连打 10 次成功 9 次 —— 报错是随机的，
+  // cookies 根本没问题。旧逻辑一遇到这个错就去重抓 cookies 甚至换遍整条阶梯，纯属浪费。
+  const cookieHarvest = await import('../dist/services/cookieHarvest.js');
+  let harvestCalls = 0;
+  cookieHarvest.__setHarvesterLauncher(async () => {
+    harvestCalls += 1;
+    return [{ domain: '.douyin.com', includeSubdomains: true, path: '/', secure: true, expires: 1900000000, name: 'ttwid', value: 't', httpOnly: true }];
+  });
+  // 前 1 次下载失败（同一份 cookies 抽风，真机实测约 10% 概率），第 2 次就成功
+  resetLadder({ failTimes: 1 });
+  process.env.LADDER_DOWNLOAD_ERROR = 'ERROR: [Douyin] 7680875970777135534: Fresh cookies (not necessarily logged in) are needed';
+  process.env.YTDLP_COOKIE_RETRY_GAP_MS = '20';
+  try {
+    const { result } = await runWebvideoTask({ url: 'https://v.douyin.com/fa-VZ-md5FM/' });
+    assert.ok(result.done, `同一份 cookies 原地重试后应成功，实际：${result.error ?? '未完成'}`);
+    // 抖音链接在"凭据准备"阶段本来就会抓一次（harvestCalls=1）；关键是**不要再抓第二次**
+    // —— 旧逻辑一见这个报错就去重抓 cookies，而 cookies 其实没问题。
+    assert.equal(harvestCalls, 1, `间歇性抽风时不该重新抓 cookies（应只有凭据准备那一次），实际抓了 ${harvestCalls} 次`);
+    const labels = new Set(ladderArgs().map((a) => a.label));
+    assert.equal(labels.size, 1, `应始终用同一种方式（不换方式重试），实际用过：${[...labels].join('、')}`);
+  } finally {
+    delete process.env.LADDER_DOWNLOAD_ERROR;
+    delete process.env.YTDLP_COOKIE_RETRY_GAP_MS;
+    cookieHarvest.__setHarvesterLauncher(null);
+  }
+});
+
 test('★换过新 cookies 仍被要求「新鲜 cookies」→ 立刻停手（不再跑完剩下 9 档），并给出准确结论', async () => {
   // 真机背景（2026-10-03 树莓派）：抖音在短时间连下几个之后会**临时限流这个出口 IP**，
   // 此时纯 HTTP 的 ttwid 与浏览器抓的 19 条富 cookies **全部被拒**。旧逻辑会：
@@ -485,6 +513,7 @@ test('★换过新 cookies 仍被要求「新鲜 cookies」→ 立刻停手（�
     { domain: '.douyin.com', includeSubdomains: true, path: '/', secure: true, expires: 1900000000, name: 'ttwid', value: 'ttwid-x', httpOnly: true },
   ]);
   resetLadder({ failTimes: 999 });
+  process.env.YTDLP_COOKIE_RETRY_MAX = '0';   // 本用例测的是重抓/早停路径，先关掉间歇性重试
   process.env.LADDER_DOWNLOAD_ERROR = DY_ERROR;
   process.env.YTDLP_ATTEMPT_GAP_MS = '20';
   process.env.YTDLP_RATE_LIMIT_BACKOFF_MS = '20';
@@ -492,12 +521,12 @@ test('★换过新 cookies 仍被要求「新鲜 cookies」→ 立刻停手（�
     const { result } = await runWebvideoTask({ url: 'https://v.douyin.com/wxkLrzmtN6M/' });
     assert.ok(result.error, '一直失败时应报错');
 
-    // ★ 关键 1：换过 cookies 之后只再试 1 次就收手（同一份 cookie 跑完 10 档毫无意义）。
-    //    直接数真正发起过的下载：第 1 次失败 → 换 cookies → 再 1 次失败就停手 = 2 次。
+    // ★ 关键 1：换过 cookies、累计失败到阈值就收手，**不把整条 10 档跑完**
+    //    （每档还会原地重试 2 次 → 跑完将是 30 次，纯属反复捶被限流的 IP）
     const downloadCalls = ladderAllCalls().filter((l) => l.includes('-o '));
     assert.ok(
-      downloadCalls.length <= 3,
-      `换过 cookies 后应立刻停手（不应跑完 10 档），实际发起 ${downloadCalls.length} 次下载`,
+      downloadCalls.length <= 8,
+      `应尽早就停手（不是跑完 10 档），实际发起 ${downloadCalls.length} 次下载`,
     );
 
     // ★ 关键 2：结论必须指向"出口 IP 被临时限流 + 已安排延后重试"，而不是让人去传 cookies
@@ -505,6 +534,7 @@ test('★换过新 cookies 仍被要求「新鲜 cookies」→ 立刻停手（�
     assert.match(result.error, /延后重试/, '应说明程序会延后重试');
     assert.match(result.error, /不要再反复点重试/, '要劝住用户别连打');
   } finally {
+    delete process.env.YTDLP_COOKIE_RETRY_MAX;
     delete process.env.LADDER_DOWNLOAD_ERROR;
     delete process.env.YTDLP_ATTEMPT_GAP_MS;
     delete process.env.YTDLP_RATE_LIMIT_BACKOFF_MS;
@@ -531,6 +561,7 @@ test('★抖音「需要新鲜 cookies」时：自动抓 cookies 并带上 refer
   });
 
   resetLadder({ failTimes: 999 });
+  process.env.YTDLP_COOKIE_RETRY_MAX = '0';   // 本用例测的是重抓/早停路径，先关掉间歇性重试
   process.env.LADDER_DOWNLOAD_ERROR = DY_ERROR;
   process.env.YTDLP_RATE_LIMIT_BACKOFF_MS = '20';
   process.env.YTDLP_ATTEMPT_GAP_MS = '20';
@@ -548,6 +579,7 @@ test('★抖音「需要新鲜 cookies」时：自动抓 cookies 并带上 refer
     assert.doesNotMatch(result.error, /判定为机器人|等待 10~30 分钟再重试/, `错误结论不应是限流：${result.error}`);
     assert.match(result.error, /抖音|cookies/, `应说明是抖音的 cookies 问题：${result.error}`);
   } finally {
+    delete process.env.YTDLP_COOKIE_RETRY_MAX;
     delete process.env.LADDER_DOWNLOAD_ERROR;
     delete process.env.YTDLP_RATE_LIMIT_BACKOFF_MS;
     delete process.env.YTDLP_ATTEMPT_GAP_MS;

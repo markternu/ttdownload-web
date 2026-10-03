@@ -482,7 +482,18 @@ export async function cancelTask(taskId: number): Promise<void> {
 export function retryTask(taskId: number): void {
   const task = tasksRepo.get(taskId);
   if (!task) throw notFound('任务不存在');
-  tasksRepo.update(taskId, { status: 'waiting', error: null, progress: 0, speedBps: 0, downloadedBytes: 0, finishedAt: null });
+  // 手动重试 = 用户明确要求再试一次 → **重置自动重试预算**。
+  // （血案：旧版不重置，被"出口 IP 临时限流"用光 2 次预算后，用户点重试只会跑一次就永久失败。）
+  tasksRepo.update(taskId, {
+    status: 'waiting',
+    error: null,
+    progress: 0,
+    speedBps: 0,
+    downloadedBytes: 0,
+    finishedAt: null,
+    retryCount: 0,
+  });
+  retryNotBefore.delete(taskId);
   emit(taskId);
   kickScheduler();
 }

@@ -971,6 +971,25 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
     const failedLabel = job.attempts[job.attemptIndex].label;
     const rawErr = `${job.stderr}\n${job.stdout}`.toLowerCase();
 
+    // ★ 先分清两种"需要新鲜 cookies"：
+    //   ① **间歇性抽风**（常见）：实测同一条链接、**同一份 cookies** 连打 10 次成功 9 次
+    //      —— cookies 没问题，重试一下就好。此时原地重试，**不要**去重抓 cookies、更不要换方式。
+    //   ② **cookies 真的过期**：每次都被拒 → 才需要重新抓（下面的自愈分支）。
+    //   ③ **出口 IP 被临时限流**：换了新 cookies 仍被拒 → 早点停手（再往下看）。
+    const cookieErrNow = isCookieRequiredError(`${job.stderr}\n${job.stdout}`);
+    const cookieRetryMax = envMs('YTDLP_COOKIE_RETRY_MAX', 2);
+    const cookieRetries = job.attemptRetries?.[job.attemptIndex] ?? 0;
+    if (cookieErrNow && cookieRetries < cookieRetryMax && !job.cancelled) {
+      job.attemptRetries = { ...(job.attemptRetries ?? {}), [job.attemptIndex]: cookieRetries + 1 };
+      scoped.warn(
+        `[MARK:YTDLP_ATTEMPT] 站点报「需要新鲜 cookies」，但这个报错是间歇性的 —— 用同一份 cookies 原地重试（第 ${cookieRetries + 1}/${cookieRetryMax} 次）`,
+      );
+      setTimeout(() => {
+        if (!job.cancelled && job.exitCode === null) launchAttempt(taskId, job, ctx);
+      }, envMs('YTDLP_COOKIE_RETRY_GAP_MS', 1000));
+      return;
+    }
+
     // ★ 自愈：站点说「cookie 失效/需要新鲜 cookie」时，重新抓一次访客 cookies 再重来一轮。
     //   这就是「不用人工天天导出 cookies」的关键一步（抖音的签名 cookie 几小时就过期）。
     if (isCookieRequiredError(`${job.stderr}\n${job.stdout}`) && !job.reharvested && job.attemptCtx) {
@@ -1049,9 +1068,15 @@ function launchAttempt(taskId: number, job: RunningJob, ctx: LaunchContext): voi
     // ★ 已经**换过一次新 cookies** 了，还是被要求「新鲜 cookies」→ 剩下的档只差格式/UA，
     //   用的是同一份 cookie，必然同样被拒。实测（2026-10-03 树莓派）：继续跑完要白耗 ~35 秒，
     //   而且是在反复捶同一个已被限流的出口 IP，只会让限流更久。直接停手，结论交给 buildFinalError。
-    if (job.reharvested && next < job.attempts.length && isCookieRequiredError(`${job.stderr}\n${job.stdout}`)) {
+    const cookieStops = job.attemptErrors.filter((e) => isCookieRequiredError(e.raw || e.message)).length;
+    if (
+      job.reharvested &&
+      next < job.attempts.length &&
+      isCookieRequiredError(`${job.stderr}\n${job.stdout}`) &&
+      cookieStops >= envMs('YTDLP_COOKIE_MAX_ATTEMPTS', 5)
+    ) {
       scoped.error(
-        `[MARK:TASK_FAIL] 已重新抓过 cookies 仍被要求「新鲜 cookies」，停止继续尝试（剩余 ${job.attempts.length - next} 档只会重复同一个失败）`,
+        `[MARK:TASK_FAIL] 已重新抓过 cookies、并累计失败 ${cookieStops} 次仍被要求「新鲜 cookies」，停止继续尝试（后面只会重复同一个失败）`,
       );
       job.exitCode = exit;
       return;
