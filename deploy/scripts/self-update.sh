@@ -25,12 +25,20 @@
 set -uo pipefail
 
 # ---------------------------------------------------------------- 参数
-REPO=""
-REF=""
-SERVICE="ttdownload-web"
-LOGFILE=""
-PREVIOUS=""
+# 三个来源，优先级从高到低：
+#   ① 命令行参数（人工执行用）
+#   ② 环境变量 TTDL_REPO / TTDL_REF / TTDL_SERVICE / TTDL_LOG / TTDL_PREVIOUS
+#      （程序调用时**同时**用 env 传一份：systemd-run 在某些版本会把命令后面的
+#        `--xxx` 当成它自己的参数吃掉 —— 真机踩过：脚本收到 0 个参数，
+#        于是仓库路径退化成 "/"，git 报 "not a git repository"）
+#   ③ 脚本自身位置推导（必须在**复制到 /tmp 之前**算，否则 /tmp/xxx.sh/../.. = "/"）
+REPO="${TTDL_REPO:-}"
+REF="${TTDL_REF:-}"
+SERVICE="${TTDL_SERVICE:-ttdownload-web}"
+LOGFILE="${TTDL_LOG:-}"
+PREVIOUS="${TTDL_PREVIOUS:-}"
 NO_RESTART=0
+PRINT_CONFIG=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) REPO="${2:-}"; shift 2 ;;
@@ -39,15 +47,22 @@ while [[ $# -gt 0 ]]; do
     --log) LOGFILE="${2:-}"; shift 2 ;;
     --previous) PREVIOUS="${2:-}"; shift 2 ;;
     --no-restart) NO_RESTART=1; shift ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    --print-config) PRINT_CONFIG=1; shift ;;
+    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 2 ;;
   esac
 done
 
+# ⚠️ 必须在 re-exec 之前解析：re-exec 后 $0 指向 /tmp 的副本，
+#    再用它推导仓库路径会得到 "/"（真机 bug：repo=/ → git fetch 全失败）。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "$REPO" ]]; then
-  REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
 fi
-REPO="$(cd "$REPO" && pwd)"
+if ! REPO="$(cd "$REPO" 2>/dev/null && pwd)"; then
+  echo "仓库目录不存在：${TTDL_REPO:-$REPO}" >&2
+  exit 2
+fi
 STATE_DIR="${TTDL_STATE_DIR:-}"
 if [[ -z "$STATE_DIR" ]]; then
   # 状态目录：优先按 .env 里的 DOWNLOAD_ROOT 推导，退回落盘默认值
@@ -59,6 +74,16 @@ RESULT_FILE="$(dirname "$LOGFILE")/update-result.json"
 mkdir -p "$(dirname "$LOGFILE")" 2>/dev/null || true
 
 say() { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
+
+if [[ "$PRINT_CONFIG" = 1 ]]; then
+  # 只打印解析结果（供测试/排查）：不碰 git、不重启服务
+  printf 'repo=%s\nref=%s\nservice=%s\nlog=%s\nprevious=%s\nstate=%s\n' \
+    "$REPO" "$REF" "$SERVICE" "$LOGFILE" "$PREVIOUS" "$STATE_DIR"
+  exit 0
+fi
+
+# 把解析好的配置用 env 传给 re-exec 后的自己（那边的 $@ 可能为空）
+export TTDL_REPO="$REPO" TTDL_REF="$REF" TTDL_SERVICE="$SERVICE" TTDL_LOG="$LOGFILE" TTDL_PREVIOUS="$PREVIOUS"
 
 # ------------------------------------------------- 把自己复制到 /tmp 再执行
 # 因为下面 git reset --hard 会把本脚本文件本身换掉，而 bash 是边读边执行的
@@ -77,6 +102,8 @@ trap 'rm -f "${TTDL_SELF_UPDATE_TMP:-}" 2>/dev/null || true' EXIT
 # 全部输出同时进日志文件（页面会 tail 它）
 exec >>"$LOGFILE" 2>&1
 say "===== 开始自动升级 =====  repo=$REPO ref=${REF:-<远端默认>} service=$SERVICE"
+say "argv: ${TTDL_SELF_UPDATE_ARGV:-（未提供）}"
+say "config 来源：${TTDL_CALLER:-人工/默认}（脚本位置：${SCRIPT_DIR}）"
 
 # 并发保护：同一时间只允许一个升级在跑
 LOCK_FILE="$(dirname "$LOGFILE")/update.lock"
@@ -100,7 +127,7 @@ as_owner() {
     "$@"
   fi
 }
-say "仓库属主：$REPO_OWNER（git/npm/构建都以它身份执行）"
+say "仓库属主：${REPO_OWNER}（git/npm/构建都以它身份执行）"
 
 # ---------------------------------------------------------------- 工具
 GIT="git -c safe.directory=*"
@@ -109,7 +136,7 @@ cd "$REPO" || { say "进不去仓库目录 $REPO"; exit 1; }
 OLD_SHA="$(as_owner $GIT rev-parse --short HEAD 2>/dev/null || echo '')"
 OLD_VERSION="$(node -e "try{console.log(require('$REPO/package.json').version)}catch(e){console.log('unknown')}" 2>/dev/null || echo unknown)"
 [[ -n "$PREVIOUS" ]] || PREVIOUS="$OLD_SHA"
-say "升级前：$OLD_SHA（v$OLD_VERSION）"
+say "升级前：${OLD_SHA}（v${OLD_VERSION}）"
 
 write_result() { # ok from to fromSha toSha message rolledBack
   local ok="$1" from="$2" to="$3" fromsha="$4" tosha="$5" msg="$6" rolled="$7"
@@ -202,7 +229,7 @@ build_all() {
 }
 
 # ---------------------------------------------------------------- 1. 拉取
-say "git fetch --prune ${REF:+（目标 $REF）} ..."
+say "git fetch --prune ${REF:+（目标 ${REF}）} ..."
 if ! as_owner $GIT fetch --prune --tags; then
   say "git fetch 失败：网络/凭据问题？本次不升级，保持旧代码运行"
   write_result false "$OLD_VERSION" "$OLD_VERSION" "$OLD_SHA" "$OLD_SHA" "git fetch 失败（网络或凭据问题），未做任何改动" false
@@ -217,7 +244,7 @@ if ! as_owner $GIT rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null; the
 fi
 NEW_SHA="$(as_owner $GIT rev-parse --short "$TARGET")"
 if [[ "$NEW_SHA" == "$OLD_SHA" ]]; then
-  say "已经就是目标提交 $NEW_SHA，无需升级"
+  say "已经就是目标提交 ${NEW_SHA}，无需升级"
   write_result true "$OLD_VERSION" "$OLD_VERSION" "$OLD_SHA" "$NEW_SHA" "已是最新提交" false
   exit 0
 fi
@@ -229,11 +256,11 @@ if ! as_owner $GIT reset --hard "$TARGET"; then
   exit 1
 fi
 NEW_VERSION="$(node -e "try{console.log(require('$REPO/package.json').version)}catch(e){console.log('unknown')}" 2>/dev/null || echo unknown)"
-say "目标版本：v$NEW_VERSION（$NEW_SHA）"
+say "目标版本：v${NEW_VERSION}（${NEW_SHA}）"
 
 # ---------------------------------------------------------------- 2. 构建
 if ! build_all; then
-  say "构建失败 → 回滚到 $PREVIOUS（v$OLD_VERSION）"
+  say "构建失败 → 回滚到 ${PREVIOUS}（v${OLD_VERSION}）"
   as_owner $GIT reset --hard "$PREVIOUS" || say "回滚 git reset 也失败了，请手动处理"
   build_all || say "回滚后构建仍失败：服务可能起不来，请手动执行 sudo ./deploy.sh --update"
   restart_service || true
@@ -253,10 +280,10 @@ if ! restart_service; then
 fi
 
 if ! health_check; then
-  say "新版起不来 → 回滚到 $PREVIOUS（v$OLD_VERSION）"
+  say "新版起不来 → 回滚到 ${PREVIOUS}（v${OLD_VERSION}）"
   as_owner $GIT reset --hard "$PREVIOUS" || say "回滚 git reset 失败"
   build_all && restart_service && health_check \
-    && say "已回滚并恢复服务（v$OLD_VERSION）" \
+    && say "已回滚并恢复服务（v${OLD_VERSION}）" \
     || say "回滚后仍不健康：请手动执行 sudo ./deploy.sh --update 排查"
   write_result false "$OLD_VERSION" "$NEW_VERSION" "$OLD_SHA" "$NEW_SHA" "升级后健康检查失败，已回滚到 v$OLD_VERSION" true
   say "===== 升级失败（已回滚）====="
@@ -264,5 +291,5 @@ if ! health_check; then
 fi
 
 write_result true "$OLD_VERSION" "$NEW_VERSION" "$OLD_SHA" "$NEW_SHA" "升级成功：v$OLD_VERSION → v$NEW_VERSION" false
-say "===== 升级成功：v$OLD_VERSION → v$NEW_VERSION（$NEW_SHA）====="
+say "===== 升级成功：v$OLD_VERSION → v${NEW_VERSION}（${NEW_SHA}）====="
 exit 0

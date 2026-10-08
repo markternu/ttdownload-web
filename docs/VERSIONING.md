@@ -99,6 +99,27 @@ compareSemVer(latest, current) > 0   →  有新版本，自动升级
 4. 任何一步失败 → **自动回滚到升级前的 commit 并重新构建**，保证服务能用旧版起来，
    结果写进 `state/update-result.json` 显示在「更新」页。
 
+### 升级起不来时怎么办（2026-10-08 真机事故的教训）
+
+现场：日志里 `repo=/`、`git fetch` 报 not a git repository，而且**每 30 秒重复一次**。
+两个根因（都已修，并各配了会红的回归测试 `test/self-update-script.test.mjs`）：
+
+1. **脚本把仓库路径认成了 `/`**：脚本会把自己复制到 `/tmp` 再执行（防止 `git reset`
+   换掉正在跑的脚本），而仓库路径的默认值是 `dirname($0)/../..` —— re-exec 之后
+   `$0` 指向 `/tmp/xxx.sh`，`../..` 就是 `/`。再加上 `systemd-run` 在某些版本会把命令
+   后面的 `--repo/--ref` 当成它自己的参数吃掉（脚本收到 0 个参数），两个问题叠在一起就炸了。
+   现在：**re-exec 之前**解析好仓库路径、用环境变量传下去；程序调用时也**同时**用
+   env 传一份；`systemd-run` 命令前加 `--`；脚本日志里打印完整 argv 与配置来源。
+2. **失败后每次开机都重试**（死循环：升级→退出→systemd 重启→又发现新版本→又升级）。
+   现在：同一个目标失败后进入冷却期（`UPDATE_RETRY_COOLDOWN_MIN`，默认 30 分钟），
+   冷却期内不再自动重试；**手动点「立即更新」或执行下面的命令不受冷却限制**。
+
+兜底命令（网页「更新」页有「复制命令」按钮，一键复制的就是它）：
+
+```bash
+cd ~/ttdownload-web && sudo ./deploy.sh --update
+```
+
 ### 升级脚本的边界（重要）
 
 `deploy/scripts/self-update.sh` 只管**代码级**升级（git / npm 依赖 / 构建 / 重启 / 回滚）。

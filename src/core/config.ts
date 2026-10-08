@@ -198,6 +198,8 @@ export const config = {
     /** 拉取失败时开机重试次数与间隔（毫秒），失败就直接用本地代码跑 */
     bootRetries: num(process.env.UPDATE_BOOT_RETRIES, 3),
     bootRetryGapMs: num(process.env.UPDATE_BOOT_RETRY_GAP_MS, 15_000),
+    /** 上次升级失败后，多久之内不再自动重试（分钟）——防止开机→升级→失败→重启的死循环 */
+    retryCooldownMin: num(process.env.UPDATE_RETRY_COOLDOWN_MIN, 30),
   },
 
   /** 只处理这些扩展名的 BT 内容（与老脚本一致：仅视频 + 图片） */

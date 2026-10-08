@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowUpCircle,
   CheckCircle2,
+  Copy,
   GitBranch,
   RefreshCw,
   RotateCcw,
@@ -11,6 +12,7 @@ import {
 import { Badge, Button, Card, CardHeader, Spinner, Switch } from '../components/ui'
 import { useToast } from '../context/ToastContext'
 import { api } from '../lib/api'
+import { copyText } from '../lib/clipboard'
 import { cn } from '../lib/cn'
 import type { UpdateStatus } from '../types'
 
@@ -111,6 +113,20 @@ export default function UpdatePage() {
   }
 
   const commits = useMemo(() => status?.commits ?? [], [status])
+
+  /** 手动更新命令：服务器上执行它 = 点「立即更新」；自动升级起不来时的兜底 */
+  const manualCommand = status?.manualCommand || 'cd ~/ttdownload-web && sudo ./deploy.sh --update'
+  const [copied, setCopied] = useState(false)
+  const copyManualCommand = async () => {
+    try {
+      await copyText(manualCommand)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2000)
+      toast.success('命令已复制', '在服务器（树莓派）的终端里粘贴执行即可')
+    } catch (e) {
+      toast.error('复制失败', (e as Error).message)
+    }
+  }
 
   if (loading) {
     return (
@@ -243,6 +259,51 @@ export default function UpdatePage() {
             ))}
           </ul>
         )}
+      </Card>
+
+      <Card>
+        <CardHeader
+          title={<span className="flex items-center gap-2"><Terminal className="h-4 w-4" /> 手动更新命令</span>}
+          subtitle="在服务器（树莓派）的终端里执行下面这条命令，效果等于本页的「立即更新」；页面上的升级万一失败，用它兜底最稳"
+          action={
+            <Button
+              size="sm"
+              variant={copied ? 'secondary' : 'outline'}
+              icon={copied ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              onClick={() => void copyManualCommand()}
+            >
+              {copied ? '已复制' : '复制命令'}
+            </Button>
+          }
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          <code
+            className={cn(
+              'flex-1 overflow-x-auto whitespace-pre rounded-lg bg-slate-950 px-3 py-2.5 font-mono text-xs text-emerald-300',
+            )}
+          >
+            {manualCommand}
+          </code>
+        </div>
+        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+          它会：拉最新代码 → 装依赖 → 构建后端+前端 → 重启服务（并自检）。装的是远端 <b>main</b> 分支的最新提交，
+          不受"版本号有没有抬"限制。
+        </p>
+        <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+          服务器上的实际目录：
+          <code className="ml-1 rounded bg-slate-100 px-1 dark:bg-slate-800">{status?.rootDir ?? '—'}</code>
+          {status?.rootDir && status.manualCommand.includes('~/')
+            ? '（命令里的 ~ 就是你自己账号的家目录，两者指向同一个地方）'
+            : ''}
+        </p>
+        {status?.autoApplySkipReason ? (
+          <p className="mt-2 flex items-start gap-2 rounded-lg bg-amber-50 p-2.5 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              自动升级暂时不会重试：{status.autoApplySkipReason}
+            </span>
+          </p>
+        ) : null}
       </Card>
 
       <Card>

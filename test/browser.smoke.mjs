@@ -953,6 +953,25 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
+  test('更新页：手动更新命令可一键复制到剪贴板（页面看不到的东西也要能兜底）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
+    await page.goto(`${base}/update`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=手动更新命令', { timeout: 15000 });
+
+    // 页面上显示的那条命令（页面上还有别的 <code>，按内容精确定位到 deploy.sh 那条）
+    const shown = (await page.locator('code', { hasText: 'deploy.sh' }).first().innerText()).trim();
+    assert.match(shown, /sudo \.\/deploy\.sh --update$/, `要显示手动升级命令，实际：${shown}`);
+
+    await page.getByRole('button', { name: /复制命令/ }).first().click();
+    await page.waitForSelector('text=已复制', { timeout: 5000 });
+
+    const clip = await page.evaluate(() => navigator.clipboard.readText());
+    assert.equal(clip.trim(), shown, '剪贴板内容必须和页面显示的命令一致');
+    await page.close();
+  });
+
   test('页面无 JS 报错', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     assert.deepEqual(pageErrors, [], `浏览器控制台错误：\n${pageErrors.join('\n')}`);

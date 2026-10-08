@@ -187,6 +187,20 @@ export interface UpdateStatus {
   serviceName: string
   /** 正在下载/等待的任务数（升级会先暂停它们） */
   activeTasks: number
+  /** 上一次自动升级的尝试 */
+  lastAttempt: {
+    at: string
+    target: string
+    fromVersion: string
+    ok: boolean | null
+    message?: string
+  } | null
+  /** 自动升级被"冷却"挡住的原因（null = 没被挡） */
+  autoApplySkipReason: string | null
+  /** 手动升级命令（页面一键复制） */
+  manualCommand: string
+  /** 部署目录绝对路径（页面显示，避免 `~/...` 有歧义） */
+  rootDir: string
 }
 
 /** 单个站点的「访客 cookies 自动获取」状态 */

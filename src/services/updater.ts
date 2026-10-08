@@ -91,6 +91,14 @@ export interface UpdateStatus {
   serviceName: string;
   /** 正在下载/等待的任务数（页面提示"升级会先暂停它们"） */
   activeTasks: number;
+  /** 上一次自动升级的尝试（失败时页面要提示"冷却中"，并给出手动命令） */
+  lastAttempt: UpdateAttempt | null;
+  /** 自动升级被冷却挡住的原因（null = 没被挡）；页面据此提示"请手动执行命令" */
+  autoApplySkipReason: string | null;
+  /** 手动升级命令（页面一键复制；服务器上执行它等价于点「立即更新」） */
+  manualCommand: string;
+  /** 部署目录的绝对路径（页面上显示，避免 `~/...` 有歧义） */
+  rootDir: string;
 }
 
 export interface UpdateResult {
@@ -137,6 +145,10 @@ function emptyStatus(): UpdateStatus {
     bootDelaySec: getSettings().update.bootDelaySec,
     serviceName: config.update.serviceName,
     activeTasks: 0,
+    lastAttempt: null,
+    autoApplySkipReason: null,
+    manualCommand: '',
+    rootDir: config.rootDir,
   };
 }
 
@@ -192,6 +204,10 @@ export function getUpdateStatus(): UpdateStatus {
   status.intervalMin = s.update.intervalMin;
   status.bootDelaySec = s.update.bootDelaySec;
   status.lastResult = readJson<UpdateResult>(RESULT_FILE());
+  status.lastAttempt = lastAttempt();
+  // 被冷却挡住时页面要明说（否则用户会以为"自动更新坏了"）
+  status.autoApplySkipReason = status.versionNewer ? shouldSkipAutoApply(status).reason ?? null : null;
+  status.manualCommand = manualUpdateCommand();
   status.logTail = logTail();
   status.repoReady = isGitRepo();
   status.activeTasks = tasksRepo.byStatus(['waiting', 'parsing', 'downloading']).length;
@@ -201,6 +217,21 @@ export function getUpdateStatus(): UpdateStatus {
 function setStatus(patch: Partial<UpdateStatus>): void {
   status = { ...(status ?? emptyStatus()), ...patch };
   persistStatus();
+}
+
+/**
+ * 给用户在服务器上手动执行的升级命令 = 本页面「立即更新」的等价物。
+ * 自动升级起不来（没有 systemd-run / 权限不对 / 网络太差）时，这就是兜底手段。
+ *
+ * 路径用 `~/xxx` 形式（用户是用自己的账号 ssh 上去执行的，`~` 就是他自己的家目录；
+ * 而服务是以 root 跑的，所以这里**不能**用服务进程的 HOME 去展开）。
+ * 不在家目录下的部署（例如 /opt/xxx）就如实给绝对路径，别硬凑 `~`。
+ */
+export function manualUpdateCommand(): string {
+  const dir = config.rootDir;
+  const m = /^(?:\/home|\/Users)\/[^/]+\/(.+)$/.exec(dir);
+  const shown = m ? `~/${m[1]}` : dir;
+  return `cd ${shown} && sudo ./deploy.sh --update`;
 }
 
 /* ------------------------------------------------------------------ *
@@ -505,6 +536,46 @@ function selfUpdateScript(): string {
 }
 
 /**
+ * 生成"启动外部升级脚本"的命令（抽成纯函数是为了能单测 —— 真机踩过的坑：
+ * systemd-run 把命令后面的 `--repo/--ref/...` 当成它自己的参数吃掉了，
+ * 脚本收到 0 个参数，于是仓库路径退化成 "/"，git 直接报 not a git repository）。
+ *
+ * 所以这里做两件事：
+ *   ① 参数**同时**用环境变量传一份（脚本优先读 env，其次才读命令行）；
+ *   ② systemd-run 命令前加 `--`，明确"后面全是命令和它的参数"。
+ */
+export function buildUpdaterCommand(opts: {
+  script: string;
+  repo: string;
+  ref: string;
+  service: string;
+  log: string;
+  previous?: string;
+}): { env: Record<string, string>; cliArgs: string[]; shellCmd: string } {
+  const cliArgs = [
+    '--repo', opts.repo,
+    '--ref', opts.ref,
+    '--service', opts.service,
+    '--log', opts.log,
+    ...(opts.previous ? ['--previous', opts.previous] : []),
+  ];
+  const env = {
+    TTDL_REPO: opts.repo,
+    TTDL_REF: opts.ref,
+    TTDL_SERVICE: opts.service,
+    TTDL_LOG: opts.log,
+    TTDL_PREVIOUS: opts.previous ?? '',
+    // 让脚本在日志里说清"是谁调用的"（人工跑 vs 程序自动升级）
+    TTDL_CALLER: 'app(自动更新)',
+    TTDL_SELF_UPDATE_ARGV: ['bash', opts.script, ...cliArgs].join(' '),
+  };
+  // 展示用命令：--xxx 保持不带引号（人能读），带空格的值加引号
+  const q = (v: string): string => (/[\s"']/.test(v) ? JSON.stringify(v) : v);
+  const shellCmd = `bash ${q(opts.script)} ${cliArgs.map((a) => (a.startsWith('--') ? a : q(a))).join(' ')}`;
+  return { env, cliArgs, shellCmd };
+}
+
+/**
  * 真正发起升级：暂停下载 → 启动外部升级脚本 → 本进程退出（脚本会重新拉起服务）。
  *
  * ⚠️ 脚本必须跑在**本服务的 cgroup 之外**（systemd-run --unit=...），否则
@@ -521,53 +592,60 @@ export async function applyUpdate(opts: ApplyOptions = {}): Promise<ApplyDecisio
   const target = st.latestCommit || remoteRef();
   const previous = st.currentCommit ?? '';
   const logFile = LOG_FILE();
-  // systemd-run：独立 unit、跑在服务 cgroup 外、立刻返回（不阻塞 HTTP 响应）
+  const cmd = buildUpdaterCommand({
+    script,
+    repo: config.rootDir,
+    ref: target,
+    service: config.update.serviceName,
+    log: logFile,
+    previous: previous || undefined,
+  });
   const unit = `ttdownload-selfupdate-${Date.now()}`;
-  const shellCmd = [
-    `bash ${JSON.stringify(script)}`,
-    `--repo ${JSON.stringify(config.rootDir)}`,
-    `--ref ${JSON.stringify(target)}`,
-    `--service ${JSON.stringify(config.update.serviceName)}`,
-    `--log ${JSON.stringify(logFile)}`,
-    previous ? `--previous ${JSON.stringify(previous)}` : '',
-  ].filter(Boolean).join(' ');
 
   setStatus({ phase: 'paused', message: '正在暂停下载任务（升级完成后自动恢复）…' });
   await pauseDownloads();
 
   setStatus({ phase: 'updating', message: `正在升级到 ${st.latestVersion ?? target}，服务稍后自动重启…` });
+  // 记一次"尝试"：万一脚本起不来/失败，下次开机不能马上再试（否则会陷入
+  // 开机→升级→失败→退出→重启→再升级 的死循环，真机上就是这么刷日志的）
+  recordAttempt({ at: nowIso(), target, fromVersion: config.version, ok: null });
   // 外部脚本的最终结果由它自己写 RESULT_FILE；本进程马上会被它杀掉/重启
+  logger.child('update').mark('UPDATE_APPLY', `即将启动升级脚本：${cmd.shellCmd}`, { repo: config.rootDir, target });
 
   if (opts.dryRun) {
-    return { ok: true, command: shellCmd };
+    return { ok: true, command: cmd.shellCmd };
   }
 
-  const attempts: { bin: string; args: string[] }[] = [
-    { bin: 'systemd-run', args: ['--unit', unit, '--collect', '--no-block', '--description', 'ttdownload-web self-update', 'bash', script,
-      '--repo', config.rootDir, '--ref', target, '--service', config.update.serviceName, '--log', logFile, ...(previous ? ['--previous', previous] : [])] },
-  ];
   let started = false;
   let lastErr = '';
-  for (const a of attempts) {
-    try {
-      const p = await execFileAsync(a.bin, a.args, { timeout: 5000 });
-      logger.child('update').mark('UPDATE_APPLY', `已启动外部升级脚本（${a.bin}）: ${p.stdout.trim() || p.stderr.trim()}`);
-      started = true;
-      break;
-    } catch (e) {
-      lastErr = (e as Error).message;
-    }
+  // ① 首选 systemd-run（跑在服务 cgroup 之外，重启服务不会杀掉它）
+  //    ⚠️ 命令前的 `--` 不能省：否则 `--repo` 这类参数可能被 systemd-run 自己吃掉
+  try {
+    const p = await execFileAsync(
+      'systemd-run',
+      ['--unit', unit, '--collect', '--no-block', '--description', 'ttdownload-web self-update',
+        ...Object.entries(cmd.env).map(([k, v]) => `--setenv=${k}=${v}`),
+        '--', 'bash', script, ...cmd.cliArgs],
+      { timeout: 5000 },
+    );
+    logger.child('update').mark('UPDATE_APPLY', `已用 systemd-run 启动升级脚本：${p.stdout.trim()}`);
+    started = true;
+  } catch (e) {
+    lastErr = (e as Error).message;
+    logger.child('update').warn(`systemd-run 启动失败（改用 setsid 兜底）：${lastErr}`);
   }
+
+  // ② 兜底：没有 systemd-run / 它失败了 → setsid 脱离父进程（本进程马上退出，脚本继续）
   if (!started) {
-    // 没有 systemd-run：用 setsid 脱离父进程（本进程马上退出，脚本继续）
     try {
       const { spawn } = await import('node:child_process');
-      const child = spawn('bash', [script, '--repo', config.rootDir, '--ref', target, '--service', config.update.serviceName, '--log', logFile, ...(previous ? ['--previous', previous] : [])], {
+      const child = spawn('bash', [script, ...cmd.cliArgs], {
         detached: true,
         stdio: 'ignore',
+        env: { ...process.env, ...cmd.env },
       });
       child.unref();
-      logger.child('update').mark('UPDATE_APPLY', `已启动外部升级脚本（setsid 兜底，pid ${child.pid}）`);
+      logger.child('update').mark('UPDATE_APPLY', `已用 setsid 兜底启动升级脚本（pid ${child.pid}）`);
       started = true;
     } catch (e) {
       lastErr = `${lastErr}; ${(e as Error).message}`;
@@ -578,6 +656,7 @@ export async function applyUpdate(opts: ApplyOptions = {}): Promise<ApplyDecisio
     setStatus({ phase: 'failed', message: `无法启动升级脚本：${lastErr}` });
     // 起不来就赶紧把下载恢复回来，别让用户白等
     await resumeAfterUpdate();
+    recordAttempt({ at: nowIso(), target, fromVersion: config.version, ok: false, message: `无法启动升级脚本：${lastErr}` });
     return { ok: false, reason: `无法启动升级脚本：${lastErr}` };
   }
 
@@ -586,7 +665,67 @@ export async function applyUpdate(opts: ApplyOptions = {}): Promise<ApplyDecisio
     logger.child('update').mark('UPDATE_APPLY', '升级脚本已接管，本进程退出等待重启');
     process.exit(0);
   }, 2500).unref();
-  return { ok: true, command: shellCmd };
+  return { ok: true, command: cmd.shellCmd };
+}
+
+/* ------------------------------------------------------------------ *
+ *  升级尝试记录 + 冷却（防止"开机→升级→失败→重启"死循环）
+ * ------------------------------------------------------------------ */
+
+export interface UpdateAttempt {
+  at: string;
+  /** 这次要升到哪个目标（commit） */
+  target: string;
+  /** 发起时本地版本 */
+  fromVersion: string;
+  /** null = 还没结果 */
+  ok: boolean | null;
+  message?: string;
+}
+
+export const ATTEMPT_FILE = (): string => statePath('update-attempt.json');
+
+export function recordAttempt(a: UpdateAttempt): void {
+  try {
+    fs.mkdirSync(path.dirname(ATTEMPT_FILE()), { recursive: true });
+    fs.writeFileSync(ATTEMPT_FILE(), JSON.stringify(a, null, 2));
+  } catch (e) {
+    logger.child('update').warn(`写升级尝试记录失败：${(e as Error).message}`);
+  }
+}
+
+export function lastAttempt(): UpdateAttempt | null {
+  return readJson<UpdateAttempt>(ATTEMPT_FILE());
+}
+
+/**
+ * 判断这次自动升级要不要跳过。
+ *
+ * 为什么要它（真机事故）：升级脚本起不来时，本进程会退出 → systemd 立刻重启 →
+ * 开机检查又发现"有新版本" → 又发起升级 → 又退出……**每 30 秒一轮死循环**，
+ * 日志被刷爆、下载任务被反复暂停。现在：同一个目标在冷却期内只试一次；
+ * 用户仍然可以在「更新」页手动重试（手动不看冷却）。
+ */
+export function shouldSkipAutoApply(
+  st: UpdateStatus,
+  nowStr: string = nowIso(),
+  cooldownMin: number = config.update.retryCooldownMin,
+): { skip: boolean; reason?: string } {
+  const last = lastAttempt();
+  if (!last) return { skip: false };
+  // 版本已经变过（说明上次其实成功了）→ 记录作废
+  if (last.fromVersion && last.fromVersion !== st.currentVersion) return { skip: false };
+  // 目标不同（远端又发布了新版本）→ 允许再试
+  const target = st.latestCommit || remoteRef();
+  if (last.target && last.target !== target) return { skip: false };
+  const at = Date.parse(last.at);
+  if (!Number.isFinite(at)) return { skip: false };
+  const ageMin = (Date.parse(nowStr) - at) / 60000;
+  if (ageMin >= cooldownMin) return { skip: false };
+  return {
+    skip: true,
+    reason: `上次升级（${last.at}）没有成功，${Math.ceil(cooldownMin - ageMin)} 分钟内不再自动重试；可在「更新」页手动重试，或直接执行 sudo ./deploy.sh --update`,
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -618,6 +757,11 @@ async function bootCheck(): Promise<void> {
     return;
   }
   if (st.versionNewer && !st.error) {
+    const skip = shouldSkipAutoApply(st);
+    if (skip.skip) {
+      logger.child('update').mark('UPDATE_CHECK', `暂不自动升级（冷却中）：${skip.reason}`);
+      return;
+    }
     logger.child('update').mark('UPDATE_CHECK', `开机发现新版本 ${st.latestVersion}（当前 ${config.version}），开始自动升级`);
     await applyUpdate({ manual: false });
     return;
@@ -640,6 +784,11 @@ async function tickCheck(): Promise<void> {
     if (!s.update.enabled) return;
     const st = await checkForUpdate();
     if (st.versionNewer && !st.error) {
+      const skip = shouldSkipAutoApply(st);
+      if (skip.skip) {
+        logger.child('update').mark('UPDATE_CHECK', `暂不自动升级（冷却中）：${skip.reason}`);
+        return;
+      }
       logger.child('update').mark('UPDATE_CHECK', `定时检查发现新版本 ${st.latestVersion}，开始自动升级`);
       await applyUpdate({ manual: false });
     }
