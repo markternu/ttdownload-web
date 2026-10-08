@@ -18,6 +18,7 @@ import {
   stopCookieKeepFreshWorker,
 } from './services/cookieHarvest';
 import { startOriginalDownloadWorker, stopOriginalDownloadWorker } from './services/originalDownload';
+import { startUpdateWorker, stopUpdateWorker } from './services/updater';
 
 /**
  * 开机自检：用户上传的 cookies.txt 还能不能用（不联网，只看结构与关键字段/过期时间）。
@@ -102,6 +103,10 @@ async function main(): Promise<void> {
   const server = http.createServer(app);
   server.listen(config.port, config.host, () => {
     logger.info(`服务已启动: http://${config.host}:${config.port}  (前端: / , API: /api/health)`);
+    // ⚠️ 自动更新**必须**在服务已经能对外提供服务之后再启动：
+    //    开机拉取最新代码是我们的需求，但"拉不到就完蛋"不行 —— 网络没通/远端挂了
+    //    也必须能用本地老代码启动（用户明确要求）。检查与升级都是后台异步做的。
+    startUpdateWorker();
   });
 
   const shutdown = (signal: string): void => {
@@ -113,6 +118,7 @@ async function main(): Promise<void> {
     stopUsbWorker();
     stopCookieKeepFreshWorker();
     stopOriginalDownloadWorker();
+    stopUpdateWorker();
     server.close(() => {
       logger.mark('BOOT', '已退出');
       process.exit(0);

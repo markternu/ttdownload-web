@@ -18,6 +18,7 @@ import {
   UserRound,
   Video,
   Archive,
+  ArrowUpCircle,
   X,
   Activity,
 } from 'lucide-react'
@@ -46,6 +47,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/files', label: '文件', icon: FileVideo2, description: '已发布成品 + 待下载（安卓还没取走）· 可全选批量删除' },
   { to: '/logs', label: '日志', icon: ScrollText, description: '查看 / 过滤 / 下载日志与诊断包' },
   { to: '/report', label: '问题反馈', icon: LifeBuoy, description: '一键下载诊断报告并发给开发者' },
+  { to: '/update', label: '更新', icon: ArrowUpCircle, description: '检查并升级服务器上的项目（升级会自动暂停/恢复下载）' },
   { to: '/settings', label: '设置', icon: SettingsIcon, description: '下载 / 网络 / 外观 / 系统' },
 ]
 

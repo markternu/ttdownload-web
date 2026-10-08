@@ -58,6 +58,8 @@ export const MARKERS: Record<string, string> = {
   BT_HARVEST: 'BT 扫货：扫到哪些货、建了什么发布任务、清理了什么目录',
   BT_TIMEOUT_GRACE: 'BT 超时宽限中（12 小时到点但进度 > 阈值，再给 6 小时）',
   BT_TIMEOUT_DROP: 'BT 超时已清理（删 transmission 任务 + 连数据一起清）',
+  BT_TIMEOUT_MIGRATE: 'BT 计时口径升级：旧任务只有墙上时钟（可能含断电/时钟跳变），重置计时起点重新给窗口',
+  BT_ACTIVE_TICK: 'BT 实际下载尝试时长的单调时钟累计（服务运行期间）',
   BT_CLEANUP: 'BT 目录清理（删了哪些目录/文件、释放多少）',
   BT_CLEANUP_SHARED: 'BT 目录被其它任务共用，本次不删（防误删别人的源文件）',
   BT_EVICT: '（旧标记，已被 BT_TIMEOUT_GRACE / BT_TIMEOUT_DROP 取代）',

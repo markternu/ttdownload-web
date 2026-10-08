@@ -16,6 +16,7 @@ import { filesRouter } from './routes/files';
 import { originalRouter } from './routes/original';
 import { androidRouter } from './routes/android';
 import { usbRouter } from './routes/usb';
+import { updateRouter } from './routes/update';
 
 export function createApp(): express.Express {
   const app = express();
@@ -67,12 +68,13 @@ export function createApp(): express.Express {
   app.use('/api/original', originalRouter);
   app.use('/api/android', androidRouter);
   app.use('/api', usbRouter);
+  app.use('/api', updateRouter);
 
   app.get('/api', (_req, res) => {
     res.json({
       name: 'ttdownload-web',
       version: config.version,
-      endpoints: ['/api/health', '/api/stats', '/api/tasks', '/api/aria2/urls', '/api/bt/seeds', '/api/webvideo/parse', '/api/files', '/api/android/files'],
+      endpoints: ['/api/health', '/api/stats', '/api/tasks', '/api/aria2/urls', '/api/bt/seeds', '/api/webvideo/parse', '/api/files', '/api/android/files', '/api/update/status'],
     });
   });
 

@@ -122,6 +122,71 @@ export interface Settings {
   autoDeleteAfterReport: boolean // 安卓上报后是否删除（默认 true）
   clearLogsAfterReport: boolean // 下载诊断报告成功后是否清空已收集的历史日志（默认 false）
   /** BT 出清机制（长时间无资源/停滞/极慢 -> 清理任务与 incomplete 目录） */
+  update: {
+    /** 自动检查/自动升级总开关 */
+    enabled: boolean
+    /** 定时检查间隔（分钟） */
+    intervalMin: number
+    /** 开机后延迟多久做第一次检查（秒） */
+    bootDelaySec: number
+  }
+}
+
+/* --------------------------- 自动更新（自升级） --------------------------- */
+
+export interface UpdateCommit {
+  sha: string
+  subject: string
+  at: string
+}
+
+export type UpdatePhase = 'idle' | 'checking' | 'paused' | 'updating' | 'done' | 'failed' | 'unavailable'
+
+export interface UpdateResult {
+  ok: boolean
+  fromVersion: string | null
+  toVersion: string | null
+  fromCommit: string | null
+  toCommit: string | null
+  at: string
+  message: string
+  rolledBack: boolean
+}
+
+export interface UpdateStatus {
+  /** 当前版本（package.json 的 SemVer） */
+  currentVersion: string
+  /** 远端版本（检查成功后才有） */
+  latestVersion: string | null
+  currentCommit: string | null
+  currentCommitSubject: string | null
+  latestCommit: string | null
+  /** 远端比本地多几个提交 */
+  behind: number
+  /** 有更新（版本更高，或有新提交） */
+  available: boolean
+  /** 远端版本号更高 */
+  versionNewer: boolean
+  /** 大版本升级（可能不兼容） */
+  majorBump: boolean
+  /** 有新提交但没抬版本号（按规范不自动升） */
+  versionUnchanged: boolean
+  commits: UpdateCommit[]
+  remote: string
+  branch: string
+  repoReady: boolean
+  checkedAt: string | null
+  error: string | null
+  phase: UpdatePhase
+  message: string
+  lastResult: UpdateResult | null
+  logTail: string
+  autoEnabled: boolean
+  intervalMin: number
+  bootDelaySec: number
+  serviceName: string
+  /** 正在下载/等待的任务数（升级会先暂停它们） */
+  activeTasks: number
 }
 
 /** 单个站点的「访客 cookies 自动获取」状态 */

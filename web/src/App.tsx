@@ -19,6 +19,7 @@ const FilesPage = lazy(() => import('./pages/FilesPage'))
 const LogsPage = lazy(() => import('./pages/LogsPage'))
 const ReportPage = lazy(() => import('./pages/ReportPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const UpdatePage = lazy(() => import('./pages/UpdatePage'))
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
 
 export default function App() {
@@ -164,6 +165,14 @@ export default function App() {
               element={
                 <Suspense fallback={<LoadingBlock text="正在加载设置页…" />}>
                   <SettingsPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/update"
+              element={
+                <Suspense fallback={<LoadingBlock text="正在读取更新状态…" />}>
+                  <UpdatePage />
                 </Suspense>
               }
             />

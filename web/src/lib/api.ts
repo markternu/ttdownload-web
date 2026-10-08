@@ -29,6 +29,7 @@ import type {
   SeedItem,
   SeedListResponse,
   Settings,
+  UpdateStatus,
   Stats,
   SystemStatus,
   UsbStatus,
@@ -485,6 +486,28 @@ export const api = {
       '/api/settings/test-connection',
       jsonBody({ tool }),
     ),
+
+  /* ---------------------------- 自动更新 ---------------------------- */
+
+  updateStatus: () => request<UpdateStatus>('/api/update/status'),
+
+  /** 去远端检查有没有新版本（用户点「检查更新」） */
+  updateCheck: () => request<UpdateStatus>('/api/update/check', { method: 'POST' }),
+
+  /**
+   * 立刻升级。会先暂停正在下载的任务，然后重建并重启服务
+   * （页面会短暂断开，属正常）。
+   */
+  updateApply: (opts: { manual?: boolean; force?: boolean } = {}) =>
+    request<{ ok: boolean; message: string; status: UpdateStatus }>(
+      '/api/update/apply',
+      jsonBody(opts),
+    ),
+
+  updateLog: () => request<{ log: string; result: string }>('/api/update/log'),
+
+  saveUpdateSettings: (patch: { enabled?: boolean; intervalMin?: number; bootDelaySec?: number }) =>
+    request<{ ok: boolean; update: Settings['update'] }>('/api/update/settings', jsonBody(patch)),
 }
 
 /** SSE 事件地址 */

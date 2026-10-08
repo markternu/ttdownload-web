@@ -74,6 +74,11 @@ export function defaultSettings(): Settings {
     cookieHarvestEnabled: config.cookieHarvestEnabled,
     clearLogsAfterReport: false,
     btEvict: { ...config.btEvict },
+    update: {
+      enabled: config.update.enabled,
+      intervalMin: config.update.intervalMin,
+      bootDelaySec: config.update.bootDelaySec,
+    },
   };
 }
 
@@ -98,6 +103,7 @@ export function getSettings(): Settings {
       btEvict: { ...base.btEvict, ...(parsed.btEvict ?? {}) },
       btSelect: { ...base.btSelect, ...(parsed.btSelect ?? {}) },
       btPolicy: { ...base.btPolicy, ...(parsed.btPolicy ?? {}) },
+      update: { ...base.update, ...(parsed.update ?? {}) },
     };
     const { next, notes } = migrateSettings(merged);
     cached = next;
@@ -153,6 +159,7 @@ export function updateSettings(patch: Partial<Settings>): Settings {
     btEvict: { ...current.btEvict, ...(patch.btEvict ?? {}) },
     btSelect: { ...current.btSelect, ...(patch.btSelect ?? {}) },
     btPolicy: { ...current.btPolicy, ...(patch.btPolicy ?? {}) },
+    update: { ...current.update, ...(patch.update ?? {}) },
   };
   // 掩码回传时保持原值（前端拿到的就是掩码，原样提交回来不能把密码清成 "******"）
   if (patch.encryptPassword === MASK) next.encryptPassword = current.encryptPassword;

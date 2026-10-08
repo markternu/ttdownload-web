@@ -410,8 +410,12 @@ export const transmissionModule: ModuleAdapter = {
     }
     const selectedBytes = Math.max(0, Number(payload.selectedBytes ?? task.expectBytes ?? 0) || 0);
     await client.call('torrent-start', { ids: [torrentId] });
-    // 记录"什么时候扔给 transmission 的"：12 小时/6 小时策略从这一刻算起
+    // 记录"什么时候扔给 transmission 的"：给用户看的时刻
+    // ⚠️ 策略判定**不用**它（墙上时钟会被断电/NTP 校时污染），用的是 btActiveMs：
+    //    服务实际运行期间累计的毫秒数，见 services/btEvict.ts 顶部的事故说明。
+    //    续传（resume）时两者都保留 —— 还是同一次尝试，不该重新计时。
     const handedAt = String(payload.btHandedAt ?? new Date().toISOString());
+    const handedActiveMs = Number.isFinite(Number(payload.btActiveMs)) ? Math.max(0, Number(payload.btActiveMs)) : 0;
 
     const seedId = Number(payload.seedId ?? 0);
     if (seedId) {
@@ -425,8 +429,8 @@ export const transmissionModule: ModuleAdapter = {
       payload: {
         ...payload,
         btHandedAt: handedAt,
+        btActiveMs: handedActiveMs,
         btLastProgress: 0,
-        btLastCheckAt: null,
       },
     });
     logger.child('transmission').mark('TASK_STATE', `BT 任务已放行开下 #${task.id}`, {

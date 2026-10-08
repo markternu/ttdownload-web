@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import dotenv from 'dotenv';
+import { projectRoot, readPackageVersion } from './version';
 import type { DirLayout } from '../types';
 
 dotenv.config({ path: process.env.ENV_FILE || path.resolve(process.cwd(), '.env') });
@@ -55,7 +56,13 @@ export function ensureDirs(): void {
 export const config = {
   host: str(process.env.HOST, '0.0.0.0'),
   port: num(process.env.PORT, 8080),
-  version: '1.0.0',
+  /**
+   * 版本号**唯一来源** = package.json 的 version（SemVer：主.次.修订，规范见 docs/VERSIONING.md）。
+   * 以前这里写死 `'1.0.0'`，和 package.json 是两份，改一处忘一处；现在只读一份。
+   */
+  version: readPackageVersion(path.join(projectRoot(), 'package.json')) ?? '0.0.0',
+  /** 项目根目录（部署目录）。自动更新（git fetch/构建/重启）都以它为基准。 */
+  rootDir: projectRoot(),
 
   dirs: DIRS,
   dbPath: str(process.env.DB_PATH, path.join(DIRS.state, 'app.db')),
@@ -168,6 +175,30 @@ export const config = {
   schedulerIntervalMs: num(process.env.SCHEDULER_INTERVAL_MS, 3000),
   pipelineIntervalMs: num(process.env.PIPELINE_INTERVAL_MS, 5000),
   pollIntervalMs: num(process.env.POLL_INTERVAL_MS, 1500),
+
+  /**
+   * 自动更新（详见 docs/VERSIONING.md 与 services/updater.ts）。
+   * 默认值可被 .env 覆盖：UPDATE_ENABLED / UPDATE_REMOTE / UPDATE_BRANCH / UPDATE_INTERVAL_MIN /
+   * UPDATE_BOOT_DELAY_SEC / UPDATE_SERVICE_NAME / UPDATE_REMOTE_TIMEOUT_SEC。
+   */
+  update: {
+    /** 总开关；0 只关自动检查，页面上的「检查更新 / 立即更新」仍然可用 */
+    enabled: str(process.env.UPDATE_ENABLED, '1') !== '0',
+    /** 代码来源：git remote 名（或完整 URL）与分支 —— 换源只改这两个 */
+    remote: str(process.env.UPDATE_REMOTE, 'origin'),
+    branch: str(process.env.UPDATE_BRANCH, 'main'),
+    /** 定时检查间隔（分钟） */
+    intervalMin: num(process.env.UPDATE_INTERVAL_MIN, 60),
+    /** 开机后延迟多久做第一次检查（秒）——留出时间让服务和网络就绪 */
+    bootDelaySec: num(process.env.UPDATE_BOOT_DELAY_SEC, 20),
+    /** git fetch 超时（秒）；拉不到就用本地老代码继续跑，绝不影响启动 */
+    fetchTimeoutSec: num(process.env.UPDATE_REMOTE_TIMEOUT_SEC, 60),
+    /** systemd 服务名（升级完要重启它） */
+    serviceName: str(process.env.UPDATE_SERVICE_NAME, 'ttdownload-web'),
+    /** 拉取失败时开机重试次数与间隔（毫秒），失败就直接用本地代码跑 */
+    bootRetries: num(process.env.UPDATE_BOOT_RETRIES, 3),
+    bootRetryGapMs: num(process.env.UPDATE_BOOT_RETRY_GAP_MS, 15_000),
+  },
 
   /** 只处理这些扩展名的 BT 内容（与老脚本一致：仅视频 + 图片） */
   videoExts: str(

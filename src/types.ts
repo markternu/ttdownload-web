@@ -147,8 +147,7 @@ export interface Settings {
   /** 问题反馈：下载诊断报告后是否清空已有日志（避免新旧日志混在一起） */
   clearLogsAfterReport: boolean;
   /** BT 出清机制（长时间无资源/停滞/极慢 -> 清理任务与 incomplete 目录） */
-  btEvict: {
-    enabled: boolean;
+  btEvict: {    enabled: boolean;
     /** 只有下载超过这么多小时的任务才参与出清判断（防误删，默认 10 小时） */
     minAgeHours: number;
     /** 进度达到该百分比且是视频文件时，按"可播放/视为完整"处理（默认 79） */
@@ -161,6 +160,18 @@ export interface Settings {
     slowEtaHours: number;
     /** 出清检查周期（分钟，默认 5） */
     checkIntervalMin: number;
+  };
+  /**
+   * 自动更新（详见 docs/VERSIONING.md 与 services/updater.ts）。
+   * 版本取 package.json 的 SemVer；远端版本更高才升；升级时先暂停下载，升完自动恢复。
+   */
+  update: {
+    /** 自动检查/自动升级总开关（关掉后页面上的「检查更新 / 立即更新」仍可用） */
+    enabled: boolean;
+    /** 定时检查间隔（分钟） */
+    intervalMin: number;
+    /** 开机后延迟多久做第一次检查（秒） */
+    bootDelaySec: number;
   };
 }
 

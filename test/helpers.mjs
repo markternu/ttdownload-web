@@ -184,6 +184,10 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
     torrents: [],
     torrentSets: [],
     torrentAdds: [],
+    /** 收到过 torrent-stop 的种子 id（自动更新"升级前暂停下载"要用到） */
+    stopped: [],
+    /** 收到过 torrent-start 的种子 id（升级完恢复下载要用到） */
+    started: [],
     wanted: (files ?? [
       { name: 'video.mp4', length: 1000, bytesCompleted: 0 },
       { name: 'cover.jpg', length: 100, bytesCompleted: 0 },
@@ -221,9 +225,11 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
         return ok('success', {});
       case 'torrent-start':
         state.running = true;
+        if (Array.isArray(args.ids)) state.started.push(...args.ids);
         return ok('success', {});
       case 'torrent-stop':
         state.running = false;
+        if (Array.isArray(args.ids)) state.stopped.push(...args.ids);
         return ok('success', {});
       case 'torrent-get': {
         // 支持直接给一组"命名种子"（扫货测试要用多个不同名字的种子）

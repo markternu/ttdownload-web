@@ -73,6 +73,7 @@ WebUI/RPC（`127.0.0.1:9091`）外网根本连不上。「BT 种子下载」页�
 | 调试 | 全链路 `[MARK:XXX]` 标记日志 + 网页「日志」页 + 一键导出诊断包 + 首页「网络自检」 |
 | 安卓端配置 | APK 里「服务器地址」只填 IP/域名，端口或反代子路径用「连接方式」下拉选择（直连 :8080 / 反向代理 /ttdownload / HTTPS / 自定义），实际地址实时预览 |
 | 全站鉴权 | 账号密码由部署脚本生成并打印；未登录只能看到登录页（Cookie 会话 7 天、失败限流、安卓 Token 与 HTTP Basic 供程序化访问） |
+| 自动更新 | 开机自动拉取最新代码（拉不到就用本地代码继续启动），运行期定时检查、有新版本自动升级；升级前暂停下载、升完自动恢复；网页「更新」页可手动检查/安装。版本号按 SemVer（V主.次.修订），规范见 `docs/VERSIONING.md` |
 | 待下载清单 | 网页「待下载」页：列出已加密归档、安卓端还没取走的成品，可一键下载到本机（`GET /api/files/pending`） |
 
 ## 三、快速开始（开发环境）
@@ -174,7 +175,7 @@ sudo ./deploy.sh --bt-proxy-off      # 关闭（配置彻底删除，外界访�
 - 网页「**日志**」页：调试开关、级别/标记/关键字过滤、下载日志、清空
 - 首页「**网络自检**」：DNS / HTTPS(Google,YouTube,GitHub) / yt-dlp 解析 / googlevideo CDN / 本机 RPC 逐项实测
 - 标记速查与排查流程：见 [`docs/排查手册.md`](./docs/排查手册.md)
-- **环境问题修复**：不再提供「网页上传脚本并以 root 执行」的通道（该功能因风险过高已于 2026-09-18 整体移除）；系统环境问题请在服务器上直接执行仓库自带脚本，例如 `sudo bash deploy/scripts/diagnose-env.sh`、`deploy/scripts/fix-ytdlp.sh`
+- **环境问题修复**：不再提供「网页上传脚本并以 root 执行」的通道（该功能因风险过高已于 2026-09-18 整体移除）；系统环境问题请在服务器上直接执行仓库自带脚本，例如 `sudo bash deploy/scripts/diagnose-env.sh`、`deploy/scripts/fix-ytdlp.sh`（自动更新由 `deploy/scripts/self-update.sh` 负责，一般不用手动跑）
 
 ## 五、Docker 部署
 
@@ -291,6 +292,9 @@ xiaofeizhe_downd/            state/{app.db,app.log,indexFXY}
 ```bash
 curl -s localhost:8080/api/health                      # 健康检查
 curl -s localhost:8080/api/stats                       # Dashboard 统计
+curl -s localhost:8080/api/update/status               # 自动更新状态（当前/远端版本、有无更新）
+curl -s -X POST localhost:8080/api/update/check        # 立刻去远端检查
+curl -s -X POST localhost:8080/api/update/apply -H 'Content-Type: application/json' -d '{}'   # 升级（先暂停下载，升完自动恢复）
 curl -s -X POST localhost:8080/api/aria2/urls \
      -H 'Content-Type: application/json' \
      -d '{"urls":"http://example.com/a.mp4\nhttp://example.com/b.mp4"}'
@@ -326,7 +330,21 @@ aria2/transmission/webvideo 三模块（含 JSON-RPC 与进程交互）、统一
 任务恢复、REST/安卓 API（含 Range 断点续传、上报删除）、SSE、20 任务压力测试、
 全站鉴权（登录/登出/限流/子路径）、nginx 子路径反代开关（用假 nginx 验证：写入/幂等/回滚/卸载，绝不碰真机配置）。
 
-## 十、常见问题
+## 十、自动更新（服务器自己升级）
+
+> 版本号规范：**主版本.次版本.修订号**（MAJOR=不兼容 / MINOR=新功能 / PATCH=修 bug），
+> 唯一来源是 `package.json` 的 `version`，完整规范见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
+
+- **开机**：服务先用本地代码起来（网络不通也不影响启动），启动 `UPDATE_BOOT_DELAY_SEC`（默认 20 秒）后去远端拉代码；
+  失败会重试 `UPDATE_BOOT_RETRIES` 次，**仍失败就用本地老代码继续跑**。
+- **运行期**：每 `UPDATE_INTERVAL_MIN`（默认 60 分钟）检查一次，远端 `package.json` 版本更高就自动升级。
+- **升级过程**：先暂停正在下载的 BT/aria2 任务 → 拉代码 → 装依赖 → 构建后端+前端 → 重启服务 → **自动恢复下载**；
+  任何一步失败会自动回滚到升级前的 commit 并重新构建（结果写在网页「更新」页）。
+- **网页**：侧边栏「更新」页可以「检查更新 / 立即更新」、开关自动更新、改检查间隔、看升级日志。
+- **换更新源**：改 `.env` 的 `UPDATE_REMOTE` / `UPDATE_BRANCH`（默认 `origin` / `main`）。
+- ⚠️ 只做**代码级**升级；涉及 apt 包 / systemd 单元 / nginx 配置的变更，仍需人工执行 `sudo ./deploy.sh --update`。
+
+## 十一、常见问题
 
 | 现象 | 处理 |
 | --- | --- |
@@ -344,6 +362,6 @@ aria2/transmission/webvideo 三模块（含 JSON-RPC 与进程交互）、统一
 | 安卓 App 401 | `.env` 的 `ANDROID_TOKEN` 与 App 里填的 Token 不一致，或未配置 Token |
 | 想在 PC 上解密发布文件 | 用 `openssl enc -d -aes-256-cbc -K $(printf %s "$密码" \| openssl dgst -sha256 -binary \| xxd -p -c256) -iv $(printf %s "$密码" \| openssl dgst -md5 -binary \| xxd -p -c256) -in <文件> -out out.bin`，再按 V-L-T 标记还原原始文件名（与老脚本 `all1.sh` 完全兼容） |
 
-## 十一、许可证
+## 十二、许可证
 
 MIT

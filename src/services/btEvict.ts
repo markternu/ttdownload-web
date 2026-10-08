@@ -11,6 +11,20 @@
  *   · 已经 100% 的不在这里处理 —— 那是"扫货"(btHarvest) 的事。
  *
  * 三个数字都可以在设置页改（btPolicy）。
+ *
+ * ===================== 计时口径（2026-10 事故修复，别改回去） =====================
+ * 「已下载时长」= `payload.btActiveMs`：**本服务真正在运行、并且这个种子在下载**的累计毫秒数。
+ *
+ * 以前是 `Date.now() - Date.parse(btHandedAt)`（墙上时钟差值），于是：
+ *   ① 断电/关机那几天也被算成"在下载"—— 树莓派停了几天，任务就凭空多出 140+ 小时，
+ *      页面显示"已下载 140 小时"（用户报的 bug），随后被本策略当超时任务清掉；
+ *   ② 树莓派没有 RTC，重启后要等 NTP 校时，期间 Date.now() 可能差几天，一校准就跳变。
+ * 现在改成：
+ *   · 每次巡检用**单调时钟**（core/clock.ts 的 monoMs）取增量累加 —— 系统改时间 / NTP
+ *     校时都影响不了它；
+ *   · 进程重启后内存里的单调锚点丢失 → 那段停机时间**不补**（服务没跑 = 没在下载）；
+ *   · 老任务（升级上来只有 btHandedAt、没有 btActiveMs）按 migrateLegacyActiveMs 换算一次。
+ * ==============================================================================
  */
 
 import fs from 'node:fs';
@@ -22,6 +36,7 @@ import { config } from '../core/config';
 import { cleanupBtTaskDirs } from './btCleanup';
 import { hideText } from './btAnon';
 import { transmissionClient } from '../modules/transmission';
+import { hours, monoMs, nowIso, nowMs } from '../core/clock';
 import type { Task } from '../types';
 
 type TaskWithPayload = Task & { payload?: Record<string, unknown> };
@@ -65,6 +80,58 @@ interface TorrentLite {
   name: string;
   hashString: string;
   percentDone: number;
+}
+
+/* ------------------------------------------------------------------ *
+ *  计时：单调时钟累计（抗断电 / 抗时钟跳变）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 每个任务"上次巡检时的单调时钟读数"（毫秒）。
+ * ⚠️ 只存在内存里：进程重启后这张表是空的，于是**停机那段时长不会被补进来** ——
+ *    这正是我们要的（服务没在跑，就没在下载；也避开了树莓派没 RTC 导致的时钟跳变）。
+ */
+const monoAnchor = new Map<number, number>();
+
+/**
+ * 把"从上次巡检到现在的真实运行时长"加到任务上。
+ * @returns 本次新增的毫秒数（第一次见到这个任务时为 0）
+ */
+export function advanceActiveMs(taskId: number, monoNowMs: number = monoMs()): number {
+  const last = monoAnchor.get(taskId);
+  monoAnchor.set(taskId, monoNowMs);
+  if (last === undefined) return 0; // 进程刚起来（或刚接手这个任务）→ 不补历史时间
+  // 单调时钟理论上不会倒退；真倒退了（换了时钟源/被 mock 了）也只当 0，绝不让时长缩水
+  return Math.max(0, monoNowMs - last);
+}
+
+/**
+ * 老任务迁移：升级上来只有 `btHandedAt`（墙上时钟），没有 `btActiveMs`。
+ *
+ * 判断规则（保守优先，宁可晚清理也不误删）：
+ *   · 墙上差值 ≤ 策略窗口（12+6 小时）→ 这段不可能藏"断电几天"，可信，照抄；
+ *   · 墙上差值 > 窗口 → 这个数已经**不可信**了（可能就是断电那几天 / NTP 校时跳变），
+ *     旧代码正好会拿它去"超时清理"。此时**把计时起点重置到当前这一刻**，
+ *     给任务一个完整的新窗口，并在日志里打点说明。旧任务只迁移这一次
+ *     （迁移后 payload 里就有 btActiveMs 了）。
+ */
+export function migrateLegacyActiveMs(wallAgeMs: number, windowMs: number): { activeMs: number; reset: boolean } {
+  if (!Number.isFinite(wallAgeMs) || wallAgeMs <= 0) return { activeMs: 0, reset: false };
+  if (wallAgeMs <= windowMs) return { activeMs: wallAgeMs, reset: false };
+  return { activeMs: 0, reset: true };
+}
+
+/** 读出任务的"实际下载尝试时长"（毫秒）。老数据在这里做一次性迁移。 */
+export function activeMsOf(task: TaskWithPayload, windowMs: number, wallNowMs: number = nowMs()): { activeMs: number; reset: boolean; legacy: boolean } {
+  const payload = (task.payload ?? {}) as Record<string, unknown>;
+  const stored = Number(payload.btActiveMs);
+  if (payload.btActiveMs !== undefined && payload.btActiveMs !== null && Number.isFinite(stored) && stored >= 0) {
+    return { activeMs: stored, reset: false, legacy: false };
+  }
+  const handedAt = payload.btHandedAt ? Date.parse(String(payload.btHandedAt)) : 0;
+  if (!handedAt || Number.isNaN(handedAt)) return { activeMs: 0, reset: false, legacy: false };
+  const migrated = migrateLegacyActiveMs(wallNowMs - handedAt, windowMs);
+  return { ...migrated, legacy: true };
 }
 
 async function listTorrents(): Promise<Map<number, TorrentLite>> {
@@ -128,6 +195,10 @@ export async function runBtEvict({ dryRun = false } = {}): Promise<EvictSummary>
   };
   const torrents = await listTorrents();
   const tasks = tasksRepo.byStatus(['waiting', 'parsing', 'downloading', 'paused']) as TaskWithPayload[];
+  const windowMs = checkAfterMs + graceMs;
+  const monoNow = monoMs();
+  const wallNow = nowMs();
+  const seen = new Set<number>();
 
   for (const task of tasks) {
     if (task.module !== 'transmission') continue;
@@ -139,35 +210,62 @@ export async function runBtEvict({ dryRun = false } = {}): Promise<EvictSummary>
     if (!handedAt || Number.isNaN(handedAt)) continue;
 
     summary.scanned += 1;
+    seen.add(task.id);
     const t = torrents.get(torrentId);
     const name = t?.name || String(payload.torrentName ?? task.title ?? `task_${task.id}`);
     const progress = t ? Math.min(100, (t.percentDone ?? 0) * 100) : Number(payload.btLastProgress ?? 0);
-    const ageHours = (Date.now() - handedAt) / 3600 / 1000;
+
+    // —— 计时：单调时钟累计"服务真正在跑"的时长（断电/关机不计）——
+    const { activeMs: storedMs, reset: legacyReset, legacy } = activeMsOf(task, windowMs, wallNow);
+    const grownMs = advanceActiveMs(task.id, monoNow);
+    let activeMs = storedMs + grownMs;
+    if (legacyReset) {
+      // 旧数据里那个数已经不可信（很可能就是断电几天 + 时钟跳变），重置计时起点
+      logger.child('bt-evict').mark(
+        'BT_TIMEOUT_MIGRATE',
+        `任务 #${task.id} 的旧版计时不可信（按墙上时钟算出来是 ${hours(wallNow - handedAt).toFixed(1)} 小时，含断电停机/时钟跳变），已重置计时起点，重新给 ${(windowMs / 3600e3).toFixed(0)} 小时窗口`,
+        { taskId: task.id, wallHours: Number(hours(wallNow - handedAt).toFixed(2)), newActiveHours: Number(hours(grownMs).toFixed(3)) });
+      activeMs = grownMs;
+    }
+    const ageHours = hours(activeMs);
+    const persist = (extra: Record<string, unknown>): void => {
+      tasksRepo.update(task.id, {
+        payload: {
+          ...payload,
+          btActiveMs: activeMs,
+          btActiveCheckedAt: nowIso(),
+          btLastProgress: progress,
+          ...extra,
+        },
+      });
+    };
 
     // 已经下完的不归这里管（扫货会拿走）
     if (progress >= 99.9) {
+      persist({});
       summary.kept += 1;
       continue;
     }
     // 还没到 12 小时：什么都不做，只记进度
-    if (Date.now() - handedAt < checkAfterMs) {
-      tasksRepo.update(task.id, { payload: { ...payload, btLastProgress: progress, btLastCheckAt: new Date().toISOString() } });
+    if (activeMs < checkAfterMs) {
+      persist({});
       summary.kept += 1;
       continue;
     }
 
-    const graceEnded = Date.now() - handedAt >= checkAfterMs + graceMs;
+    const graceEnded = activeMs >= windowMs;
     let action = '';
     let reason = '';
+    const clockNote = legacy ? '（实际下载尝试时长，通电运行期间累计）' : '';
     if (progress <= minPercent) {
       action = 'drop';
-      reason = `已交给 transmission ${ageHours.toFixed(1)} 小时，进度只有 ${progress.toFixed(1)}%（≤ ${minPercent}%）`;
+      reason = `已交给 transmission ${ageHours.toFixed(1)} 小时，进度只有 ${progress.toFixed(1)}%（≤ ${minPercent}%）${clockNote}`;
     } else if (graceEnded) {
       action = 'drop';
-      reason = `已交给 transmission ${ageHours.toFixed(1)} 小时（含 ${(graceMs / 3600e3).toFixed(0)} 小时宽限），仍未下完，进度 ${progress.toFixed(1)}%`;
+      reason = `已交给 transmission ${ageHours.toFixed(1)} 小时（含 ${(graceMs / 3600e3).toFixed(0)} 小时宽限），仍未下完，进度 ${progress.toFixed(1)}%${clockNote}`;
     } else {
       action = 'grace';
-      reason = `进度 ${progress.toFixed(1)}% > ${minPercent}%，进入宽限期（还剩 ${(((checkAfterMs + graceMs) - (Date.now() - handedAt)) / 3600e3).toFixed(1)} 小时）`;
+      reason = `进度 ${progress.toFixed(1)}% > ${minPercent}%，进入宽限期（还剩 ${((windowMs - activeMs) / 3600e3).toFixed(1)} 小时）${clockNote}`;
       summary.inGrace += 1;
     }
 
@@ -190,7 +288,7 @@ export async function runBtEvict({ dryRun = false } = {}): Promise<EvictSummary>
       `任务 #${task.id}：${reason}`, { progress, ageHours, action });
 
     if (action !== 'drop') {
-      tasksRepo.update(task.id, { payload: { ...payload, btLastProgress: progress, btLastCheckAt: new Date().toISOString() } });
+      persist({});
       continue;
     }
 
@@ -204,11 +302,21 @@ export async function runBtEvict({ dryRun = false } = {}): Promise<EvictSummary>
       status: 'failed',
       speedBps: 0,
       error: `超时清理：${reason}${freed > 0 ? `（已释放 ${(freed / 1024 ** 2).toFixed(1)}MB）` : ''}`,
-      payload: { ...payload, timedOutAt: new Date().toISOString(), timedOutReason: reason },
+      payload: {
+        ...payload,
+        btActiveMs: activeMs,
+        btActiveCheckedAt: nowIso(),
+        timedOutAt: nowIso(),
+        timedOutReason: reason,
+        timedOutAgeHours: Number(ageHours.toFixed(2)),
+      },
     });
     taskLog(task.id).mark('BT_TIMEOUT_DROP', `已清理：${hideText(reason)}`, { freedBytes: freed });
     logger.child('bt-evict').warn(`任务 #${task.id} 超时清理完成（释放 ${(freed / 1024 ** 2).toFixed(1)}MB）`);
   }
+
+  // 已经不在这批任务里的（清完/删掉/归档走）→ 丢掉锚点，别让 Map 无限长
+  for (const id of [...monoAnchor.keys()]) if (!seen.has(id)) monoAnchor.delete(id);
 
   return summary;
 }

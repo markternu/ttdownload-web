@@ -418,6 +418,9 @@ git push origin --delete pi-verify             # ④ 删临时分支
 
 | 25 | **抖音任务反复失败**，而且"等 10 分钟再试"也不管用；用户质问「线上产品会叫用户等 10 分钟吗」 | 真因是**我们自己把出口 IP 捶到被风控**：并发设置是 `maxConcurrent=0/moduleConcurrency=0`（不限），一次入队 5 条抖音 → 5 条任务同时各跑一条 10 档阶梯 → 日志实测 **一分钟 26~31 次 yt-dlp 请求**打向同一 IP。掐表实测成功率随时间窗口起伏（刚抓完 0/3 → +131s 3/3 → +324s 0/3），**不是 cookies 过期**（4 种 cookie 组合全 0/4），被限后需静默约 2 分钟。修：新 `src/services/siteGate.ts` **同站点启动闸门**（同站点启动排队 + 相邻 ≥20s，`YTDLP_SITE_GAP_MS` 可调，其它站点 0 直通；只限启动间隔、不限并行下载）+ 「需要新鲜 cookies」改**分级退避** 15s/30s 重试 + 早停改「累计被拒 6 次」（温和试 ~2 分钟覆盖限流窗口，之后才走延后重试兜底，用户全程不用管）+ 节流等待写进日志（`SITE_GATE`） | `test/site-gate.test.mjs` 5 条：间隔 0 直通、相邻启动必须拉开、**并发 5 次申请必须被排队拉开**（真机血案场景）、只有风控严格的平台才节流、间隔可用环境变量调。**把闸门改成直接放行 → 2 条红**（已实测）。测试环境须把间隔置 0（`test/helpers.mjs`）。真机复验：一次性重试全部失败任务 → **3 分钟内全自动完成，22 条任务 0 失败**，请求量降到 3~11 次/分 |
 
+| 26 | **BT 任务只下了几个小时，断电重启后页面显示"已下载 140 多小时"，随后被超时策略拉走**（用户报的真机 bug） | 根因：判定用的是**墙上时钟差值** `Date.now() - Date.parse(payload.btHandedAt)` —— ① 断电/关机那几天也被算成"在下载"；② 树莓派**没有 RTC**，重启后等 NTP 校时期间 `Date.now()` 可能差几天，一校准就跳变（反向还会算出负数）。修：新增 `src/core/clock.ts`（墙上时钟 vs 单调时钟分开用），BT 时长改成 `payload.btActiveMs` —— 每次巡检用 `process.hrtime`（单调时钟）取增量累加，**进程重启后的停机时间不补**；老任务（只有 btHandedAt）在 `migrateLegacyActiveMs()` 里一次性迁移：墙上差值 ≤ 策略窗口（12+6h）就照抄，超过窗口的**不再拿去清理**而是重置计时起点（保守：宁可晚清理也不误删）；页面/日志文案标注"只统计服务实际运行时间" | `test/bt-timing.test.mjs` 6 条（断电 140h 不虚增不被清理、时钟前跳 6 天判定不变、时钟回拨不出负数、单调累计恰好 1 小时、真下满 12h 仍照清、迁移规则）。**把这些用例跑在修复前的代码上必红**（旧逻辑 140h → 直接清理）。`test/bt-evict.test.mjs` 改为按 `btActiveMs` 构造 |
+| 27 | **用户要"自动更新项目"**：开机必须拉最新代码（拉不到就用本地老代码启动）、运行期定时检查、升级不能影响正在下载的任务（可暂停，升完恢复）、页面上要有按钮；并且**版本号要按行业标准 Vx.x.x 规范化** | 新增：`docs/VERSIONING.md`（SemVer 规范：MAJOR=不兼容/MINOR=新功能/PATCH=修 bug，版本唯一来源 = `package.json`，`config.version` 直接读它 —— 删掉了原来写在 config.ts 里的第二份 `'1.0.0'`）；`src/core/version.ts`（解析/比较/读包版本）；`src/services/updater.ts`（开机延迟检查 + 失败重试 + 定时检查 + 只在远端版本更高时自动升级 + 升级前暂停 transmission/aria2 下载 + 失败/回滚 + 恢复计划）；`deploy/scripts/self-update.sh`（git fetch/reset → npm ci → 构建后端+前端 → 重启 → 健康检查 → **任何一步失败自动回滚到旧 commit 并重建**；用 `systemd-run` 跑在服务 cgroup 之外，否则 `systemctl restart` 会把正在构建的脚本自己杀掉）；`src/routes/update.ts`（status/check/apply/log/settings）；前端新增「更新」页（`/update`）+ 侧边栏入口。**关键约束：更新检查永远在 `server.listen()` 成功之后才启动 —— 拉不到网/远端挂了也必须能用本地代码起来** | `test/updater.test.mjs` 16 条：SemVer 三位规范（`1.2`/`1` 必须非法）、比较规则、`config.version` 必须等于 package.json、**拉取失败不抛异常且 HTTP 服务照常可用**、版本号没抬不自动升、非 git 仓库如实报错、升级前 `torrent-stop` 且**数据库状态保持 downloading**（回滚到老代码也能自愈）、无计划时不乱 start 种子。全套 316 条后端用例通过 |
+
 ### 8.2 还没做 / 需要你决定
 
 - **transmission 自己的队列**：它默认 `download-queue-size=5`（最多 5 个种子活跃下载）。
@@ -430,7 +433,7 @@ git push origin --delete pi-verify             # ④ 删临时分支
   两者不同分区时准入/预留会算错。归档/加密需要的额外空间（zip 要再占一份源文件大小）也没进准入。
 - **payload 读-改-写竞态**：`transmission.poll` / `btHarvest` / `btEvict` / `scheduler` 都是
   "读旧快照 → await → 整体写回"，定时器并发时可能互相覆盖 `harvestedFiles`/`timedOutAt`/`pausedBySpace`。
-- **8 小时口径**：因空间不足被暂停的时间也计入 8 小时且不顺延（`btHandedAt` 不因暂停顺延）。
+- **BT 计时口径（已改，2026-10）**：判定用的是 `payload.btActiveMs`（只在服务运行时用单调时钟累加，断电/关机不计），`btHandedAt` 只用来展示。因空间不足被暂停的时间**仍然计入**。
 - **完成判定只看"文件在 downloads 目录"**：没有校验 `percentDone`；若 transmission 关掉了
   `incomplete-dir-enabled`，半成品会被当成品发布。部署默认开启，所以生产不触发，但代码不设防。
 - **`db.ts` 把 `pageSize` 截到 200**，而扫货/入队都传 500 → 任务数 >200 时去重与收尾会漏项。

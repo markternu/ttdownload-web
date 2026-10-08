@@ -41,6 +41,8 @@ export const APP_ROUTES = [
   'settings',
   'logs',
   'report',
+  // 自动更新页（检查/安装新版本）
+  'update',
 ] as const
 
 const ROUTE_SET = new Set<string>(APP_ROUTES)

@@ -1,10 +1,15 @@
 /**
- * BT 超时策略测试（用户指定：8 小时 + 4 小时宽限）
+ * BT 超时策略测试（用户指定：12 小时 + 6 小时宽限）
  *
- *   · 交给 transmission 后 8 小时内：什么都不做（只读进度）
- *   · 满 8 小时：进度 ≤ 60% → 清理（删任务 + 连残留一起删）
- *   · 满 8 小时但进度 > 60% → 再给 4 小时宽限；到点还没完 → 清理
+ *   · 交给 transmission 后 12 小时内：什么都不做（只读进度）
+ *   · 满 12 小时：进度 ≤ 60% → 清理（删任务 + 连残留一起删）
+ *   · 满 12 小时但进度 > 60% → 再给 6 小时宽限；到点还没完 → 清理
  *   · 已经 100% 的不归这里管（扫货负责）
+ *
+ * ⚠️ 计时口径：判定读的是 `payload.btActiveMs`（**服务实际运行期间**累计的时长），
+ *    不是 `Date.now() - btHandedAt`。断电/关机（以及树莓派没 RTC 导致的时钟跳变）
+ *    一律不计入 —— 真机事故：断电后任务显示"已下载 140 小时"被误清理。
+ *    相关用例见 test/bt-timing.test.mjs。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,8 +36,13 @@ test.after(async () => {
   await mock.close();
 });
 
-/** 造一个已经"交给 transmission 开下过"的任务（btHandedAt 可控） */
-async function makeRunningTask({ name, handedHoursAgo, percent }) {
+/**
+ * 造一个已经"交给 transmission 开下过"的任务。
+ * @param handedHoursAgo 墙上时钟：多久之前交给 transmission 的（只是展示用的时刻）
+ * @param activeHoursAgo 实际下载尝试时长（判定依据，btActiveMs），默认与 handedHoursAgo 一致
+ * @param withActiveMs   false = 模拟"升级上来的老任务"（payload 里没有 btActiveMs）
+ */
+async function makeRunningTask({ name, handedHoursAgo, percent, activeHoursAgo, withActiveMs = true }) {
   const fake = tmpFile(root, `src/${name}.torrent`, 'd8:announce11:http://x/ye');
   fs.copyFileSync(fake, path.join(config.dirs.btPending, `${name}.torrent`));
   bt.registerPendingSeeds();
@@ -41,9 +51,12 @@ async function makeRunningTask({ name, handedHoursAgo, percent }) {
   await bt.transmissionModule.prepare(tasksRepo.get(task.id));
   await bt.transmissionModule.start(tasksRepo.get(task.id));
   mock.state.percent = percent;
-  const p = (tasksRepo.get(task.id).payload ?? {});
-  const handedAt = new Date(Date.now() - handedHoursAgo * 3600 * 1000).toISOString();
-  tasksRepo.update(task.id, { payload: { ...p, btHandedAt: handedAt } });
+  const p = { ...(tasksRepo.get(task.id).payload ?? {}) };
+  p.btHandedAt = new Date(Date.now() - handedHoursAgo * 3600 * 1000).toISOString();
+  const active = activeHoursAgo === undefined ? handedHoursAgo : activeHoursAgo;
+  if (withActiveMs) p.btActiveMs = active * 3600 * 1000;
+  else delete p.btActiveMs;
+  tasksRepo.update(task.id, { payload: p });
   return tasksRepo.get(task.id);
 }
 
