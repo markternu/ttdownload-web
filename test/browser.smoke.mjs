@@ -135,6 +135,17 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     // 入队后的种子：状态 queued，且 .torrent 已归档到 btQueued（与真实流程一致）
     seedsRepo.update(s.id, { status: 'queued', path: p });
   }
+
+  // 造一个「下载中」的任务，供任务页的「全选 → 批量操作」测试用
+  // （/tasks 一级页只显示 下载中/解析中/暂停/已完成，必须是 downloading 才看得到）
+  const bulkTask = tasksRepo.create({
+    module: 'aria2',
+    title: '批量操作测试任务',
+    platform: 'URL',
+    url: 'http://example.com/bulkop.bin',
+  });
+  tasksRepo.update(bulkTask.id, { status: 'downloading', progress: 42 });
+
   const server = http.createServer(createApp());
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -919,6 +930,27 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     } finally {
       delete process.env.BROWSER_PARSE_DELAY;
     }
+  });
+
+  test('任务页「全选 + 批量操作」：勾选 → 已选计数 → 全部暂停（并如实提示跳过项）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/tasks`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=批量操作测试任务', { timeout: 15000 });
+
+    // 勾选这一个任务（用 aria-label 精确定位，避免和别的复选框混）
+    await page.getByLabel(`选择任务 ${bulkTask.id}`).first().check();
+    await page.waitForSelector('text=/已选\\s*1\\s*个/', { timeout: 5000 });
+
+    // 「全选当前页」要把本页的都选上（这时至少包含刚造的那条）
+    await page.getByLabel('全选当前页').first().check();
+    const selectedText = await page.locator('text=/已选\\s*\\d+\\s*个/').first().innerText();
+    assert.match(selectedText, /已选\s*\d+\s*个/, '要显示已选数量');
+
+    // 全部暂停：这条是 downloading → 应该被暂停；页面要给结果提示
+    await page.getByRole('button', { name: /全部暂停/ }).first().click();
+    await page.waitForSelector('text=/已暂停\\s*\\d+\\s*个任务|已暂停\\s*\\d+\\s*个|没有任务被暂停/', { timeout: 10000 });
+    await page.close();
   });
 
   test('页面无 JS 报错', async (t) => {

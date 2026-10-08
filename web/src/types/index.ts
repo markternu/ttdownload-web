@@ -414,9 +414,25 @@ export interface TaskListResponse {
   }
 }
 
+/** 批量操作的逐条结果（任务列表「全选 → 暂停/恢复/重试/取消/删除」用） */
+export interface TaskBulkResultItem {
+  id: number
+  ok: boolean
+  /** 失败原因（如「当前状态「completed」不能暂停」） */
+  message?: string
+}
+
+export interface TaskBulkResult {
+  ok: boolean
+  action: TaskAction
+  total: number
+  succeeded: number
+  failed: number
+  results: TaskBulkResultItem[]
+}
+
 /** 列表页的状态筛选：「已发布」与「待下载」已合并成一个列表，用这个区分 */
 export type FileStatusFilter = 'all' | 'pending' | 'downloaded'
-
 /** 各状态计数（筛选徽章 + 「等待最久」用） */
 export interface FileCounts {
   all: number

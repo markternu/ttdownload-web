@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { useTaskEvents } from '../context/AppDataContext'
 import { isActiveTask, isPublishTask } from '../lib/format'
-import type { SseTaskEvent, Task, TaskAction, TaskListResponse, TaskQuery } from '../types'
+import type { SseTaskEvent, Task, TaskAction, TaskBulkResult, TaskListResponse, TaskQuery } from '../types'
 
 const POLL_MS = 3000
 
@@ -17,6 +17,14 @@ export interface UseTasksResult {
   setPage: (page: number) => void
   /** 对任务执行动作，成功后自动刷新 */
   act: (id: number, action: TaskAction, deleteFile?: boolean) => Promise<boolean>
+  /**
+   * 批量动作（「全选 → 暂停/恢复/重试/取消/删除」）。
+   * 后端逐条执行并逐条回报；这里把结果原样返回给页面去提示"成功几个、跳过几个"。
+   * 删除的会直接从当前页移除，其它动作重新拉一次列表。
+   */
+  bulkAct: (ids: number[], action: TaskAction, deleteFile?: boolean) => Promise<TaskBulkResult>
+  /** 批量动作进行中 */
+  bulkBusy: boolean
   /** 正在执行动作的任务 id 集合 */
   pendingIds: number[]
   /** 与 total 同源的统计口径（下载任务 / 归档发布子任务） */
@@ -38,6 +46,7 @@ export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): Us
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [pendingIds, setPendingIds] = useState<number[]>([])
+  const [bulkBusy, setBulkBusy] = useState(false)
   const queryRef = useRef({ module, status, q, sort, pageSize, page, kind })
   queryRef.current = { module, status, q, sort, pageSize, page, kind }
 
@@ -127,6 +136,35 @@ export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): Us
 
   const pages = Math.max(1, Math.ceil(total / (pageSize || 20)))
 
+  /**
+   * 批量动作。刻意**不抛异常**：批量里"有几个状态不允许"是正常情况，
+   * 由页面按返回的 succeeded/failed 给一句话总结（而不是整批报错）。
+   */
+  const bulkAct = useCallback(
+    async (ids: number[], action: TaskAction, deleteFile = false): Promise<TaskBulkResult> => {
+      if (!ids.length) {
+        return { ok: true, action, total: 0, succeeded: 0, failed: 0, results: [] }
+      }
+      setBulkBusy(true)
+      try {
+        const result = await api.tasksBulkAction(ids, action, deleteFile ? { deleteFile: true } : {})
+        if (action === 'delete') {
+          const gone = new Set(result.results.filter((r) => r.ok).map((r) => r.id))
+          setTasks((current) => current.filter((task) => !gone.has(task.id)))
+          setTotal((current) => Math.max(0, current - gone.size))
+          // 删完当前页可能空了 → 回退一页，别让用户看到空白页
+          if (queryRef.current.page > 1) setPage((p) => Math.max(1, p - 1))
+        } else {
+          await load(true)
+        }
+        return result
+      } finally {
+        setBulkBusy(false)
+      }
+    },
+    [load],
+  )
+
   return {
     tasks,
     total,
@@ -137,6 +175,8 @@ export function useTasks(query: TaskQuery, options: { poll?: boolean } = {}): Us
     refresh: () => load(true),
     setPage,
     act,
+    bulkAct,
+    bulkBusy,
     pendingIds,
     summary,
   }

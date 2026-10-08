@@ -33,10 +33,24 @@ export interface TaskCardProps {
   compact?: boolean
   /** 是否显示文件大小（一级任务页不显示，各自列表页显示） */
   showSize?: boolean
+  /** 是否显示勾选框（任务列表的「全选 → 批量操作」用） */
+  selectable?: boolean
+  selected?: boolean
+  onToggleSelect?: (id: number) => void
 }
 
 /** 任务卡片：移动端与卡片视图使用，突出下载进度 */
-export function TaskCard({ task, onChanged, onError, className, compact = false, showSize = true }: TaskCardProps) {
+export function TaskCard({
+  task,
+  onChanged,
+  onError,
+  className,
+  compact = false,
+  showSize = true,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
+}: TaskCardProps) {
   const meta = statusMeta(task.status)
   const Icon = MODULE_ICON[task.module] ?? Download
   const size = taskSizeBytes(task)
@@ -47,12 +61,27 @@ export function TaskCard({ task, onChanged, onError, className, compact = false,
   return (
     <div
       className={cn(
-        'rounded-2xl border border-slate-200 bg-white p-4 shadow-soft transition-shadow hover:shadow-lift',
-        'dark:border-slate-800 dark:bg-slate-900',
+        'rounded-2xl border bg-white p-4 shadow-soft transition-shadow hover:shadow-lift',
+        'dark:bg-slate-900',
+        // 勾选态要一眼看出来（批量操作前先确认范围，别点错）
+        selected
+          ? 'border-brand-400 ring-1 ring-brand-300 dark:border-brand-500 dark:ring-brand-700'
+          : 'border-slate-200 dark:border-slate-800',
         className,
       )}
     >
       <div className="flex gap-3">
+        {selectable ? (
+          <label className="flex cursor-pointer items-start pt-1" title="选中这个任务（配合「全选」批量操作）">
+            <input
+              type="checkbox"
+              className="h-4 w-4 cursor-pointer rounded border-slate-300 accent-brand-600 dark:border-slate-600"
+              checked={selected}
+              aria-label={`选择任务 ${task.id}`}
+              onChange={() => onToggleSelect?.(task.id)}
+            />
+          </label>
+        ) : null}
         <Thumbnail
           src={task.meta?.thumbnail}
           alt={task.title}

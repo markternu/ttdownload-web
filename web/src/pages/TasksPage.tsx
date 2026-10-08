@@ -4,10 +4,12 @@ import { TaskFilterBar } from '../components/task/TaskFilterBar'
 import type { ViewMode } from '../components/task/TaskFilterBar'
 import { TaskCard } from '../components/task/TaskCard'
 import { TaskActions } from '../components/task/TaskActions'
+import { TaskBulkBar } from '../components/task/TaskBulkBar'
 import {
   Badge,
   Button,
   Card,
+  DangerConfirmModal,
   EmptyState,
   ErrorState,
   LoadingBlock,
@@ -20,6 +22,7 @@ import type { Column } from '../components/ui'
 import { useAppData } from '../context/AppDataContext'
 import { useToast } from '../context/ToastContext'
 import { useTasks, groupBySection } from '../hooks/useTasks'
+import { summarizeBulkResult, useTaskSelection } from '../hooks/useTaskSelection'
 import { useDebouncedValue, useMediaQuery } from '../hooks/useAsync'
 import { MODULE_LABELS } from '../lib/api'
 import { platformTone } from '../lib/constants'
@@ -36,7 +39,7 @@ import {
   taskSizeBytes,
   isPublishTask,
 } from '../lib/format'
-import type { Task } from '../types'
+import type { Task, TaskAction } from '../types'
 import { AlertTriangle, Archive, ArrowLeft, CheckCircle2, ChevronRight, Clock, Download, Loader2, PauseCircle } from 'lucide-react'
 
 interface SectionConfig {
@@ -164,7 +167,7 @@ export default function TasksPage() {
 
   const debouncedQuery = useDebouncedValue(query, 350)
   // 独立页面用**固定筛选**（排队/扫货/其它各自的口径），一级页面固定为"下载中 + 已下载"
-  const { tasks, total, loading, error, refresh, act } = useTasks({
+  const taskQuery = {
     module: module as '' | 'transmission' | 'aria2' | 'webvideo',
     status: cfg.statuses || status,
     kind: cfg.kind,
@@ -172,12 +175,52 @@ export default function TasksPage() {
     sort,
     page,
     pageSize: 20,
-  })
+  }
+  const { tasks, total, loading, error, refresh, act, bulkAct, bulkBusy } = useTasks(taskQuery)
+
+  const handleError = (message: string) => toast.error('操作失败', message)
+
+  // 勾选 + 批量操作（暂停/恢复/重试/取消/删除）。列表是分页的，
+  // 「全选当前页」只选这一页，「选中全部 N 个」按同一套筛选条件跨页全选。
+  const selection = useTaskSelection(tasks, taskQuery)
+  const [bulkPendingDelete, setBulkPendingDelete] = useState(false)
+
+  const reportBulk = (result: Awaited<ReturnType<typeof bulkAct>>) => {
+    const s = summarizeBulkResult(result)
+    if (s.tone === 'success') toast.success(s.title)
+    else toast.warning(s.title, s.description)
+  }
+
+  const runBulk = async (action: TaskAction) => {
+    const ids = [...selection.selected]
+    if (!ids.length) return
+    if (action === 'delete') {
+      setBulkPendingDelete(true) // 删除要先过三步确认
+      return
+    }
+    try {
+      const result = await bulkAct(ids, action)
+      reportBulk(result)
+      selection.clear()
+    } catch (err) {
+      handleError((err as Error).message)
+    }
+  }
+
+  const confirmBulkDelete = async () => {
+    try {
+      const result = await bulkAct([...selection.selected], 'delete')
+      reportBulk(result)
+      selection.clear()
+      setBulkPendingDelete(false)
+    } catch (err) {
+      handleError((err as Error).message)
+      setBulkPendingDelete(false)
+    }
+  }
 
   const sections = useMemo(() => groupBySection(tasks), [tasks])
   const activeView: ViewMode = isMobile ? 'card' : view
-
-  const handleError = (message: string) => toast.error('操作失败', message)
 
   const runAction = async (task: Task, action: 'retry' | 'delete') => {
     try {
@@ -189,6 +232,32 @@ export default function TasksPage() {
   }
 
   const allColumns: Column<Task>[] = [
+    {
+      key: 'select',
+      header: (
+        <input
+          type="checkbox"
+          className="h-4 w-4 cursor-pointer rounded border-slate-300 accent-brand-600 dark:border-slate-600"
+          checked={selection.allOnPageSelected}
+          ref={(el) => {
+            if (el) el.indeterminate = selection.someOnPageSelected && !selection.allOnPageSelected
+          }}
+          aria-label="全选当前页"
+          title="全选当前页"
+          onChange={selection.toggleAllOnPage}
+        />
+      ),
+      className: 'w-10',
+      render: (task) => (
+        <input
+          type="checkbox"
+          className="h-4 w-4 cursor-pointer rounded border-slate-300 accent-brand-600 dark:border-slate-600"
+          checked={selection.isSelected(task.id)}
+          aria-label={`选择任务 ${task.id}`}
+          onChange={() => selection.toggle(task.id)}
+        />
+      ),
+    },
     {
       key: 'title',
       header: '任务',
@@ -379,6 +448,22 @@ export default function TasksPage() {
       />
       ) : null}
 
+      {!error && tasks.length ? (
+        <TaskBulkBar
+          pageCount={tasks.length}
+          totalMatching={total}
+          selectedCount={selection.count}
+          allOnPageSelected={selection.allOnPageSelected}
+          someOnPageSelected={selection.someOnPageSelected}
+          selectingAll={selection.selectingAll}
+          busy={bulkBusy}
+          onToggleAllOnPage={selection.toggleAllOnPage}
+          onSelectAllMatching={() => selection.selectAllMatching()}
+          onClear={selection.clear}
+          onAction={(action) => void runBulk(action)}
+        />
+      ) : null}
+
       {error ? (
         <ErrorState message={`加载任务失败：${error}`} onRetry={() => void refresh()} />
       ) : loading && !tasks.length ? (
@@ -391,9 +476,28 @@ export default function TasksPage() {
             const list = sections[section.key as keyof typeof sections] ?? []
             if (!list.length) return null
             const Icon = section.icon
+            const sectionAllSelected = list.every((t) => selection.isSelected(t.id))
             return (
               <section key={section.key} className="space-y-3">
                 <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 cursor-pointer rounded border-slate-300 accent-brand-600 dark:border-slate-600"
+                    checked={sectionAllSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = !sectionAllSelected && list.some((t) => selection.isSelected(t.id))
+                    }}
+                    aria-label={`全选「${section.title}」这一档`}
+                    title={`全选「${section.title}」这一档`}
+                    onChange={() => {
+                      // 只选/取消这一档（比如"失败 / 已取消"那一档可以一键全选再重试）
+                      const everySelected = list.every((t) => selection.isSelected(t.id))
+                      for (const t of list) {
+                        const on = selection.isSelected(t.id)
+                        if (everySelected ? on : !on) selection.toggle(t.id)
+                      }
+                    }}
+                  />
                   <span
                     className={
                       section.tone === 'brand'
@@ -428,6 +532,9 @@ export default function TasksPage() {
                         key={task.id}
                         task={task}
                         showSize={cfg.showSize}
+                        selectable
+                        selected={selection.isSelected(task.id)}
+                        onToggleSelect={selection.toggle}
                         onChanged={() => void refresh()}
                         onError={handleError}
                       />
@@ -465,6 +572,40 @@ export default function TasksPage() {
           <Pagination page={page} pageSize={20} total={total} onPageChange={setPage} />
         </div>
       )}
+
+      {/* 批量删除要过三步确认（不可撤销），别的批量动作（暂停/恢复/重试/取消）随时可逆，直接执行 */}
+      <DangerConfirmModal
+        open={bulkPendingDelete}
+        busy={bulkBusy}
+        title="批量删除任务"
+        description={`已选中 ${selection.count} 个任务`}
+        items={tasks
+          .filter((t) => selection.isSelected(t.id))
+          .map((t) => ({ id: t.id, name: t.title || `任务 #${t.id}`, hint: statusMeta(t.status).label }))}
+        rangeWarning={
+          <span>
+            你即将删除 <strong>{selection.count}</strong> 条任务记录。请先核对下面清单，确认没有多选。
+            {selection.count > tasks.length ? '（清单只显示当前页，其余在其它页）' : ''}
+          </span>
+        }
+        step2Label="确认影响"
+        step2Content={
+          <ul className="list-disc space-y-1 pl-5">
+            <li>删除的是任务<strong>记录</strong>：删掉后列表里不再出现，正在下载的会先被取消。</li>
+            <li>已经下载好并归档的文件<strong>不会</strong>被删除（要删文件请去「文件」页）。</li>
+            <li>BT 种子留在 transmission 的下载数据也不会被这里清掉（如需清理请在任务行里单独操作）。</li>
+            <li>此操作<strong>不可撤销</strong>。</li>
+          </ul>
+        }
+        finalSummary={
+          <span>
+            最后确认：将删除 <strong>{selection.count}</strong> 条任务记录 ——
+          </span>
+        }
+        executeLabel={`确认全部删除（${selection.count} 个）`}
+        onClose={() => setBulkPendingDelete(false)}
+        onConfirm={() => void confirmBulkDelete()}
+      />
     </div>
   )
 }

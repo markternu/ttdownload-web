@@ -2,12 +2,14 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Download, FileVideo2, FolderOpen, RotateCcw, Trash2 } from 'lucide-react'
 import { TaskCard } from '../components/task/TaskCard'
+import { TaskBulkBar } from '../components/task/TaskBulkBar'
 import { TaskFilterBar } from '../components/task/TaskFilterBar'
 import type { ViewMode } from '../components/task/TaskFilterBar'
 import {
   Badge,
   Button,
   Card,
+  DangerConfirmModal,
   EmptyState,
   ErrorState,
   LoadingBlock,
@@ -19,6 +21,7 @@ import type { Column } from '../components/ui'
 import { useToast } from '../context/ToastContext'
 import { useDebouncedValue, useMediaQuery } from '../hooks/useAsync'
 import { useTasks } from '../hooks/useTasks'
+import { summarizeBulkResult, useTaskSelection } from '../hooks/useTaskSelection'
 import { MODULE_LABELS } from '../lib/api'
 import { platformTone } from '../lib/constants'
 import {
@@ -31,7 +34,7 @@ import {
   taskQuality,
   taskSizeBytes,
 } from '../lib/format'
-import type { Task } from '../types'
+import type { Task, TaskAction } from '../types'
 
 export default function HistoryPage() {
   const navigate = useNavigate()
@@ -46,13 +49,8 @@ export default function HistoryPage() {
   const [page, setPage] = useState(1)
 
   const debouncedQuery = useDebouncedValue(query, 350)
-  const { tasks, total, loading, error, refresh, act, pendingIds } = useTasks({
-    status,
-    q: debouncedQuery,
-    sort,
-    page,
-    pageSize: 20,
-  })
+  const taskQuery = { status, q: debouncedQuery, sort, page, pageSize: 20 }
+  const { tasks, total, loading, error, refresh, act, bulkAct, bulkBusy, pendingIds } = useTasks(taskQuery)
 
   // 平台选项来自当前数据中出现的平台
   const platformOptions = useMemo(() => {
@@ -73,6 +71,44 @@ export default function HistoryPage() {
 
   const handleError = (message: string) => toast.error('操作失败', message)
 
+  // 勾选 + 批量操作。⚠️ 列表还额外做了「平台」筛选（前端过滤），
+  // 所以"全选当前页"选的是**过滤后**看到的这些，和后端跨页全选（按状态/关键字）口径略有差别，
+  // 这里在勾选框旁如实说明，避免用户以为跨页全选也带平台筛选。
+  const selection = useTaskSelection(filtered, taskQuery)
+  const [bulkPendingDelete, setBulkPendingDelete] = useState(false)
+
+  const reportBulk = (result: Awaited<ReturnType<typeof bulkAct>>) => {
+    const s = summarizeBulkResult(result)
+    if (s.tone === 'success') toast.success(s.title)
+    else toast.warning(s.title, s.description)
+  }
+
+  const runBulk = async (action: TaskAction) => {
+    const ids = [...selection.selected]
+    if (!ids.length) return
+    if (action === 'delete') {
+      setBulkPendingDelete(true)
+      return
+    }
+    try {
+      reportBulk(await bulkAct(ids, action))
+      selection.clear()
+    } catch (err) {
+      handleError((err as Error).message)
+    }
+  }
+
+  const confirmBulkDelete = async () => {
+    try {
+      reportBulk(await bulkAct([...selection.selected], 'delete'))
+      selection.clear()
+      setBulkPendingDelete(false)
+    } catch (err) {
+      handleError((err as Error).message)
+      setBulkPendingDelete(false)
+    }
+  }
+
   const removeRecord = async (task: Task, withFile: boolean) => {
     try {
       await act(task.id, 'delete', withFile)
@@ -92,6 +128,32 @@ export default function HistoryPage() {
   }
 
   const columns: Column<Task>[] = [
+    {
+      key: 'select',
+      header: (
+        <input
+          type="checkbox"
+          className="h-4 w-4 cursor-pointer rounded border-slate-300 accent-brand-600 dark:border-slate-600"
+          checked={selection.allOnPageSelected}
+          ref={(el) => {
+            if (el) el.indeterminate = selection.someOnPageSelected && !selection.allOnPageSelected
+          }}
+          aria-label="全选当前页"
+          title="全选当前页"
+          onChange={selection.toggleAllOnPage}
+        />
+      ),
+      className: 'w-10',
+      render: (task) => (
+        <input
+          type="checkbox"
+          className="h-4 w-4 cursor-pointer rounded border-slate-300 accent-brand-600 dark:border-slate-600"
+          checked={selection.isSelected(task.id)}
+          aria-label={`选择任务 ${task.id}`}
+          onChange={() => selection.toggle(task.id)}
+        />
+      ),
+    },
     {
       key: 'title',
       header: '视频名称',
@@ -291,6 +353,22 @@ export default function HistoryPage() {
         </p>
       ) : null}
 
+      {!error && filtered.length ? (
+        <TaskBulkBar
+          pageCount={filtered.length}
+          totalMatching={platform ? filtered.length : total}
+          selectedCount={selection.count}
+          allOnPageSelected={selection.allOnPageSelected}
+          someOnPageSelected={selection.someOnPageSelected}
+          selectingAll={selection.selectingAll}
+          busy={bulkBusy}
+          onToggleAllOnPage={selection.toggleAllOnPage}
+          onSelectAllMatching={() => selection.selectAllMatching()}
+          onClear={selection.clear}
+          onAction={(action) => void runBulk(action)}
+        />
+      ) : null}
+
       {error ? (
         <ErrorState message={`加载历史失败：${error}`} onRetry={() => void refresh()} />
       ) : loading && !tasks.length ? (
@@ -306,6 +384,9 @@ export default function HistoryPage() {
             <TaskCard
               key={task.id}
               task={task}
+              selectable
+              selected={selection.isSelected(task.id)}
+              onToggleSelect={selection.toggle}
               onChanged={() => void refresh()}
               onError={handleError}
             />
@@ -318,6 +399,39 @@ export default function HistoryPage() {
       )}
 
       <Pagination page={page} pageSize={20} total={total} onPageChange={setPage} />
+
+      <DangerConfirmModal
+        open={bulkPendingDelete}
+        busy={bulkBusy}
+        title="批量删除历史记录"
+        description={`已选中 ${selection.count} 条记录`}
+        items={filtered
+          .filter((t) => selection.isSelected(t.id))
+          .map((t) => ({ id: t.id, name: t.title || `任务 #${t.id}`, hint: statusMeta(t.status).label }))}
+        rangeWarning={
+          <span>
+            你即将删除 <strong>{selection.count}</strong> 条历史记录（只删记录，<strong>不动磁盘文件</strong>）。
+            {selection.count > filtered.length ? '（清单只显示当前页，其余在其它页）' : ''}
+          </span>
+        }
+        step2Label="确认影响"
+        step2Content={
+          <ul className="list-disc space-y-1 pl-5">
+            <li>删除的是历史<strong>记录</strong>：删掉后历史页不再出现。</li>
+            <li>磁盘上的成品文件<strong>不会</strong>被删除；要连文件一起删，请用每行的「删除文件」。</li>
+            <li>正在下载/排队的任务会被先取消（如果选到了它们）。</li>
+            <li>此操作<strong>不可撤销</strong>。</li>
+          </ul>
+        }
+        finalSummary={
+          <span>
+            最后确认：将删除 <strong>{selection.count}</strong> 条历史记录 ——
+          </span>
+        }
+        executeLabel={`确认全部删除（${selection.count} 条）`}
+        onClose={() => setBulkPendingDelete(false)}
+        onConfirm={() => void confirmBulkDelete()}
+      />
     </div>
   )
 }

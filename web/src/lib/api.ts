@@ -29,6 +29,7 @@ import type {
   SeedItem,
   SeedListResponse,
   Settings,
+  TaskBulkResult,
   UpdateStatus,
   Stats,
   SystemStatus,
@@ -309,6 +310,23 @@ export const api = {
       `/api/tasks/${id}/actions`,
       jsonBody({ action, ...extra }),
     ),
+
+  /**
+   * 批量操作：任务页/历史页「全选 → 暂停 / 恢复 / 重试 / 取消 / 删除」。
+   * 后端逐条执行并逐条回报，某条状态不允许不会让整批失败。
+   */
+  tasksBulkAction: (ids: number[], action: TaskAction, extra: { deleteFile?: boolean } = {}) =>
+    request<TaskBulkResult>('/api/tasks/actions', jsonBody({ ids, action, ...extra })),
+
+  /** 按当前筛选条件取**全部**任务 id（「全选（跨页）」用，列表是分页的） */
+  taskIds: (query: TaskQuery = {}) =>
+    request<{ ids: number[]; total: number; capped: boolean }>('/api/tasks/ids', {}, {
+      module: query.module,
+      status: query.status,
+      q: query.q,
+      sort: query.sort,
+      kind: query.kind,
+    }),
 
   /* ------------------------------ aria2 ------------------------------ */
 

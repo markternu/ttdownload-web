@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link2, ListPlus, Server, Trash2 } from 'lucide-react'
 import { TaskCard } from '../components/task/TaskCard'
+import { TaskBulkBar } from '../components/task/TaskBulkBar'
 import {
   Badge,
   Button,
   Card,
   CardHeader,
+  DangerConfirmModal,
   EmptyState,
   ErrorState,
   LoadingBlock,
@@ -13,9 +15,10 @@ import {
 } from '../components/ui'
 import { useToast } from '../context/ToastContext'
 import { useTasks } from '../hooks/useTasks'
+import { summarizeBulkResult, useTaskSelection } from '../hooks/useTaskSelection'
 import { api, MODULE_LABELS } from '../lib/api'
 import { formatBytes, humanizeError } from '../lib/format'
-import type { Aria2Status } from '../types'
+import type { Aria2Status, TaskAction } from '../types'
 
 const PLACEHOLDER = `https://example.com/video1.mp4
 https://example.com/video2.zip`
@@ -33,10 +36,46 @@ export default function Aria2Page() {
   const [status, setStatus] = useState<Aria2Status | null>(null)
   const [statusError, setStatusError] = useState<string | null>(null)
 
-  const { tasks, loading, error, refresh, act, pendingIds } = useTasks(
-    { module: 'aria2', sort: 'created_desc', pageSize: 30 },
-    { poll: true },
-  )
+  const taskQuery = { module: 'aria2' as const, sort: 'created_desc', pageSize: 30 }
+  const { tasks, total, loading, error, refresh, act, bulkAct, bulkBusy, pendingIds } = useTasks(taskQuery, {
+    poll: true,
+  })
+
+  // 勾选 + 批量操作（暂停/恢复/重试/取消/删除），与任务页/历史页同一套语义
+  const selection = useTaskSelection(tasks, taskQuery)
+  const [bulkPendingDelete, setBulkPendingDelete] = useState(false)
+
+  const reportBulk = (result: Awaited<ReturnType<typeof bulkAct>>) => {
+    const s = summarizeBulkResult(result)
+    if (s.tone === 'success') toast.success(s.title)
+    else toast.warning(s.title, s.description)
+  }
+
+  const runBulk = async (action: TaskAction) => {
+    const ids = [...selection.selected]
+    if (!ids.length) return
+    if (action === 'delete') {
+      setBulkPendingDelete(true)
+      return
+    }
+    try {
+      reportBulk(await bulkAct(ids, action))
+      selection.clear()
+    } catch (err) {
+      toast.error('操作失败', (err as Error).message)
+    }
+  }
+
+  const confirmBulkDelete = async () => {
+    try {
+      reportBulk(await bulkAct([...selection.selected], 'delete'))
+      selection.clear()
+      setBulkPendingDelete(false)
+    } catch (err) {
+      toast.error('操作失败', (err as Error).message)
+      setBulkPendingDelete(false)
+    }
+  }
 
   const loadStatus = useCallback(async () => {
     try {
@@ -198,11 +237,28 @@ export default function Aria2Page() {
             icon={<Server className="h-5 w-5" />}
           />
         ) : (
-          <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+          <div className="space-y-3">
+            <TaskBulkBar
+              pageCount={tasks.length}
+              totalMatching={total ?? tasks.length}
+              selectedCount={selection.count}
+              allOnPageSelected={selection.allOnPageSelected}
+              someOnPageSelected={selection.someOnPageSelected}
+              selectingAll={selection.selectingAll}
+              busy={bulkBusy}
+              onToggleAllOnPage={selection.toggleAllOnPage}
+              onSelectAllMatching={() => selection.selectAllMatching()}
+              onClear={selection.clear}
+              onAction={(action) => void runBulk(action)}
+            />
+            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
             {tasks.map((task) => (
               <div key={task.id} className="space-y-2">
                 <TaskCard
                   task={task}
+                  selectable
+                  selected={selection.isSelected(task.id)}
+                  onToggleSelect={selection.toggle}
                   onChanged={() => void refresh()}
                   onError={(message) => toast.error('操作失败', message)}
                 />
@@ -227,9 +283,42 @@ export default function Aria2Page() {
                 </div>
               </div>
             ))}
+            </div>
           </div>
         )}
       </Card>
+
+      <DangerConfirmModal
+        open={bulkPendingDelete}
+        busy={bulkBusy}
+        title="批量删除直链任务"
+        description={`已选中 ${selection.count} 个任务`}
+        items={tasks
+          .filter((t) => selection.isSelected(t.id))
+          .map((t) => ({ id: t.id, name: t.title || t.url || `任务 #${t.id}`, hint: t.status }))}
+        rangeWarning={
+          <span>
+            你即将删除 <strong>{selection.count}</strong> 条直链任务记录，请先核对清单。
+            {selection.count > tasks.length ? '（清单只显示当前页，其余在其它页）' : ''}
+          </span>
+        }
+        step2Label="确认影响"
+        step2Content={
+          <ul className="list-disc space-y-1 pl-5">
+            <li>正在下载的任务会被先取消，并删除任务<strong>记录</strong>（列表里不再出现）。</li>
+            <li>已经下载归档的成品文件<strong>不会</strong>被删除（要删文件请去「文件」页）。</li>
+            <li>此操作<strong>不可撤销</strong>。</li>
+          </ul>
+        }
+        finalSummary={
+          <span>
+            最后确认：将删除 <strong>{selection.count}</strong> 条直链任务 ——
+          </span>
+        }
+        executeLabel={`确认全部删除（${selection.count} 个）`}
+        onClose={() => setBulkPendingDelete(false)}
+        onConfirm={() => void confirmBulkDelete()}
+      />
     </div>
   )
 }
