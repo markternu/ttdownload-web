@@ -96,6 +96,49 @@ export function aria2Client(): Aria2Client {
   return new Aria2Client();
 }
 
+/** addUri 的 options（key 都是 aria2 的参数名） */
+export type Aria2Options = Record<string, string>;
+
+/**
+ * aria2c 守护进程的启动参数（抽成纯函数：能单测，也能一眼看清我们到底开了什么）。
+ *
+ * ⚡ 用户要求"绝不限速、把带宽拉满"：这里全是**提高**吞吐的参数，
+ *    没有任何限速项（aria2 的限速是 --max-download-limit / --max-overall-download-limit，从不传）。
+ *    写盘缓存也加大（SD 卡/慢盘上 4M 默认缓存会拖慢下载）。
+ *
+ * ⚠️ split / max-connection-per-server 默认 8（代码里当初的实测结论是
+ *    "单连接 ~2.3MB/s、8 并发 6.6MB/s+"）。之前写死 16 会招来服务器掐连接
+ *    （SSL/TLS handshake failure），见 config.aria2 的注释；要更猛就改 .env。
+ */
+export function aria2DaemonArgs(opts: { port: number; secret?: string; dir: string; session: string }): string[] {
+  const a = config.aria2;
+  return [
+    '--enable-rpc',
+    '--rpc-listen-all=false',
+    `--rpc-listen-port=${opts.port}`,
+    '--continue=true',
+    '--rpc-allow-origin-all=true',
+    `--dir=${opts.dir}`,
+    `--input-file=${opts.session}`,
+    `--save-session=${opts.session}`,
+    '--save-session-interval=5',
+    `--max-concurrent-downloads=${a.maxConcurrentDownloads}`,
+    `--split=${a.split}`,
+    `--max-connection-per-server=${a.maxConnectionPerServer}`,
+    '--min-split-size=1M',
+    '--optimize-concurrent-downloads=true',
+    // 连接被掐断/超时大多是瞬时的 → 多试几次、中间等一会儿（以前只试默认的 5 次且不等待）
+    `--max-tries=${a.maxTries}`,
+    `--retry-wait=${a.retryWaitSec}`,
+    '--disk-cache=64M',
+    '--check-certificate=false',
+    '--file-allocation=none',
+    '--disable-ipv6=true',
+    '--quiet=true',
+    ...(opts.secret ? [`--rpc-secret=${opts.secret}`] : []),
+  ];
+}
+
 let lastSpawnAttempt = 0;
 let lastSpawnError = '';
 const SPAWN_COOLDOWN_MS = 60_000;
@@ -126,32 +169,12 @@ export async function ensureAria2Daemon(): Promise<{ ok: boolean; message: strin
   const pidFile = path.join(config.dirs.state, 'aria2.pid');
   try {
     if (!fs.existsSync(session)) fs.writeFileSync(session, '');
-    const args = [
-      '--enable-rpc',
-      '--rpc-listen-all=false',
-      `--rpc-listen-port=${rpc.port}`,
-      '--continue=true',
-      '--rpc-allow-origin-all=true',
-      `--dir=${config.dirs.aria2}`,
-      `--input-file=${session}`,
-      `--save-session=${session}`,
-      '--save-session-interval=5',
-      // ⚡ 用户要求"绝不限速、把带宽拉满"：这里的参数都是**提高**并发/吞吐的，
-      //    没有任何限速项（aria2 的限速是 --max-download-limit / --max-overall-download-limit，
-      //    我们从不传）。实测（树莓派）：单连接 ~2.3MB/s，8 并发能到 6.6MB/s+，
-      //    所以连接数给足、并且加大写盘缓存（SD 卡/慢盘上 4M 默认缓存会拖慢下载）。
-      '--max-concurrent-downloads=16',
-      '--split=16',
-      '--max-connection-per-server=16',
-      '--min-split-size=1M',
-      '--optimize-concurrent-downloads=true',
-      '--disk-cache=64M',
-      '--check-certificate=false',
-      '--file-allocation=none',
-      '--disable-ipv6=true',
-      '--quiet=true',
-      ...(rpc.secret ? [`--rpc-secret=${rpc.secret}`] : []),
-    ];
+    const args = aria2DaemonArgs({
+      port: rpc.port,
+      secret: rpc.secret,
+      dir: config.dirs.aria2,
+      session,
+    });
     let spawnError: string | null = null;
     logger.child('aria2').mark('ARIA2_DAEMON', '拉起 aria2c 守护进程', { bin: config.bins.aria2, args });
     const child = spawn(config.bins.aria2, args, { detached: true, stdio: 'ignore' });

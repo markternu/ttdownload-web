@@ -103,7 +103,7 @@ export function startJsonRpcServer(handle) {
  * state.complete: Set<gid> 中的任务视为已完成（并确保文件存在、无 .aria2 控制文件）
  */
 export async function startAria2Mock({ workDir }) {
-  const state = { tasks: new Map(), seq: 0 };
+  const state = { tasks: new Map(), seq: 0, addCalls: [] };
   const mock = await startJsonRpcServer((msg) => {
     const params = msg.params ?? [];
     const rest = typeof params[0] === 'string' && params[0].startsWith('token:') ? params.slice(1) : params;
@@ -121,12 +121,27 @@ export async function startAria2Mock({ workDir }) {
         const out = rest[1]?.out ?? `file${state.seq}.bin`;
         const file = path.join(workDir, out);
         fs.mkdirSync(path.dirname(file), { recursive: true });
+        // 记下每次 addUri 的 options：测试要断言"单连接重试真的换参数了"
+        state.addCalls.push({ gid, url, options: rest[1] ?? {} });
         state.tasks.set(gid, { status: 'active', total: 2048, completed: 1024, file, url });
         return ok(gid);
       }
       case 'aria2.tellStatus': {
         const t = state.tasks.get(String(rest[0]));
         if (!t) return err(1, 'not found');
+        if (t.forceError) {
+          return ok({
+            gid: String(rest[0]),
+            status: 'error',
+            totalLength: String(t.total),
+            completedLength: String(t.completed),
+            downloadSpeed: '0',
+            errorCode: String(t.forceError.code ?? 1),
+            errorMessage: t.forceError.message,
+            files: [{ path: t.file, selected: 'true' }],
+            dir: path.dirname(t.file),
+          });
+        }
         if (t.status === 'complete') {
           fs.writeFileSync(t.file, Buffer.alloc(t.total, 7));
           fs.rmSync(`${t.file}.aria2`, { force: true });
@@ -160,6 +175,11 @@ export async function startAria2Mock({ workDir }) {
         t.completed = t.total;
       }
     },
+    /** 让某个 gid 的 tellStatus 报错（模拟 SSL/TLS 被服务器掐断） */
+    fail(gid, { code = 1, message = 'error' } = {}) {
+      const t = state.tasks.get(gid);
+      if (t) t.forceError = { code, message };
+    },
     setProgress(gid, { total, completed }) {
       const t = state.tasks.get(gid);
       if (!t) return;
@@ -177,6 +197,8 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
     complete: false,
     name: torrentName,
     percent: 0.5,
+    /** 覆盖 transmission 的 status 字段（1=等待校验 / 2=校验中 / 4=正在下载）；null=按 running 推导 */
+    status: null,
     rateDownload: 2048,
     eta: 30,
     peersConnected: 5,
@@ -261,7 +283,8 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
             {
               id: 7,
               name: state.name,
-              status: state.running ? 4 : 0,
+              // 4=正在下载（默认，保持旧测试行为）；测试可用 state.status 覆盖成 1/2（校验中）
+              status: state.status ?? (state.running ? 4 : 0),
               percentDone,
               rateDownload: complete ? 0 : state.rateDownload,
               eta: complete ? 0 : state.eta,

@@ -118,6 +118,34 @@ export const config = {
     port: num(process.env.ARIA2_RPC_PORT, 6800),
     secret: str(process.env.ARIA2_RPC_SECRET, ''),
   },
+  /**
+   * aria2 守护进程的吞吐参数（都是"提高"吞吐的，没有任何限速项）。
+   *
+   * ⚠️ 为什么把 split / max-connection-per-server 从 16 降到 8：
+   *    真机上 16 并发到同一个 CDN 时，服务器会掐掉多余连接，报
+   *    "SSL/TLS handshake failure: The TLS connection was non-properly terminated."，
+   *    表现为"多个直链里有几个莫名其妙失败"，而终端里单连接 aria2c 却正常。
+   *    代码注释里当初的实测数据也是「8 并发能到 6.6MB/s+」——8 才是实测最优点。
+   *    想要更猛/更稳都能在 .env 里改：ARIA2_SPLIT / ARIA2_MAX_CONN_PER_SERVER /
+   *    ARIA2_MAX_CONCURRENT / ARIA2_MAX_TRIES / ARIA2_RETRY_WAIT_SEC。
+   */
+  aria2: {
+    /** 单个下载任务的连接数（被下面那个 per-server 上限卡住，实际取两者较小值） */
+    split: num(process.env.ARIA2_SPLIT, 5),
+    /**
+     * 对**同一个服务器**的最大连接数。默认 1 —— 就是用户手动 `aria2c -i urlfile`
+     * 的行为（aria2 自己的默认值）。他的原话："这样下载再多的文件都互相不影响，也没有任何问题"。
+     * ⚠️ 调大到 8/16 会让"同一台 CDN 上的并发连接数"成倍上涨，服务器会掐连接，
+     *    表现就是 SSL/TLS handshake failure（部分任务莫名其妙失败）。
+     */
+    maxConnectionPerServer: num(process.env.ARIA2_MAX_CONN_PER_SERVER, 1),
+    /** 同时下载的任务数（不够就排队，不影响已下的；"再多文件也不互相影响"靠的是每个任务独立目录） */
+    maxConcurrentDownloads: num(process.env.ARIA2_MAX_CONCURRENT, 16),
+    /** 单个任务最多重试几次（连接被掐断大多是瞬时的） */
+    maxTries: num(process.env.ARIA2_MAX_TRIES, 5),
+    /** 重试间隔（秒） */
+    retryWaitSec: num(process.env.ARIA2_RETRY_WAIT_SEC, 3),
+  },
   transmissionRpc: {
     host: str(process.env.TRANSMISSION_RPC_HOST, '127.0.0.1'),
     port: num(process.env.TRANSMISSION_RPC_PORT, 9091),

@@ -140,7 +140,9 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
   // （/tasks 一级页只显示 下载中/解析中/暂停/已完成，必须是 downloading 才看得到）
   const bulkTask = tasksRepo.create({
     module: 'aria2',
-    title: '批量操作测试任务',
+    // ⚠️ 标题故意带扩展名：aria2 拿到 gid 后会"用真实文件名刷新标题"，
+    //    像文件名的标题不会被改，用例才能稳定地按标题找到它
+    title: '批量操作测试任务.bin',
     platform: 'URL',
     url: 'http://example.com/bulkop.bin',
   });
@@ -934,9 +936,18 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
 
   test('任务页「全选 + 批量操作」：勾选 → 已选计数 → 全部暂停（并如实提示跳过项）', async (t) => {
     if (!browser) return t.skip('无 Chrome');
+    // ⚠️ 复跑时会受前面用例影响：其它用例提交 URL 会 kick 一次调度，
+    //    把我们这条没有 gid 的假任务判失败并回到 waiting（于是 /tasks 一级页就看不到它了）。
+    //    这里在打开页面**之前**重新摆正状态，保证这条用例自身稳定。
+    tasksRepo.update(bulkTask.id, { status: 'downloading', error: null, progress: 42 });
     const page = await newPage();
     await page.goto(`${base}/tasks`, { waitUntil: 'networkidle' });
-    await page.waitForSelector('text=批量操作测试任务', { timeout: 15000 });
+    try {
+      await page.waitForSelector('text=批量操作测试任务.bin', { timeout: 15000 });
+    } catch {
+      const bodyText = (await page.locator('body').innerText()).replace(/\s+/g, ' ').slice(0, 400);
+      assert.fail(`任务页应显示刚造的「下载中」任务；页面文本=${bodyText}`);
+    }
 
     // 勾选这一个任务（用 aria-label 精确定位，避免和别的复选框混）
     await page.getByLabel(`选择任务 ${bulkTask.id}`).first().check();

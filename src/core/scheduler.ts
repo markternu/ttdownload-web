@@ -96,8 +96,17 @@ function failTask(task: TaskWithPayload, message: string): void {
   emit(task.id);
 }
 
+/** 我们自己写的"进度提示"前缀（提示消失后可以安全清掉；别动别人的 error） */
+const PROGRESS_HINT_PREFIXES = ['transmission 正在校验'];
+
 function applyProgress(taskId: number, r: PollResult): void {
   const patch: Record<string, unknown> = {};
+  if (r.hint !== undefined) patch.error = r.hint;
+  else {
+    // 提示消失 → 清掉它。⚠️ 只清"我们自己写的进度提示"，绝不覆盖调度器写的准入/限流说明
+    const current = tasksRepo.get(taskId);
+    if (current?.error && PROGRESS_HINT_PREFIXES.some((p) => current.error!.startsWith(p))) patch.error = null;
+  }
   if (r.status) patch.status = r.status;
   if (typeof r.progress === 'number') patch.progress = Math.max(0, Math.min(100, r.progress));
   if (typeof r.speedBps === 'number') patch.speedBps = r.speedBps;

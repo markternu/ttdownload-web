@@ -12,6 +12,12 @@ export interface PollResult {
   expectBytes?: number;
   error?: string | null;
   /**
+   * 给用户看的"正在进行什么"提示（不是错误，会写进任务的 error 字段显示在列表里，
+   * 提示消失后自动清掉）。例如 BT 重启后 transmission 正在重新校验已下载的数据 ——
+   * 那会儿进度会先掉得很低再涨回来，不说明一下用户会以为"任务被清零了"。
+   */
+  hint?: string;
+  /**
    * 下载完成，交给归档流水线。
    * units：发布单元（一个单元 = 一个成品）。BT 里"多个大视频"会拆成多个单元，
    *        这样不会被塞进同一个 zip；"一堆小文件"合成一个单元（打成 zip）。

@@ -57,6 +57,8 @@ export function TaskCard({
   const showProgress = task.status === 'downloading' || task.status === 'paused' || task.progress > 0
   const progressTone =
     task.status === 'failed' ? 'danger' : task.status === 'completed' ? 'success' : 'brand'
+  /** 终态才算"失败"；downloading/waiting 上的 error 多是提示（空间不足、正在校验…） */
+  const isFailure = task.status === 'failed' || task.status === 'cancelled'
 
   return (
     <div
@@ -178,8 +180,19 @@ export function TaskCard({
           </dl>
 
           {task.error ? (
-            <p className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-700 dark:bg-red-950/30 dark:text-red-300">
-              失败原因：{task.error}
+            <p
+              className={cn(
+                'mt-2 rounded-xl px-3 py-2 text-xs leading-relaxed',
+                // ⚠️ 不是所有 error 都是"失败"：调度器会把"空间不足…""正在校验已下载数据…"
+                //    这类**提示**也写在这个字段里。对还在跑/还在排队的任务一律说"提示"，
+                //    别让用户看到"失败原因：正在校验已下载的数据"这种自相矛盾的话。
+                isFailure
+                  ? 'bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300'
+                  : 'bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-200',
+              )}
+            >
+              {isFailure ? '失败原因：' : '提示：'}
+              {task.error}
             </p>
           ) : null}
 

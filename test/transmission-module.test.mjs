@@ -277,3 +277,37 @@ test('【事故回归】空间压力暂停的任务，等运行中任务"还差"
 
   assert.equal(tasksRepo.get(b.id).status, 'downloading', `空间够就该恢复被暂停的任务，实际 ${tasksRepo.get(b.id).status}`);
 });
+
+/* ------------------------------------------------------------------ *
+ *  重启后 transmission 在校验：必须**说明白**，别让用户以为任务被清零了
+ *  （2026-10-08 用户真机反馈："升级后 BT 任务全部 0 进度" —— 实为校验中，
+ *    几分钟后进度自己涨回来了）
+ * ------------------------------------------------------------------ */
+test('【校验提示】transmission 校验已下载数据时，poll 要带出人话提示；不校验时没有提示', async () => {
+  const fake = tmpFile(root, 'src/verify.torrent', 'd8:announce11:http://x/ye');
+  fs.copyFileSync(fake, path.join(config.dirs.btPending, 'verify.torrent'));
+  bt.registerPendingSeeds();
+  const seed = seedsRepo.all().find((s) => s.name === 'verify.torrent');
+  const task = bt.enqueueSeed(seed);
+  await bt.transmissionModule.prepare(tasksRepo.get(task.id));
+  await bt.transmissionModule.start(tasksRepo.get(task.id));
+
+  // 2 = TR_STATUS_CHECK（校验中）；这时 percentDone 会先掉到很低
+  mock.state.percent = 0.02;
+  mock.state.status = 2;
+  const checking = await bt.transmissionModule.poll(tasksRepo.get(task.id));
+  assert.ok(checking.hint, '校验中必须给出提示（否则用户看到 2% 会以为进度被清零了）');
+  assert.match(String(checking.hint), /校验/);
+  assert.match(String(checking.hint), /数据没丢|属正常/, '要明确告诉用户数据没丢、属正常');
+
+  // 4 = TR_STATUS_DOWNLOAD（正常下载）→ 不能再挂"校验中"（写错状态码就会这样）
+  mock.state.status = 4;
+  const normal = await bt.transmissionModule.poll(tasksRepo.get(task.id));
+  assert.equal(normal.hint, undefined, '正常下载时不该带"校验中"提示');
+
+  // 1 = TR_STATUS_CHECK_WAIT（排队等校验）也要提示
+  mock.state.status = 1;
+  const waitCheck = await bt.transmissionModule.poll(tasksRepo.get(task.id));
+  assert.ok(waitCheck.hint, '等待校验也要提示');
+  mock.state.status = null;
+});

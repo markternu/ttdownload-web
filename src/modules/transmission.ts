@@ -466,6 +466,14 @@ export const transmissionModule: ModuleAdapter = {
 
     const progress = Math.min(100, (torrent.percentDone ?? 0) * 100);
     const speed = torrent.rateDownload ?? 0;
+    // transmission 在校验已下载数据（重启/重新加种子后会做）：这期间 percentDone 会先掉到很低
+    // 再涨回来。必须显式告诉用户"这是在核对已有数据，不是被清零了"——否则他会以为任务被人动了。
+    // ⚠️ transmission 的状态码：0=停止 1=等待校验 2=校验中 3=等待下载 4=正在下载 5/6=做种。
+    //    别把 4 当成"校验中"（那是正在下载）—— 写错的话每个正常任务都会挂一条"校验中"提示。
+    const checking = torrent.status === 1 || torrent.status === 2;
+    const checkHint = checking
+      ? `transmission 正在校验已下载的数据（进度会先掉下去再涨回来，属正常，数据没丢）`
+      : undefined;
     const eta = torrent.eta && torrent.eta > 0 ? torrent.eta : null;
 
     // 进度快照留痕（给 12h/6h 判断用，也方便排查"到底卡在多少"）
@@ -483,6 +491,7 @@ export const transmissionModule: ModuleAdapter = {
     return {
       progress,
       speedBps: speed,
+      hint: checkHint,
       etaSec: eta,
       totalBytes: torrent.totalSize ?? selectedBytes,
       downloadedBytes: Math.round((torrent.percentDone ?? 0) * (torrent.totalSize ?? selectedBytes)),
