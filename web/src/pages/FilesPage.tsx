@@ -78,11 +78,15 @@ export default function FilesPage() {
 
   /* ---------------- 批量删除（新增，三步确认；弹窗由 DangerConfirmModal 承担） ---------------- */
   const [selected, setSelected] = useState<Set<number>>(new Set())
+  /** 「全部下载」正在发起（浏览器接管后即恢复） */
+  const [bulkDownloading, setBulkDownloading] = useState(false)
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkWithFile, setBulkWithFile] = useState(false)
   const [bulkBusy, setBulkBusy] = useState(false)
 
   const selectedFiles = useMemo(() => items.filter((file) => selected.has(file.id)), [items, selected])
+  /** 「下载原始文件」是否可用（服务器没配 ORIGINAL_DL_SECRET 时禁用按钮，别让用户白点） */
+  const originalAvailable = original.status?.enabled !== false
   const selectedBytes = useMemo(
     () => selectedFiles.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0),
     [selectedFiles],
@@ -156,6 +160,50 @@ export default function FilesPage() {
       return next
     })
   }
+
+  /**
+   * 「全选 → 全部下载」：**打成一个 .tar 一次下载**。
+   *
+   * 为什么不像单行那样一个个点：浏览器对"同一站点同时下载几个"有硬限制（Chrome 约 6 个），
+   * 单点超过 6 个，后面的就要排队等前面的下完 —— 那是浏览器连接池的限制，服务端没法绕过。
+   * 打成一个包 → 只发一条请求一条连接 → **多少个都行，没有数量限制**。
+   */
+  const bulkDownloadProducts = useCallback(async () => {
+    const files = selectedFiles.filter((f) => f.available !== false)
+    if (!files.length) {
+      toast.warning('没有可下载的文件', '选中的文件在磁盘上都已不存在（可能已被安卓端取走）')
+      return
+    }
+    if (files.length < selectedFiles.length) {
+      toast.info('有文件已不在磁盘上，已自动跳过', `${selectedFiles.length - files.length} 个跳过`)
+    }
+    const total = files.reduce((n, f) => n + (f.sizeBytes ?? 0), 0)
+    const go = window.confirm(
+      [
+        `将把 ${files.length} 个文件打包成一个 .tar 下载（共 ${formatBytes(total, '0 B')}）。`,
+        '',
+        '· 只发一条下载请求，不受浏览器"同时最多下 6 个"的限制；',
+        '· 服务器是**边读边发**的流式打包，不再额外占用磁盘；',
+        '· 压缩包内文件名就是列表里的文件名（Windows 10+ 自带 tar，macOS/Linux 直接双击）。',
+        '',
+        '开始下载吗？',
+      ].join('\n'),
+    )
+    if (!go) return
+    setBulkDownloading(true)
+    try {
+      const a = document.createElement('a')
+      a.href = api.filesBulkDownloadUrl(files.map((f) => f.id))
+      a.rel = 'noopener'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      toast.success(`已开始打包下载 ${files.length} 个文件`, '浏览器会把它当成一个文件下载，中途别刷新页面')
+    } finally {
+      // 浏览器接管下载是异步的，这里只是把按钮的 loading 收回来
+      window.setTimeout(() => setBulkDownloading(false), 1500)
+    }
+  }, [selectedFiles, toast])
 
   const openBulk = (): void => {
     if (!selected.size) return
@@ -496,15 +544,38 @@ export default function FilesPage() {
               {selected.size > 0 ? ' · 只对当前页勾选的行生效' : ''}
             </span>
           </div>
-          <Button
-            variant="danger"
-            size="sm"
-            icon={<Trash2 className="h-3.5 w-3.5" />}
-            disabled={!selected.size}
-            onClick={openBulk}
-          >
-            全部删除{selected.size ? `（${selected.size}）` : ''}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              icon={<Download className="h-3.5 w-3.5" />}
+              disabled={!selected.size || bulkDownloading}
+              loading={bulkDownloading}
+              onClick={() => void bulkDownloadProducts()}
+              title="把选中的成品打成一个 .tar 一次下载（一个连接，不受浏览器同时下载数量限制）"
+            >
+              全部下载{selected.size ? `（${selected.size}）` : ''}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              icon={<FileOutput className="h-3.5 w-3.5" />}
+              disabled={!selected.size || !originalAvailable}
+              onClick={() => original.downloadOriginalBulk(selectedFiles)}
+              title="在服务器上把这批文件临时解密成原始文件，然后打成一个 .tar 一次下载（需 6 位下载密码）"
+            >
+              全部下载原始文件{selected.size ? `（${selected.size}）` : ''}
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              icon={<Trash2 className="h-3.5 w-3.5" />}
+              disabled={!selected.size}
+              onClick={openBulk}
+            >
+              全部删除{selected.size ? `（${selected.size}）` : ''}
+            </Button>
+          </div>
         </div>
 
         {error ? (

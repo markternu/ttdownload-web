@@ -7,6 +7,7 @@ import { filesRepo } from '../core/db';
 import { deletePublished } from '../services/cleanup';
 import { logger } from '../core/logger';
 import { asyncHandler, badRequest, notFound, streamFileTo } from '../utils/http';
+import { tarEnd, tarHeader, tarPadding } from '../utils/tar';
 import type { PublishedFile } from '../types';
 
 export const filesRouter = Router();
@@ -158,6 +159,86 @@ filesRouter.get(
     res.setHeader('Content-Disposition', `attachment; filename="${path.basename(file.name)}"`);
     res.setHeader('Content-Length', String(fs.statSync(file.path).size));
     streamFileTo(res, file.path);
+  }),
+);
+
+/**
+ * 批量下载（全选 →「全部下载」）：把选中的成品**流式打成一个 tar**，一次连接下完。
+ *
+ * 为什么必须打包：浏览器对"同一个站点同时下载几个"有硬限制（Chrome 约 6 个），
+ * 一个一个点，点到第 7 个就得排队等前面的下完 —— 那是浏览器连接池的限制，
+ * 服务端加多少并发都没用。打成一个包 → 只用一条连接 → **没有数量限制**。
+ *
+ * ⚠️ 必须注册在 `GET /:id/download` 之前，否则 "bulk-download" 会被当成 id 解析。
+ */
+filesRouter.get(
+  '/bulk-download',
+  asyncHandler(async (req, res) => {
+    const ids = String(req.query.ids ?? '')
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    if (!ids.length) throw badRequest('请先选择文件（ids 不能为空）', 'EMPTY_IDS');
+    if (ids.length > 500) throw badRequest('一次最多打包 500 个文件', 'TOO_MANY_IDS');
+
+    const picked: { id: number; name: string; path: string; size: number }[] = [];
+    const missing: string[] = [];
+    for (const id of ids) {
+      const file = filesRepo.get(id);
+      if (!file || !fs.existsSync(file.path)) {
+        missing.push(file?.name ?? `#${id}`);
+        continue;
+      }
+      picked.push({ id, name: path.basename(file.name || `file-${id}`), path: file.path, size: fs.statSync(file.path).size });
+    }
+    if (!picked.length) throw notFound('选中的文件在磁盘上都不存在了（可能已被安卓端取走）', 'NO_FILES');
+
+    const total = picked.reduce((sum, f) => sum + f.size, 0);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    logger.child('files').mark('FILE_DOWNLOAD', `网页端批量打包下载 ${picked.length} 个文件（${(total / 1024 ** 2).toFixed(1)} MiB）`, {
+      ids: picked.map((f) => f.id),
+      skipped: missing.length,
+    });
+    for (const f of picked) filesRepo.trackDownload(f.id, 'web');
+
+    res.setHeader('Content-Type', 'application/x-tar');
+    res.setHeader('Content-Disposition', `attachment; filename="ttdownload-${stamp}.tar"`);
+    // 长度可算：每个文件 512 头 + 数据 + 填充，末尾 1024 字节结束块
+    res.setHeader(
+      'Content-Length',
+      String(picked.reduce((sum, f) => sum + 512 + f.size + tarPadding(f.size), 0) + 1024),
+    );
+    res.setHeader('X-Bulk-Files', String(picked.length));
+    if (missing.length) res.setHeader('X-Bulk-Skipped', String(missing.length));
+
+    try {
+      for (const f of picked) {
+        if (res.writableEnded) break;
+        res.write(tarHeader(f.name, f.size));
+        await new Promise<void>((resolve, reject) => {
+          const src = fs.createReadStream(f.path, { highWaterMark: 1 << 20 });
+          const onClose = (): void => {
+            src.destroy();
+          };
+          res.once('close', onClose);
+          src.on('error', reject);
+          src.on('data', (chunk) => {
+            if (!res.write(chunk)) src.pause();
+          });
+          res.on('drain', () => src.resume());
+          src.on('end', () => {
+            res.off('close', onClose);
+            const pad = tarPadding(f.size);
+            if (pad) res.write(Buffer.alloc(pad));
+            resolve();
+          });
+        });
+      }
+      res.end(tarEnd());
+    } catch (e) {
+      logger.child('files').warn(`批量打包下载中断：${(e as Error).message}`);
+      res.destroy();
+    }
   }),
 );
 

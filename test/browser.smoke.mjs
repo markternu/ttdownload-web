@@ -89,6 +89,20 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
       path: path.join(consumerDir, name),
     });
   });
+  // 再给"批量下载/打包"用例造两个专属 fixture（⚠️ 不能复用 bulkdel-*：
+  // 前面「全选 → 全部删除」那条用例会把它们删掉，复跑时这里就找不到了）
+  for (const name of ['bbdl-a', 'bbdl-b']) {
+    fs.writeFileSync(path.join(consumerDir, name), `encrypted-${name}`);
+    filesRepo.add({
+      taskId: null,
+      name,
+      title: `批量下载测试-${name}.mp4`,
+      module: 'webvideo',
+      sizeBytes: 24,
+      path: path.join(consumerDir, name),
+    });
+  }
+
   // 再造一个"已被下载"的，验证状态筛选能把两种分开
   const doneName = 'bulkdone-1';
   fs.writeFileSync(path.join(consumerDir, doneName), 'encrypted-done');
@@ -980,6 +994,33 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
 
     const clip = await page.evaluate(() => navigator.clipboard.readText());
     assert.equal(clip.trim(), shown, '剪贴板内容必须和页面显示的命令一致');
+    await page.close();
+  });
+
+  test('文件页「全选」后要有三个批量动作：全部下载 / 全部下载原始文件 / 全部删除', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/files`, { waitUntil: 'networkidle' });
+    // 用搜索框把 fixture 单独筛出来，避免误碰别的用例依赖的文件
+    await page.getByPlaceholder('搜索文件名或标题').fill('bbdl');
+    await page.waitForSelector('text=bbdl-a', { timeout: 15000 });
+
+    // 没勾选时三个按钮都该是禁用的（别让人误点）
+    for (const name of [/全部下载（/, /全部下载原始文件（/, /全部删除（/]) {
+      assert.equal(await page.getByRole('button', { name }).count(), 0, '没勾选时按钮文案里不该带数量');
+    }
+
+    await page.getByLabel('全选当前页').first().check();
+    await page.waitForSelector('text=/已选\\s*\\d+\\s*个/', { timeout: 5000 });
+
+    const bulkDownload = page.getByRole('button', { name: /^全部下载（/ }).first();
+    const bulkOriginal = page.getByRole('button', { name: /全部下载原始文件（/ }).first();
+    const bulkDelete = page.getByRole('button', { name: /^全部删除（/ }).first();
+    assert.ok(await bulkDownload.isVisible(), '要有「全部下载」');
+    assert.ok(await bulkDelete.isVisible(), '原来的「全部删除」要保留');
+    // 原始文件功能在测试环境里没配 ORIGINAL_DL_SECRET → 按钮可见但禁用（如实反映"不可用"）
+    assert.ok(await bulkOriginal.count() > 0, '要有「全部下载原始文件」');
+    assert.ok(await bulkDownload.isEnabled(), '勾选后「全部下载」应可用');
     await page.close();
   });
 

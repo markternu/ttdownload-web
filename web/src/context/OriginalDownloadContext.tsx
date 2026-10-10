@@ -23,6 +23,11 @@ interface OriginalCtx {
   jobs: OriginalJob[]
   /** 点「下载原始文件」：需要密码就先弹框，验过之后自动继续 */
   downloadOriginal: (file: PublishedFile) => void
+  /**
+   * 文件页「全选 → 全部下载原始文件」：一次把多个文件丢进解密队列，
+   * 全部就绪后**打成一个 tar 只下一条连接**（绕开浏览器"同站点最多同时下 6 个"的限制）。
+   */
+  downloadOriginalBulk: (files: PublishedFile[]) => void
 }
 
 const Ctx = createContext<OriginalCtx | null>(null)
@@ -37,12 +42,16 @@ export function OriginalDownloadProvider({ children }: { children: ReactNode }) 
   const toast = useToast()
   const [status, setStatus] = useState<OriginalStatus | null>(null)
   const [jobs, setJobs] = useState<OriginalJob[]>([])
-  const [pending, setPending] = useState<PublishedFile | null>(null)   // 等密码的那个文件
+  const [pending, setPending] = useState<PublishedFile[] | null>(null)   // 等密码的那些文件（单个也是一批）
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [codeError, setCodeError] = useState<string | null>(null)
   /** 已经自动触发过下载的任务（避免轮询时反复触发） */
   const autoDownloaded = useRef<Set<string>>(new Set())
+  /** 批量解密中的任务 id：它们**不逐个**触发浏览器下载，等全部就绪后打包成 tar 下一次 */
+  const batchIds = useRef<Set<string>>(new Set())
+  const [batch, setBatch] = useState<{ ids: string[]; files: number } | null>(null)
+  const batchTriggered = useRef(false)
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -102,6 +111,9 @@ export function OriginalDownloadProvider({ children }: { children: ReactNode }) 
   useEffect(() => {
     for (const job of jobs) {
       if (job.state !== 'ready' || autoDownloaded.current.has(job.id)) continue
+      // 批量任务：不在这里逐个下（那样又会被浏览器"同时 6 个"的限制卡住），
+      // 等整批就绪后由下面的 effect 打成一个 tar 下一次
+      if (batchIds.current.has(job.id)) continue
       autoDownloaded.current.add(job.id)
       const a = document.createElement('a')
       a.href = api.originalDownloadUrl(job.id)
@@ -132,7 +144,7 @@ export function OriginalDownloadProvider({ children }: { children: ReactNode }) 
         if (err.code === 'ORIGINAL_LOCKED') {
           // 服务端说"还没输密码" → 立刻让用户输，而不是干报错
           await refreshStatus()
-          setPending(file)
+          setPending([file])
           setCode('')
           setCodeError('需要下载密码（服务端重启后需要重新输入）')
           return
@@ -158,12 +170,104 @@ export function OriginalDownloadProvider({ children }: { children: ReactNode }) 
         void startJob(file)
         return
       }
-      setPending(file)
+      setPending([file])
       setCode('')
       setCodeError(null)
     },
     [startJob, status, toast],
   )
+
+  /**
+   * 批量解密 → 全部就绪后打包成 tar 下一次。
+   * 关键点：① 解密本身是并行的（不是一个个来），只受磁盘周转空间限制；
+   *        ② 下载只发**一次请求**（tar），所以浏览器那 6 条连接的限制与我们无关。
+   */
+  const startBulk = useCallback(
+    async (files: PublishedFile[]) => {
+      const ids = files.map((f) => f.id)
+      try {
+        const r = await api.originalBulkStart(ids)
+        const jobsStarted = r.jobs ?? []
+        for (const j of jobsStarted) batchIds.current.add(String(j.id))
+        batchTriggered.current = false
+        setBatch({ ids: jobsStarted.map((j) => String(j.id)), files: jobsStarted.length })
+        const failed = r.failed ?? []
+        if (failed.length) {
+          toast.warning(`有 ${failed.length} 个文件没能开始解密`, failed[0]?.error ?? '')
+        }
+        if (!jobsStarted.length) {
+          setBatch(null)
+          toast.error('没有文件开始解密', failed[0]?.error ?? '请稍后重试')
+          return
+        }
+        toast.info(`正在临时解密 ${jobsStarted.length} 个文件…`, '全部就绪后会打成一个 .tar 一次下载；可以去做别的事')
+        await refreshJobs()
+      } catch (e) {
+        const err = e as { code?: string; message?: string }
+        if (err.code === 'ORIGINAL_LOCKED') {
+          await refreshStatus()
+          setPending(files)
+          setCode('')
+          setCodeError('需要下载密码（服务端重启后需要重新输入）')
+          return
+        }
+        if (err.code === 'ORIGINAL_DL_DISABLED') {
+          await refreshStatus()
+          toast.error('该功能未启用', '服务器 .env 里没有 ORIGINAL_DL_SECRET')
+          return
+        }
+        toast.error('批量解密失败', err.message ?? '未知错误')
+      }
+    },
+    [refreshJobs, refreshStatus, toast],
+  )
+
+  const downloadOriginalBulk = useCallback(
+    (files: PublishedFile[]) => {
+      if (!files.length) return
+      if (status && !status.enabled) {
+        toast.error('该功能未启用', '服务器 .env 里没有 ORIGINAL_DL_SECRET，请先在服务器上生成并重启服务')
+        return
+      }
+      if (status?.unlocked) {
+        void startBulk(files)
+        return
+      }
+      setPending(files)
+      setCode('')
+      setCodeError(null)
+    },
+    [startBulk, status, toast],
+  )
+
+  /** 一批都结束了（ready/failed/cancelled 任意）→ 把就绪的打成一个 tar 下载 */
+  useEffect(() => {
+    if (!batch) return
+    const mine = jobs.filter((j) => batch.ids.includes(j.id))
+    if (mine.length < batch.ids.length) return          // 还没全部出现在任务列表里
+    if (mine.some((j) => j.state === 'decrypting')) return
+    if (batchTriggered.current) return
+    batchTriggered.current = true
+    const ready = mine.filter((j) => j.state === 'ready')
+    const failedCount = mine.length - ready.length
+    setBatch(null)
+    if (!ready.length) {
+      toast.error('这批文件都没能解密', '请看右下角面板里的失败原因')
+      return
+    }
+    const a = document.createElement('a')
+    a.href = api.originalBulkDownloadUrl(ready.map((j) => j.id))
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    toast.success(
+      `开始打包下载 ${ready.length} 个原始文件`,
+      failedCount
+        ? `另有 ${failedCount} 个失败（已跳过）。服务器会打成一个 .tar 一次发给你，下载完成后自动删除临时文件`
+        : '服务器打成一个 .tar 一次发给你；下载完成后自动删临时文件',
+    )
+  }, [jobs, batch, toast])
 
   const submitCode = useCallback(async () => {
     if (!pending) return
@@ -175,17 +279,18 @@ export function OriginalDownloadProvider({ children }: { children: ReactNode }) 
     setCodeError(null)
     try {
       await api.originalUnlock(code.trim())
-      const file = pending
+      const files = pending
       setPending(null)
       setCode('')
       await refreshStatus()
-      await startJob(file)
+      if (files.length > 1) await startBulk(files)
+      else await startJob(files[0])
     } catch (e) {
       setCodeError((e as Error).message || '密码不正确')
     } finally {
       setBusy(false)
     }
-  }, [code, pending, refreshStatus, startJob])
+  }, [code, pending, refreshStatus, startBulk, startJob])
 
   const cancelJob = useCallback(
     async (job: OriginalJob) => {
@@ -201,7 +306,7 @@ export function OriginalDownloadProvider({ children }: { children: ReactNode }) 
   )
 
   return (
-    <Ctx.Provider value={{ status, jobs, downloadOriginal }}>
+    <Ctx.Provider value={{ status, jobs, downloadOriginal, downloadOriginalBulk }}>
       {children}
 
       {/* ---------------- 悬浮进度面板：不挡路、切页也在 ---------------- */}
@@ -280,7 +385,13 @@ export function OriginalDownloadProvider({ children }: { children: ReactNode }) 
       <Modal
         open={pending !== null}
         title="下载原始文件"
-        description={pending ? `${pending.name}（${formatBytes(pending.sizeBytes)}）将被临时解密成原始文件` : ''}
+        description={
+          pending
+            ? pending.length > 1
+              ? `这批 ${pending.length} 个文件（共 ${formatBytes(pending.reduce((n, f) => n + (f.sizeBytes ?? 0), 0))}）会被临时解密，然后打成一个 .tar 一次下载`
+              : `${pending[0].name}（${formatBytes(pending[0].sizeBytes)}）将被临时解密成原始文件`
+            : ''
+        }
         onClose={() => (busy ? undefined : setPending(null))}
         size="sm"
         footer={

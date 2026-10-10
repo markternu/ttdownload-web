@@ -13,7 +13,8 @@ import {
   tryUnlock,
   unlockSecondsLeft,
 } from '../services/originalCode';
-import { cancelJob, getJob, listJobs, publicJob, startOriginalJob } from '../services/originalDownload';
+import { cancelJob, dropJob, getJob, listJobs, publicJob, startOriginalJob } from '../services/originalDownload';
+import { tarEnd, tarHeader, tarPadding } from '../utils/tar';
 
 /**
  * 「下载原始文件」：把加密归档临时解密成原样再下载。
@@ -78,6 +79,133 @@ originalRouter.post(
       throw badRequest(r.error, r.code);
     }
     res.json({ job: publicJob(r.job) });
+  }),
+);
+
+/**
+ * 批量「下载原始文件」（文件页全选 → 全部下载原始文件）。
+ *
+ * 为什么要批量接口：浏览器对"同一站点同时下载几个"有硬限制（Chrome 约 6 个），
+ * 一个个点，第 7 个就得排队等前面的下完。这里改成：
+ *   ① 一次把选中的文件**全部**丢进解密队列（解密本来就是并行的，只受磁盘周转空间限制）；
+ *   ② 前端等它们都 ready 后，走 `GET /bulk/download` **打成一个 tar 一次下载**（一条连接 → 没有数量限制）。
+ */
+originalRouter.post(
+  '/bulk',
+  asyncHandler(async (req, res) => {
+    const key = sessionKeyOf(req);
+    if (!isUnlocked(key)) throw forbidden('请先输入下载密码', 'ORIGINAL_LOCKED');
+    const raw: unknown[] = Array.isArray(req.body?.fileIds) ? req.body.fileIds : [];
+    const fileIds = [...new Set(raw.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n > 0))];
+    if (!fileIds.length) throw badRequest('请先选择文件（fileIds 不能为空）', 'EMPTY_IDS');
+    if (fileIds.length > 200) throw badRequest('一次最多解密 200 个文件', 'TOO_MANY_IDS');
+
+    const jobs: Record<string, unknown>[] = [];
+    const failed: { fileId: number; error: string; code?: string }[] = [];
+    for (const fileId of fileIds) {
+      const r = startOriginalJob(fileId, key);
+      if (r.ok) jobs.push(publicJob(r.job));
+      else failed.push({ fileId, error: r.error, code: r.code });
+    }
+    logger.child('original').mark('ORIGINAL_DL', `批量解密：受理 ${jobs.length} 个，拒绝 ${failed.length} 个`, {
+      fileIds: fileIds.length,
+      accepted: jobs.length,
+      failed: failed.slice(0, 5),
+    });
+    res.json({ jobs, failed });
+  }),
+);
+
+/**
+ * 批量下载：把已经解密好的临时文件打成一个 tar（一个连接）。
+ * 全部写完后按单文件同样的规则**立刻删除临时文件**；中断则保留，交给 1 小时超时清理。
+ */
+originalRouter.get(
+  '/bulk/download',
+  asyncHandler(async (req, res) => {
+    const key = sessionKeyOf(req);
+    if (!isUnlocked(key)) throw forbidden('请先输入下载密码', 'ORIGINAL_LOCKED');
+    const ids = String(req.query.jobs ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!ids.length) throw badRequest('缺少 jobs（解密任务 id 列表）', 'MISSING_JOBS');
+
+    const picked: { job: ReturnType<typeof getJob> & object; size: number }[] = [];
+    const notReady: string[] = [];
+    for (const id of ids) {
+      const job = getJob(id);
+      if (!job || !job.startedBy || job.startedBy !== key) {
+        notReady.push(id);
+        continue;
+      }
+      if (job.state !== 'ready' || !fs.existsSync(job.tempPath)) {
+        notReady.push(id);
+        continue;
+      }
+      picked.push({ job, size: fs.statSync(job.tempPath).size });
+    }
+    if (!picked.length) throw badRequest('没有已就绪的文件（可能还在解密，或已被清理）', 'NOT_READY');
+
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const total = picked.reduce((sum, p) => sum + p.size, 0);
+    logger.child('original').mark('ORIGINAL_DL', `批量下载原始文件：${picked.length} 个（${(total / 1024 ** 2).toFixed(1)} MiB）`, {
+      jobs: picked.map((p) => p.job.id),
+      skipped: notReady.length,
+    });
+    res.setHeader('Content-Type', 'application/x-tar');
+    res.setHeader('Content-Disposition', `attachment; filename="original-${stamp}.tar"`);
+    res.setHeader('Content-Length', String(picked.reduce((sum, p) => sum + 512 + p.size + tarPadding(p.size), 0) + 1024));
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Bulk-Files', String(picked.length));
+    if (notReady.length) res.setHeader('X-Bulk-Skipped', String(notReady.length));
+
+    for (const p of picked) p.job.streaming += 1;
+    let done = false;
+    res.once('close', () => {
+      if (done) return;
+      for (const p of picked) {
+        p.job.streaming = Math.max(0, p.job.streaming - 1);
+        // 中断 → 保留临时文件，交给 1 小时超时清理（和单文件下载同一条规矩）
+        p.job.readyAt = p.job.readyAt ?? Date.now();
+      }
+      logger.child('original').warn('批量下载原始文件被中断（临时文件保留，1 小时内可重试）');
+    });
+
+    try {
+      for (const p of picked) {
+        const name = p.job.originalName || `file-${p.job.fileId}`;
+        res.write(tarHeader(name, p.size));
+        await new Promise<void>((resolve, reject) => {
+          const src = fs.createReadStream(p.job.tempPath, { highWaterMark: 1 << 20 });
+          const onClose = (): void => {
+            src.destroy();
+          };
+          res.once('close', onClose);
+          src.on('error', reject);
+          src.on('data', (chunk) => {
+            if (!res.write(chunk)) src.pause();
+          });
+          res.on('drain', () => src.resume());
+          src.on('end', () => {
+            res.off('close', onClose);
+            const pad = tarPadding(p.size);
+            if (pad) res.write(Buffer.alloc(pad));
+            resolve();
+          });
+        });
+      }
+      done = true;
+      res.end(tarEnd());
+      // 写完了 → 判定"下载完成" → 立刻删临时文件（用户要求的规矩）
+      for (const p of picked) {
+        p.job.streaming = Math.max(0, p.job.streaming - 1);
+        if (p.job.streaming === 0) dropJob(p.job.id, '批量下载完成');
+      }
+    } catch (e) {
+      logger.child('original').warn(`批量打包下载中断：${(e as Error).message}`);
+      res.destroy();
+    }
   }),
 );
 

@@ -468,6 +468,22 @@ export const api = {
   /** 当前会话还没结束的任务（页面刷新后也能看到"还在解密"） */
   originalJobs: () => request<{ jobs: OriginalJob[] }>('/api/original/jobs'),
 
+  /* ---------------- 「下载原始文件」批量（文件页全选） ---------------- */
+
+  /** 一次把多个文件丢进解密队列（并行解密，不是一个个来） */
+  originalBulkStart: (fileIds: number[]) =>
+    request<{ jobs: OriginalJob[]; failed: { fileId: number; error: string; code?: string }[] }>(
+      '/api/original/bulk',
+      jsonBody({ fileIds }),
+    ),
+
+  /** 打包下载：把已就绪的解密任务打成一个 tar（一个连接，不受浏览器"同时 6 个"限制） */
+  originalBulkDownloadUrl: (jobIds: (string | number)[]): string =>
+    buildUrl('/api/original/bulk/download', { jobs: jobIds.join(',') }),
+
+  /** 批量打包下载成品（加密归档本身），同样是 tar、一个连接 */
+  filesBulkDownloadUrl: (ids: number[]): string => buildUrl('/api/files/bulk-download', { ids: ids.join(',') }),
+
   originalJob: (id: string) => request<{ job: OriginalJob }>(`/api/original/jobs/${id}`),
 
   /** 取消并立刻删掉临时文件 */
