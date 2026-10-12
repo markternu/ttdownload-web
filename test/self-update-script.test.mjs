@@ -25,7 +25,7 @@ import { execFileSync } from 'node:child_process';
 import { setupRuntime } from './helpers.mjs';
 
 const root = setupRuntime();
-const { buildUpdaterCommand, shouldSkipAutoApply, recordAttempt, ATTEMPT_FILE, getUpdateStatus, manualUpdateCommand } =
+const { buildUpdaterCommand, shouldSkipAutoApply, recordAttempt, ATTEMPT_FILE, getUpdateStatus, manualUpdateCommand, repoOwner } =
   await import('../dist/services/updater.js');
 const { config } = await import('../dist/core/config.js');
 
@@ -182,4 +182,13 @@ test('状态里给出「手动更新命令」和「自动重试被挡的原因�
   assert.match(st.manualCommand, new RegExp(config.rootDir.split('/').pop()), '命令里要包含项目目录名');
   assert.ok('autoApplySkipReason' in st, '状态里要有冷却原因字段（页面据此提示）');
   assert.equal(manualUpdateCommand(), st.manualCommand);
+});
+
+
+test('【事故根因】git 要以仓库属主身份跑：repoOwner() 返回目录 stat 的 uid（不是 root/0）', () => {
+  const st = fs.statSync(config.rootDir);
+  const owner = repoOwner();
+  assert.ok(owner, '要能取到属主');
+  assert.equal(owner.uid, st.uid, '属主 = 仓库目录的 stat.uid（漏了就会用 root 写对象）');
+  assert.equal(owner.gid, st.gid);
 });

@@ -20,7 +20,7 @@
  *      —— 这样即使升级失败回滚到老代码，重启后的 recoverTasks 也会自动把它们接着下。
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -244,14 +244,59 @@ export interface GitRun {
   stderr: string;
 }
 
+/**
+ * 仓库属主（目录 stat 出来的 uid/gid）。
+ *
+ * ⚠️ 血案（2026-10-12）：本服务以 root 运行，之前这里**直接用 root 跑 `git fetch`**，
+ * 于是 `.git/objects` 被写成 root:root。等用户自己 `sudo ./deploy.sh --update` 时，
+ * deploy 以属主 mypi 身份 `git pull` 就报
+ *   "insufficient permission for adding an object to repository database .git/objects"
+ * —— 正是用户这次卡住的原因。结论：**git/npm/构建都必须以仓库属主身份执行**，
+ * 和 deploy.sh / self-update.sh 里 as_owner 是同一套规矩，这里用 child_process 的 uid/gid。
+ */
+export function repoOwner(): { uid: number; gid: number; home?: string } | null {
+  try {
+    const st = fs.statSync(config.rootDir);
+    if (typeof st.uid !== 'number' || typeof st.gid !== 'number') return null;
+    if (typeof process.getuid !== 'function') return { uid: st.uid, gid: st.gid }; // 非 root 平台不强求
+    if (st.uid === 0) return { uid: 0, gid: st.gid }; // 仓库本来就 root 所有 → 照旧
+    // 找属主家目录（给 git 用，读 ~/.ssh 里的部署密钥）
+    let home: string | undefined;
+    const m = /^\/(home|Users)\/([^/]+)\//.exec(config.rootDir);
+    if (m) home = `/${m[1]}/${m[2]}`;
+    else {
+      try {
+        home = execFileSync('getent', ['passwd', String(st.uid)], { encoding: 'utf8' }).split(':')[5] || undefined;
+      } catch {
+        home = undefined;
+      }
+    }
+    return { uid: st.uid, gid: st.gid, home };
+  } catch {
+    return null;
+  }
+}
+
 async function git(args: string[], timeoutMs = config.update.fetchTimeoutSec * 1000): Promise<GitRun> {
   try {
-    const { stdout, stderr } = await execFileAsync('git', ['-c', 'safe.directory=*', ...args], {
+    const owner = repoOwner();
+    const opts: import('node:child_process').ExecFileOptions = {
       cwd: config.rootDir,
       timeout: timeoutMs,
       maxBuffer: 8 * 1024 * 1024,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo' },
-    });
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_ASKPASS: 'echo',
+        ...(owner?.home ? { HOME: owner.home, USER: owner.home.split('/').pop(), LOGNAME: owner.home.split('/').pop() } : {}),
+      },
+    };
+    // 以仓库属主身份跑（服务是 root 时尤甚）—— 别再往 .git 里写 root 对象
+    if (owner && typeof process.getuid === 'function' && process.getuid() === 0 && owner.uid !== 0) {
+      (opts as { uid?: number }).uid = owner.uid;
+      (opts as { gid?: number }).gid = owner.gid;
+    }
+    const { stdout, stderr } = await execFileAsync('git', ['-c', 'safe.directory=*', ...args], opts);
     return { ok: true, stdout: String(stdout).trim(), stderr: String(stderr).trim() };
   } catch (e) {
     const err = e as { stdout?: string; stderr?: string; message?: string; killed?: boolean };
