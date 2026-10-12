@@ -43,6 +43,8 @@ export const APP_ROUTES = [
   'report',
   // 自动更新页（检查/安装新版本）
   'update',
+  // 扫描与清理垃圾
+  'cleanup',
 ] as const
 
 const ROUTE_SET = new Set<string>(APP_ROUTES)

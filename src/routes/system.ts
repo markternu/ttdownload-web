@@ -28,6 +28,7 @@ import {
   tasksReport,
 } from '../services/report';
 import { kickScheduler } from '../core/scheduler';
+import { cleanFromReport, scanJunk } from '../services/junkScan';
 import { asyncHandler, badRequest, notFound } from '../utils/http';
 import type { Settings, Task } from '../types';
 
@@ -566,3 +567,25 @@ systemRouter.get('/free-space', (_req, res) => {
   const settings = getSettingsPublic();
   res.json({ freeBytes: freeBytes(), reserveBytes: effectiveReserve(), usableBytes: usableBytes(effectiveReserve()) });
 });
+
+/* ---------------- 「扫描与清理垃圾」 ---------------- */
+
+systemRouter.get(
+  '/junk',
+  asyncHandler(async (_req, res) => {
+    const report = await scanJunk();
+    res.json(report);
+  }),
+);
+
+systemRouter.post(
+  '/junk/clean',
+  asyncHandler(async (req, res) => {
+    const keys: string[] = Array.isArray(req.body?.categories) ? req.body.categories.map((s: unknown) => String(s)) : [];
+    if (!keys.length) throw badRequest('请先选择要清理的类别', 'EMPTY_CATEGORIES');
+    // 先扫描、立刻按这份报告清理（时差最小，且清理前会逐文件白名单复验）
+    const report = await scanJunk();
+    const r = cleanFromReport(report, keys);
+    res.json({ ...r, junkBytes: report.junkBytes });
+  }),
+);

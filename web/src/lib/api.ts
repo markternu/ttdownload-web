@@ -29,6 +29,8 @@ import type {
   SeedItem,
   SeedListResponse,
   Settings,
+  CleanJunkResult,
+  JunkReport,
   TaskBulkResult,
   UpdateStatus,
   Stats,
@@ -317,6 +319,12 @@ export const api = {
    */
   tasksBulkAction: (ids: number[], action: TaskAction, extra: { deleteFile?: boolean } = {}) =>
     request<TaskBulkResult>('/api/tasks/actions', jsonBody({ ids, action, ...extra })),
+
+  /* ---------------- 「扫描与清理垃圾」 ---------------- */
+
+  junkScan: () => request<JunkReport>('/api/junk'),
+
+  junkClean: (categories: string[]) => request<CleanJunkResult>('/api/junk/clean', jsonBody({ categories })),
 
   /** 按当前筛选条件取**全部**任务 id（「全选（跨页）」用，列表是分页的） */
   taskIds: (query: TaskQuery = {}) =>

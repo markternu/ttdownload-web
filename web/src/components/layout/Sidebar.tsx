@@ -19,6 +19,7 @@ import {
   Video,
   Archive,
   ArrowUpCircle,
+  Trash2,
   X,
   Activity,
 } from 'lucide-react'
@@ -48,6 +49,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/logs', label: '日志', icon: ScrollText, description: '查看 / 过滤 / 下载日志与诊断包' },
   { to: '/report', label: '问题反馈', icon: LifeBuoy, description: '一键下载诊断报告并发给开发者' },
   { to: '/update', label: '更新', icon: ArrowUpCircle, description: '检查并升级服务器上的项目（升级会自动暂停/恢复下载）' },
+  { to: '/cleanup', label: '垃圾清理', icon: Trash2, description: '扫描并一键清理断电/中断留下的临时文件' },
   { to: '/settings', label: '设置', icon: SettingsIcon, description: '下载 / 网络 / 外观 / 系统' },
 ]
 

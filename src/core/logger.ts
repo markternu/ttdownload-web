@@ -64,6 +64,7 @@ export const MARKERS: Record<string, string> = {
   BT_CLEANUP_SHARED: 'BT 目录被其它任务共用，本次不删（防误删别人的源文件）',
   BT_EVICT: '（旧标记，已被 BT_TIMEOUT_GRACE / BT_TIMEOUT_DROP 取代）',
   SETTINGS_MIGRATE: '旧配置自动修正（把历史遗留的错值改回正确值，会写清改了哪一项）',
+  JUNK_CLEAN: '「扫描与清理垃圾」删除的项数与释放空间',
   ANDROID: '安卓端接口调用（鉴权/清单/上报）',
   SETTINGS: '设置读取/更新',
   PROC_SPAWN: '启动外部命令（完整 argv）',

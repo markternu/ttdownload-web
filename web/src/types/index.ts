@@ -445,6 +445,42 @@ export interface TaskBulkResult {
   results: TaskBulkResultItem[]
 }
 
+/* ---------------- 「扫描与清理垃圾」 ---------------- */
+
+export interface JunkItem {
+  path: string
+  name: string
+  sizeBytes: number
+  mtimeMs: number
+  reason: string
+}
+
+export interface JunkCategory {
+  key: string
+  label: string
+  description: string
+  /** 是否参与"一键清理"（false = 只报告） */
+  autoClean: boolean
+  /** RPC 拿不到、本次跳过（不算垃圾） */
+  skipped: boolean
+  items: JunkItem[]
+  totalBytes: number
+}
+
+export interface JunkReport {
+  scannedAt: string
+  categories: JunkCategory[]
+  junkBytes: number
+  junkCount: number
+  breakdown: { dir: string; label: string; bytes: number; exists: boolean }[]
+}
+
+export interface CleanJunkResult {
+  deleted: number
+  freedBytes: number
+  errors: string[]
+}
+
 /** 列表页的状态筛选：「已发布」与「待下载」已合并成一个列表，用这个区分 */
 export type FileStatusFilter = 'all' | 'pending' | 'downloaded'
 /** 各状态计数（筛选徽章 + 「等待最久」用） */

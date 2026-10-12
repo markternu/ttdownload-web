@@ -114,6 +114,11 @@ export async function startAria2Mock({ workDir }) {
         return ok({ version: '1.37.0-mock' });
       case 'aria2.getGlobalStat':
         return ok({ numWaiting: '0', numActive: '0', numStopped: '0' });
+      case 'aria2.tellActive':
+      case 'aria2.tellWaiting':
+      case 'aria2.tellStopped':
+        // 把当前已知任务全报出去（垃圾扫描用它们拼"还活着"的路径集合）
+        return ok([...state.tasks.entries()].map(([gid, t]) => ({ gid, status: t.status, files: [{ path: t.file, selected: 'true' }] })));
       case 'aria2.addUri': {
         state.seq += 1;
         const gid = `mock${state.seq}`;

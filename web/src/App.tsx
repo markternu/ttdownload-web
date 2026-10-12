@@ -20,6 +20,7 @@ const LogsPage = lazy(() => import('./pages/LogsPage'))
 const ReportPage = lazy(() => import('./pages/ReportPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const UpdatePage = lazy(() => import('./pages/UpdatePage'))
+const JunkPage = lazy(() => import('./pages/JunkPage'))
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
 
 export default function App() {
@@ -173,6 +174,14 @@ export default function App() {
               element={
                 <Suspense fallback={<LoadingBlock text="正在读取更新状态…" />}>
                   <UpdatePage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/cleanup"
+              element={
+                <Suspense fallback={<LoadingBlock text="正在扫描垃圾…" />}>
+                  <JunkPage />
                 </Suspense>
               }
             />

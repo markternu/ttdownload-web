@@ -1024,6 +1024,21 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
+  test('垃圾清理页：能扫描并列出各目录占用（不 ssh 也能看清空间去哪了）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const page = await newPage();
+    await page.goto(`${base}/cleanup`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('text=扫描与清理垃圾', { timeout: 15000 });
+    // 扫描完要能看到"各目录占用"（哪怕没扫到垃圾）
+    await page.waitForSelector('text=各目录占用', { timeout: 15000 });
+    // 至少一个分类标题出现（aria2 直链残留 / 视频解析下载残留 / 解密临时文件 …）
+    assert.ok(
+      (await page.locator('text=/aria2 直链残留|视频解析下载残留|解密临时文件/').count()) > 0,
+      '要列出垃圾分类',
+    );
+    await page.close();
+  });
+
   test('页面无 JS 报错', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     assert.deepEqual(pageErrors, [], `浏览器控制台错误：\n${pageErrors.join('\n')}`);
