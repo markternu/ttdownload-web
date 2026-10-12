@@ -242,3 +242,73 @@ test('【接口层】提交多个 `.../download?id=x` 直链：任务标题必�
     await new Promise((r) => server.close(r));
   }
 });
+
+/* ------------------------------------------------------------------ *
+ *  状态查询失败 ≠ 下载失败（用户原话："只要能下载就不管它"）
+ *  —— 真机现象：任务上写着「失败原因：aria2 状态查询失败: This operation was aborted」，
+ *     而 aria2 那边其实还在下；旧代码还把它判失败并重试（重试会再 addUri 一次）。
+ * ------------------------------------------------------------------ */
+
+test('【关键】aria2 状态查询超时：**不许判任务失败**，退避后再查，任务继续下载', async () => {
+  const url = 'https://cdn.example.com/big-file.bin';
+  const task = tasksRepo.create({ module: 'aria2', title: 'big-file.bin', platform: 'URL', url });
+  await aria2Module.start(task);
+  const gid = String(tasksRepo.get(task.id).payload.gid);
+
+  // 让 tellStatus 直接抛超时（模拟 "This operation was aborted"）
+  mock.state.statusThrows = 'This operation was aborted';
+  try {
+    const r1 = await aria2Module.poll(tasksRepo.get(task.id));
+    assert.equal(r1.error, undefined, `状态查询失败绝不能变成任务失败（实际 ${r1.error}）`);
+    const after1 = tasksRepo.get(task.id);
+    assert.equal(after1.status, 'downloading', '任务必须还是"下载中"');
+    assert.equal(after1.payload.statusFailCount, 1, '要记下失败次数');
+    assert.ok(Number(after1.payload.statusRetryAt) > Date.now(), '要退避：一段时间内不再去查（别把整轮轮询拖住）');
+
+    // 退避期内再来一轮 → 直接跳过，连 RPC 都不发
+    const r2 = await aria2Module.poll(tasksRepo.get(task.id));
+    assert.deepEqual(r2, {}, '退避期内直接跳过，不改动任务');
+
+    // 连续失败到第 3 次 → 给一条"提示"（hint），但**依然不是 error**
+    tasksRepo.update(task.id, { payload: { ...tasksRepo.get(task.id).payload, statusFailCount: 2, statusRetryAt: 0 } });
+    const r3 = await aria2Module.poll(tasksRepo.get(task.id));
+    assert.equal(r3.error, undefined);
+    assert.ok(r3.hint && /状态查询/.test(String(r3.hint)), '连续失败要给用户一条提示（hint）');
+
+    // 恢复正常（等退避时间到）→ 计数清零 + hint=null（让上层把提示清掉）
+    mock.state.statusThrows = null;
+    tasksRepo.update(task.id, { payload: { ...tasksRepo.get(task.id).payload, statusRetryAt: 0 } });
+    const r4 = await aria2Module.poll(tasksRepo.get(task.id));
+    assert.equal(r4.hint, null, '恢复后要回 null（清提示），而不是继续挂着');
+    assert.equal(tasksRepo.get(task.id).payload.statusFailCount, 0);
+    assert.equal(tasksRepo.get(task.id).status, 'downloading');
+  } finally {
+    mock.state.statusThrows = null;
+  }
+});
+
+test('【自愈】aria2 里 gid 真的没了（daemon 重启过）：重新加回来继续下，而不是判失败', async () => {
+  const url = 'https://cdn.example.com/lost.bin';
+  const task = tasksRepo.create({ module: 'aria2', title: 'lost.bin', platform: 'URL', url });
+  await aria2Module.start(task);
+  const oldGid = String(tasksRepo.get(task.id).payload.gid);
+  const addsBefore = mock.state.addCalls.length;
+
+  // 模拟"aria2 里查不到这个 gid"
+  mock.state.statusThrows = 'aria2 RPC 错误: GID not found';
+  try {
+    // 头两次先观察（避免偶尔一次查询抖动就重建任务）
+    await aria2Module.poll(tasksRepo.get(task.id));
+    assert.equal(mock.state.addCalls.length, addsBefore, '头一次查不到先别急着重建');
+    const r2 = await aria2Module.poll(tasksRepo.get(task.id));
+    assert.equal(r2.error, undefined);
+    // 第 3 次仍查不到 → 重建
+    await aria2Module.poll(tasksRepo.get(task.id));
+    const after = tasksRepo.get(task.id);
+    assert.ok(mock.state.addCalls.length > addsBefore, '连续查不到要重新 addUri');
+    assert.notEqual(String(after.payload.gid), oldGid, '要换成新的 gid');
+    assert.equal(after.status, 'downloading', '任务继续下载，不判失败');
+  } finally {
+    mock.state.statusThrows = null;
+  }
+});

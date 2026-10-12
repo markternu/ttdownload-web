@@ -471,9 +471,10 @@ export const transmissionModule: ModuleAdapter = {
     // ⚠️ transmission 的状态码：0=停止 1=等待校验 2=校验中 3=等待下载 4=正在下载 5/6=做种。
     //    别把 4 当成"校验中"（那是正在下载）—— 写错的话每个正常任务都会挂一条"校验中"提示。
     const checking = torrent.status === 1 || torrent.status === 2;
-    const checkHint = checking
+    // 不校验时给 null = "把之前那条提示清掉"（不传字段则是"别动"，两种含义不同）
+    const checkHint: string | null = checking
       ? `transmission 正在校验已下载的数据（进度会先掉下去再涨回来，属正常，数据没丢）`
-      : undefined;
+      : null;
     const eta = torrent.eta && torrent.eta > 0 ? torrent.eta : null;
 
     // 进度快照留痕（给 12h/6h 判断用，也方便排查"到底卡在多少"）

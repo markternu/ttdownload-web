@@ -166,6 +166,37 @@ function addOptions(dir: string, name: string, conservative: boolean): Aria2Opti
 }
 
 /**
+ * 用留档的地址**重新加回** aria2（gid 丢了的时候用）。
+ * 保住原来的目录/out/保守模式，恢复后继续下（`continue=true` 会接着下已下好的部分）。
+ * 返回一个"这一轮什么都没变"的 PollResult —— **不是错误**，任务继续跑。
+ */
+async function reAddUri(task: TaskWithPayload, reason: string): Promise<PollResult> {
+  const payload = task.payload ?? {};
+  const { tasksRepo } = await import('../core/db');
+  try {
+    const client = aria2Client();
+    const name = guessFileName(task.url ?? '');
+    const dir = taskDownloadDir(task.id, task.url ?? '', payload);
+    fs.mkdirSync(dir, { recursive: true });
+    const gid = await client.call<string>('aria2.addUri', [[task.url], addOptions(dir, name, payload.singleConnection === true)]);
+    tasksRepo.update(task.id, {
+      status: 'downloading',
+      error: null,
+      payload: { ...payload, gid, reAddedAt: new Date().toISOString(), statusMissingCount: 0, statusFailCount: 0, statusRetryAt: 0 },
+    });
+    taskLog(task.id).mark('ARIA2_RETRY', `${reason} → 已重新加入 aria2（新 gid ${gid}），继续下载`);
+    return {};
+  } catch (e) {
+    // 重新加不进去（daemon 还没起来等）→ 退避后再试，同样不判失败
+    const fails = Number(payload.statusFailCount ?? 0) + 1;
+    tasksRepo.update(task.id, {
+      payload: { ...payload, statusFailCount: fails, statusRetryAt: Date.now() + Math.min(60_000, 5_000 * fails), lastStatusError: (e as Error).message },
+    });
+    return {};
+  }
+}
+
+/**
  * 把任务标题从"占位名"刷成 aria2 解析出来的**真实文件名**。
  *
  * 为什么需要：`.../download?id=123` 这类链接在 URL 里根本没有文件名，
@@ -216,13 +247,61 @@ export const aria2Module: ModuleAdapter = {
     const gid = String(payload.gid ?? '');
     if (!gid) return { error: '缺少 aria2 gid（任务需重试）' };
     const client = aria2Client();
+    const { tasksRepo } = await import('../core/db');
+
+    // 上一次状态查询刚失败过 → 先歇一会儿再查（daemon 忙的时候别死命捶它，
+    // 也避免每个 tick 都白等一个超时把整轮轮询拖住）
+    const retryAt = Number(payload.statusRetryAt ?? 0);
+    if (retryAt > Date.now()) return {};
+
     let st: Aria2Status;
     try {
-      st = await client.call<Aria2Status>('aria2.tellStatus', [gid, ['gid', 'status', 'totalLength', 'completedLength', 'downloadSpeed', 'files', 'errorCode', 'errorMessage', 'dir', 'uris']]);
+      st = await client.call<Aria2Status>('aria2.tellStatus', [gid, ['gid', 'status', 'totalLength', 'completedLength', 'downloadSpeed', 'files', 'errorCode', 'errorMessage', 'dir', 'uris']], 4000);
     } catch (e) {
-      return { error: `aria2 状态查询失败: ${(e as Error).message}` };
+      const msg = String((e as Error).message ?? '');
+      /**
+       * ⚠️ 用户明确要求：**"只是什么查询状态失败，只要能下载就不管它"**。
+       * 这里以前是 `return { error: 'aria2 状态查询失败: …' }` → 调度器 failTask →
+       * 任务被判失败并重试（重试还会再 addUri 一次！），而 aria2 那边其实**下得好好的**。
+       * 现在：
+       *   · "gid 不存在"（aria2 重启过 / 被外部删掉）连续出现 → 用留档的地址**重新加回**，任务继续；
+       *   · 其它（超时/网络抖动/This operation was aborted）→ **绝不让任务失败**，
+       *     只退避一会儿再查，连续多次才写一条提示（下载不受影响）。
+       */
+      if (/not found|GID|No such|未找到/i.test(msg)) {
+        const miss = Number(payload.statusMissingCount ?? 0) + 1;
+        if (miss < 3) {
+          tasksRepo.update(task.id, { payload: { ...payload, statusMissingCount: miss } });
+          return {};
+        }
+        return reAddUri(task, `aria2 里已经没有这个任务（${msg}）`);
+      }
+      const fails = Number(payload.statusFailCount ?? 0) + 1;
+      const backoffMs = Math.min(60_000, 5_000 * fails);
+      tasksRepo.update(task.id, {
+        payload: { ...payload, statusFailCount: fails, statusRetryAt: Date.now() + backoffMs, lastStatusError: msg },
+      });
+      if (fails === 1 || fails % 10 === 0) {
+        logger.child('aria2').warn(
+          `任务 #${task.id} 状态查询失败（第 ${fails} 次，${Math.round(backoffMs / 1000)}s 后再查）：${msg} —— 下载不受影响，不判失败`);
+      }
+      // 连续失败才提示用户（偶尔一次抖动不用打扰）；hint 不是 error，任务照旧在下载
+      return fails >= 3
+        ? { hint: `aria2 状态查询暂时超时（已重试 ${fails} 次，下载不受影响，继续观察）` }
+        : {};
     }
-    if (!st || !st.status) return { error: 'aria2 任务丢失（可能被外部删除）' };
+    if (!st || !st.status) {
+      // RPC 通了但没给状态：同样不判失败
+      const fails = Number(payload.statusFailCount ?? 0) + 1;
+      tasksRepo.update(task.id, { payload: { ...payload, statusFailCount: fails, statusRetryAt: Date.now() + 5000 } });
+      return {};
+    }
+    // 查到了 → 清掉失败计数与那条提示
+    if (payload.statusFailCount || payload.statusMissingCount || payload.statusRetryAt || payload.lastStatusError) {
+      tasksRepo.update(task.id, {
+        payload: { ...payload, statusFailCount: 0, statusMissingCount: 0, statusRetryAt: 0, lastStatusError: null },
+      });
+    }
 
     const total = Number.parseInt(st.totalLength || '0', 10) || 0;
     const completed = Number.parseInt(st.completedLength || '0', 10) || 0;
@@ -288,7 +367,6 @@ export const aria2Module: ModuleAdapter = {
           const name = guessFileName(task.url ?? '');
           const dir = taskDownloadDir(task.id, task.url ?? '', payload);
           const newGid = await client.call<string>('aria2.addUri', [[task.url], addOptions(dir, name, true)]);
-          const { tasksRepo } = await import('../core/db');
           tasksRepo.update(task.id, {
             payload: { ...payload, gid: newGid, singleConnection: true, singleConnectionAt: new Date().toISOString(), lastAria2Error: raw },
             error: null,
@@ -306,9 +384,10 @@ export const aria2Module: ModuleAdapter = {
 
     if (st.status === 'removed') return { error: '任务已被移除' };
     if (st.status === 'paused') {
-      return { status: 'paused', progress, speedBps: 0, totalBytes: total, downloadedBytes: completed };
+      // hint: null = 把之前那条"状态查询超时"提示清掉（查询正常了）
+      return { status: 'paused', progress, speedBps: 0, totalBytes: total, downloadedBytes: completed, hint: null };
     }
-    return { progress, speedBps: speed, etaSec: eta, totalBytes: total, downloadedBytes: completed, expectBytes: total || task.expectBytes };
+    return { progress, speedBps: speed, etaSec: eta, totalBytes: total, downloadedBytes: completed, expectBytes: total || task.expectBytes, hint: null };
   },
 
   async pause(task): Promise<void> {

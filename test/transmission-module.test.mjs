@@ -303,7 +303,7 @@ test('【校验提示】transmission 校验已下载数据时，poll 要带出�
   // 4 = TR_STATUS_DOWNLOAD（正常下载）→ 不能再挂"校验中"（写错状态码就会这样）
   mock.state.status = 4;
   const normal = await bt.transmissionModule.poll(tasksRepo.get(task.id));
-  assert.equal(normal.hint, undefined, '正常下载时不该带"校验中"提示');
+  assert.equal(normal.hint, null, '正常下载时要回 null（让上层把"校验中"提示清掉）');
 
   // 1 = TR_STATUS_CHECK_WAIT（排队等校验）也要提示
   mock.state.status = 1;

@@ -127,6 +127,8 @@ export async function startAria2Mock({ workDir }) {
         return ok(gid);
       }
       case 'aria2.tellStatus': {
+        // 模拟"状态查询本身失败"（超时 / GID 不存在）：下载其实不受影响
+        if (state.statusThrows) return err(1, state.statusThrows);
         const t = state.tasks.get(String(rest[0]));
         if (!t) return err(1, 'not found');
         if (t.forceError) {
@@ -197,6 +199,8 @@ export async function startTransmissionMock({ downloadDir, torrentName = 'Demo',
     complete: false,
     name: torrentName,
     percent: 0.5,
+    /** 让 aria2.tellStatus 直接报错（模拟"状态查询超时"） */
+    statusThrows: null,
     /** 覆盖 transmission 的 status 字段（1=等待校验 / 2=校验中 / 4=正在下载）；null=按 running 推导 */
     status: null,
     rateDownload: 2048,
