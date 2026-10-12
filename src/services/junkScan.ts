@@ -51,6 +51,21 @@ export interface DirBreakdown {
   exists: boolean;
 }
 
+export interface FileListEntry {
+  path: string;
+  name: string;
+  sizeBytes: number;
+  mtimeMs: number;
+}
+
+export interface FileListing {
+  dir: string;
+  label: string;
+  files: FileListEntry[];
+  total: number;
+  truncated: boolean;
+}
+
 export interface JunkReport {
   scannedAt: string;
   categories: JunkCategory[];
@@ -59,6 +74,8 @@ export interface JunkReport {
   junkCount: number;
   /** 各下载目录占用（让用户看清那几十 G 都去哪了） */
   breakdown: DirBreakdown[];
+  /** 关键目录的**原始文件清单**（只读，让用户看清某个目录里到底有哪些文件） */
+  fileListing: FileListing[];
 }
 
 const HOUR = 3600_000;
@@ -176,7 +193,7 @@ function safeRemoveZipstage(p: string): number {
 }
 
 /** aria2 实时任务引用的所有文件路径（拿不到返回 null → 调用方整体跳过 aria2 目录） */
-async function liveAria2Paths(): Promise<Set<string> | null> {
+export async function aria2LivePaths(): Promise<Set<string> | null> {
   const client = aria2Client();
   try {
     const gids = new Set<string>();
@@ -231,6 +248,25 @@ function liveTaskPaths(): Set<string> {
   return set;
 }
 
+/** 列出一个目录里的文件（读专用，不参与清理），最多 cap 条，超了给 truncated + total */
+function listFilesOf(dir: string, cap = 300): { files: FileListEntry[]; total: number; truncated: boolean } {
+  const files: FileListEntry[] = [];
+  let total = 0;
+  try {
+    for (const p of walk(dir)) {
+      const st = statOf(p);
+      if (!st) continue;
+      total += 1;
+      if (files.length < cap) {
+        files.push({ path: p, name: path.basename(p), sizeBytes: st.size, mtimeMs: st.mtime });
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return { files, total, truncated: total > files.length };
+}
+
 export async function scanJunk(): Promise<JunkReport> {
   const now = Date.now();
   const cats: JunkCategory[] = [];
@@ -244,7 +280,7 @@ export async function scanJunk(): Promise<JunkReport> {
 
   // ---- ① aria2 残留（.aria2 控制文件 + 它对应的未下完文件）----
   {
-    const live = await liveAria2Paths();
+    const live = await aria2LivePaths();
     const items: JunkItem[] = [];
     if (live) {
       for (const p of walk(config.dirs.aria2)) {
@@ -371,12 +407,28 @@ export async function scanJunk(): Promise<JunkReport> {
   ];
 
   const cleanable = cats.filter((c) => c.autoClean && !c.skipped);
+
+  // 原始文件清单（只读展示用）—— 用户就想看"某个目录里到底堆了啥"
+  const listingDirs: { dir: string; label: string }[] = [
+    { dir: config.dirs.aria2, label: 'aria2 直链下载区' },
+    { dir: config.dirs.webTools, label: 'yt-dlp 下载区' },
+    { dir: config.dirs.encryptTmp, label: '加密临时区' },
+    { dir: config.dirs.archiveReady, label: '归档完成区' },
+    { dir: config.dirs.consumer, label: '消费者目录（成品）' },
+    { dir: path.join(config.dirs.state, 'original-tmp'), label: '解密临时目录' },
+  ];
+  const fileListing: FileListing[] = listingDirs.map((d) => {
+    const f = listFilesOf(d.dir);
+    return { dir: d.dir, label: d.label, files: f.files, total: f.total, truncated: f.truncated };
+  });
+
   return {
     scannedAt: nowIso(),
     categories: cats,
     junkBytes: cleanable.reduce((n, c) => n + c.totalBytes, 0),
     junkCount: cleanable.reduce((n, c) => n + c.items.length, 0),
     breakdown,
+    fileListing,
   };
 }
 

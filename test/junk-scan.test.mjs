@@ -74,6 +74,10 @@ test('【识别】能扫出各类垃圾：aria2 控制文件、yt-dlp 分片、�
 
   assert.ok(report.junkBytes > 0);
   assert.ok(report.breakdown.some((b) => b.dir === config.dirs.consumer));
+  // 文件清单（只读）也要带出来，让用户看清目录里到底有哪些文件
+  const aria2Listing = report.fileListing.find((l) => l.dir === config.dirs.aria2);
+  assert.ok(aria2Listing, '要有关键目录的文件清单');
+  assert.ok(aria2Listing.files.some((f) => f.name === 'orphan.bin'), '文件清单里要能看见具体文件名');
 });
 
 test('【不误删】正在下载的 aria2 文件 / 正在跑的任务引用 / 刚写完的临时文件 都不进垃圾', async () => {

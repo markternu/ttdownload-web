@@ -19,6 +19,7 @@ import {
 } from './services/cookieHarvest';
 import { startOriginalDownloadWorker, stopOriginalDownloadWorker } from './services/originalDownload';
 import { startUpdateWorker, stopUpdateWorker } from './services/updater';
+import { startAria2HarvestWorker, stopAria2HarvestWorker } from './services/aria2Harvest';
 
 /**
  * 开机自检：用户上传的 cookies.txt 还能不能用（不联网，只看结构与关键字段/过期时间）。
@@ -88,6 +89,7 @@ async function main(): Promise<void> {
   void applyNoLimitPolicy().catch(() => undefined);
   startPipeline();
   startScheduler();
+  startAria2HarvestWorker();
   startBtEvictWorker();
   startBtHarvestWorker();
   startUsbWorker();
@@ -113,6 +115,7 @@ async function main(): Promise<void> {
     logger.mark('BOOT', `收到 ${signal}，正在优雅退出...`);
     stopScheduler();
     stopPipeline();
+    stopAria2HarvestWorker();
     stopBtEvictWorker();
     stopBtHarvestWorker();
     stopUsbWorker();

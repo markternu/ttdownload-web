@@ -103,12 +103,14 @@ export function startJsonRpcServer(handle) {
  * state.complete: Set<gid> 中的任务视为已完成（并确保文件存在、无 .aria2 控制文件）
  */
 export async function startAria2Mock({ workDir }) {
-  const state = { tasks: new Map(), seq: 0, addCalls: [] };
+  const state = { tasks: new Map(), seq: 0, addCalls: [], rpcDown: false };
   const mock = await startJsonRpcServer((msg) => {
     const params = msg.params ?? [];
     const rest = typeof params[0] === 'string' && params[0].startsWith('token:') ? params.slice(1) : params;
     const ok = (result) => ({ body: { jsonrpc: '2.0', id: msg.id, result } });
     const err = (code, message) => ({ body: { jsonrpc: '2.0', id: msg.id, error: { code, message } } });
+    // rpcDown：模拟整个 aria2 RPC 不可用（垃圾扫描/收割要据此"整体跳过"）
+    if (state.rpcDown) return err(1, 'connection refused');
     switch (msg.method) {
       case 'aria2.getVersion':
         return ok({ version: '1.37.0-mock' });

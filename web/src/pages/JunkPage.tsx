@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, HardDrive, RefreshCw, ScanSearch, Trash2 } from 'lucide-react'
+import { AlertTriangle, ChevronRight, FolderOpen, HardDrive, RefreshCw, ScanSearch, Trash2 } from 'lucide-react'
 import { Badge, Button, Card, CardHeader, EmptyState, Spinner } from '../components/ui'
 import { useToast } from '../context/ToastContext'
 import { api } from '../lib/api'
 import { formatBytes } from '../lib/format'
 import { cn } from '../lib/cn'
 import type { JunkReport } from '../types'
+
+/** 毫秒时间戳 → 「MM-DD HH:mm」 */
+function fmtTime(ms: number): string {
+  const d = new Date(ms)
+  if (Number.isNaN(d.getTime())) return ''
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
 
 /**
  * 「扫描与清理垃圾」—— 树莓派长期运行 + 断电重启，会留下各种临时/半成品文件。
@@ -22,6 +30,8 @@ export default function JunkPage() {
   const [scanning, setScanning] = useState(false)
   const [cleaning, setCleaning] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  /** 展开哪个目录的文件清单（默认展开 aria2，用户最关心那 30G） */
+  const [openDir, setOpenDir] = useState<string | null>('aria2 直链下载区')
 
   const scan = useCallback(async () => {
     setScanning(true)
@@ -188,6 +198,50 @@ export default function JunkPage() {
                 })}
               </div>
             )}
+
+            {/* 原始文件清单：看清某个目录里到底堆了啥 */}
+            <div className="mt-5">
+              <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                <FolderOpen className="h-4 w-4" /> 文件清单（只读，看清每个目录里有哪些文件）
+              </h4>
+              <div className="space-y-2">
+                {report.fileListing.map((dir) => (
+                  <div key={dir.dir} className="rounded-xl border border-slate-200 dark:border-slate-800">
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800/50"
+                      onClick={() => setOpenDir((cur) => (cur === dir.label ? null : dir.label))}
+                    >
+                      <span className="flex-1">{dir.label}</span>
+                      <span className="tabular-nums text-xs text-slate-400">{dir.total} 个文件</span>
+                      <ChevronRight className={cn('h-4 w-4 text-slate-400 transition-transform', openDir === dir.label && 'rotate-90')} />
+                    </button>
+                    {openDir === dir.label ? (
+                      <div className="max-h-72 overflow-auto border-t border-slate-100 px-3 py-2 dark:border-slate-800">
+                        {dir.files.length === 0 ? (
+                          <p className="py-2 text-xs text-slate-400">（空）</p>
+                        ) : (
+                          <ul className="space-y-1">
+                            {dir.files.map((f) => (
+                              <li key={f.path} className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                                <span className="min-w-0 flex-1 truncate font-mono" title={f.path}>{f.name}</span>
+                                <span className="shrink-0 tabular-nums text-slate-500">{formatBytes(f.sizeBytes)}</span>
+                                <span className="shrink-0 text-slate-400">{fmtTime(f.mtimeMs)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {dir.truncated ? (
+                          <p className="mt-1 border-t border-slate-100 pt-1 text-[11px] text-slate-400 dark:border-slate-800">
+                            只显示前 {dir.files.length} 个，共 {dir.total} 个
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
 
             {/* 目录占用（看清那几十 G 去哪了） */}
             <div className="mt-5">

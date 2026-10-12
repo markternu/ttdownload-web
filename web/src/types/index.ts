@@ -473,6 +473,13 @@ export interface JunkReport {
   junkBytes: number
   junkCount: number
   breakdown: { dir: string; label: string; bytes: number; exists: boolean }[]
+  fileListing: {
+    dir: string
+    label: string
+    files: { path: string; name: string; sizeBytes: number; mtimeMs: number }[]
+    total: number
+    truncated: boolean
+  }[]
 }
 
 export interface CleanJunkResult {
