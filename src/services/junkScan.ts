@@ -332,14 +332,25 @@ export async function scanJunk(): Promise<JunkReport> {
     push({ key: 'original_tmp', label: '解密临时文件', description: '「下载原始文件」断电后残留的临时解密文件', autoClean: true, skipped: false, items });
   }
 
-  // ---- ④ 加密临时（encryptTmp，>6 小时）----
+  // ---- ④ 加密临时（encryptTmp）----
   {
     const items: JunkItem[] = [];
     for (const p of walk(config.dirs.encryptTmp)) {
       if (liveTask.has(path.resolve(p))) continue;
       const s = statOf(p);
-      if (s && now - s.mtime > 6 * HOUR) {
-        items.push({ path: p, name: path.basename(p), sizeBytes: s.size, mtimeMs: s.mtime, reason: '归档加密中途断电残留的临时文件' });
+      if (!s) continue;
+      const base = path.basename(p);
+      // 我们自己的加密半成品（.enc.*.part）：源还在 archiveReady，随时可删；
+      // 其它文件（老版本崩溃残留）按 >6 小时才算。
+      const isPartial = base.startsWith('.enc.') && base.endsWith('.part');
+      if (isPartial || now - s.mtime > 6 * HOUR) {
+        items.push({
+          path: p,
+          name: base,
+          sizeBytes: s.size,
+          mtimeMs: s.mtime,
+          reason: isPartial ? '加密中途断电留下的半成品（源文件还在，可安全删除）' : '归档加密中途断电残留的临时文件',
+        });
       }
     }
     push({ key: 'encrypt_tmp', label: '加密临时残留', description: '加密中途断电/崩溃留下的中间文件', autoClean: true, skipped: false, items });

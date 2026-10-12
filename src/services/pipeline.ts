@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../core/config';
@@ -146,16 +147,30 @@ async function processEncrypting(): Promise<void> {
         break;
       }
       const base = path.basename(archivePath);
-      const inTmp = moveWithDedup(archivePath, wd.encryptTmp, base);
-      const encrypted = `${inTmp}.data`;
-      const res = await encryptFile(inTmp, encrypted, pwd);
+      /**
+       * ⚠️ 崩溃安全（用户问"断电了怎么办/能不能恢复"）：
+       * 老写法是先把源文件 `move` 进 encryptTmp 再原地加密 —— 一旦中途断电，源文件
+       * 已经不在 archiveReady 了，重启后任务发现 `archivePath` 不存在 → 直接判失败，
+       * 明文源文件还卡在 encryptTmp 里变成没人管的垃圾、数据也没救回来。
+       * 现在：源文件**留在 archiveReady 不动**，加密输出写到临时文件 `.enc.*.part`，
+       * 只有加密成功才删源、才把密文搬去 consumer。断电后源还在 → 重启重新加密即可，不丢数据。
+       */
+      const tmpOut = path.join(wd.encryptTmp, `.enc.${base}.${crypto.randomBytes(3).toString('hex')}.part`);
+      const res = await encryptFile(archivePath, tmpOut, pwd);
       if (!res.ok) {
+        try {
+          fs.rmSync(tmpOut, { force: true });
+        } catch {
+          /* ignore */
+        }
         failed = res.error ?? '未知错误';
         break;
       }
-      fs.rmSync(inTmp, { force: true });
+      const encrypted = path.join(wd.encryptTmp, `${base}.data`);
+      fs.renameSync(tmpOut, encrypted);            // 临时 → 正式（同分区原子改名）
       const stripped = stripExtension(encrypted);
       const finalPath = moveWithDedup(stripped, wd.consumer, path.basename(stripped));
+      fs.rmSync(archivePath, { force: true });     // 密文落位 consumer 之后才删源
       const sizeBytes = fs.statSync(finalPath).size;
       const fileId = filesRepo.add({
         taskId: task.id,
@@ -250,8 +265,42 @@ export async function pipelineTick(): Promise<void> {
   }
 }
 
+/**
+ * 开机清理：删掉上次加密中途断电留下的 `.enc.*.part` 临时文件。
+ *
+ * 为什么能放心删：这些是"加密输出"的**半成品**，源文件还完好地留在 archiveReady
+ * （加密是崩溃安全的，源不会被提前动），重启后任务会重新加密，这些 .part 纯属垃圾。
+ * 两个目录都清：SD 卡的 encryptTmp，以及 U 盘插入时 workDirs() 切过去的 encryptTmp。
+ */
+export function cleanupStaleEncryptParts(): void {
+  const dirs = new Set<string>([config.dirs.encryptTmp]);
+  try {
+    dirs.add(workDirs().encryptTmp);
+  } catch {
+    /* workDirs 没就绪就算了 */
+  }
+  for (const dir of dirs) {
+    try {
+      if (!fs.existsSync(dir)) continue;
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.startsWith('.enc.') || !name.endsWith('.part')) continue;
+        const p = path.join(dir, name);
+        try {
+          fs.rmSync(p, { force: true });
+          logger.child('pipeline').mark('JUNK_CLEAN', `开机清理加密半成品：${name}`);
+        } catch (e) {
+          logger.child('pipeline').warn(`清理加密半成品失败 ${p}：${(e as Error).message}`);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 export function startPipeline(): void {
   if (timer) return;
+  cleanupStaleEncryptParts(); // 开机先清掉断电残留的加密半成品（源还在 archiveReady，可重来）
   timer = setInterval(() => {
     void pipelineTick();
   }, config.pipelineIntervalMs);

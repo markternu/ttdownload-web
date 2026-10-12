@@ -92,9 +92,20 @@ export interface HarvestResult {
  * 收割一次。返回送进归档的文件数。
  * maxPerRun 防呆：一次别灌太多（归档/加密会各写一份，磁盘紧张时先少收点）。
  */
-export async function harvestOrphanAria2(maxPerRun = 20): Promise<HarvestResult> {
+export async function harvestOrphanAria2(maxPerRun = 5): Promise<HarvestResult> {
   const dir = config.dirs.aria2;
   if (!fs.existsSync(dir)) return { archived: 0, skipped: 0, errors: [] };
+
+  /**
+   * 节流：流水线里已经攒着一堆"归档中/加密中"任务时，**先别再灌**。
+   * 加密是串行的（一个文件一个文件来，树莓派 SD 卡上几 GB 一个要几分钟），
+   * 一口气灌 20 个会让用户看到"20 个文件全部加密中、半天加密不好"（其实在排队）。
+   * 等现有任务消化得差不多了再继续收，队列始终保持在个小数字。
+   */
+  const pipelineBacklog = tasksRepo.byStatus(['archiving', 'encrypting']).length;
+  if (pipelineBacklog >= 3) {
+    return { archived: 0, skipped: 0, errors: [] };
+  }
 
   // ⚠️ 拿不到 aria2 实时集合就整体跳过 —— 宁可少收，不误收正在下的文件
   const live = await aria2LivePaths();
