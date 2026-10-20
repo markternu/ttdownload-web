@@ -89,7 +89,12 @@ const mockSource = {
 };
 
 saveStore({
-  sources: [{ kind: 'gutendex', id: 'gutendex', name: 'g', enabled: false }, mockSource],
+  sources: [
+    { kind: 'gutendex', id: 'gutendex', name: 'g', enabled: false },
+    { kind: 'wikisource', id: 'wikisource', name: 'w', enabled: false },
+    { kind: 'html', id: 'bqquge', name: 'bq', enabled: false },
+    mockSource,
+  ],
   rankBoards: [{ key: 'mock-rank', category: 'platform', label: 'mock榜', sourceId: 'mock', url: `${base}/rank`, listSel: '.rank-list li', titleSel: '.name', authorSel: '.author', urlSel: '.name' }],
 });
 
@@ -225,6 +230,9 @@ test('PUT /api/novel/sources：保存后 GET 能读回；坏配置返回 400', a
 /* ---------- 维基文库（wikisource）公版源 ---------- */
 
 test('wikisource：搜索 / 打开整本 / 下载 txt（MediaWiki API）', async () => {
+  // 临时启用 wikisource（全局 store 里默认禁用，避免其它用例打到外网）
+  const { saveStore } = await import('../dist/services/bookSource.js');
+  saveStore({ sources: [{ kind: 'wikisource', id: 'wikisource', name: 'w', enabled: true }, mockSource], rankBoards: [] });
   // 搜索
   const r = await searchNovels('桃花');
   const ws = r.items.find((i) => i.sourceId === 'wikisource');
@@ -242,4 +250,44 @@ test('wikisource：搜索 / 打开整本 / 下载 txt（MediaWiki API）', async
   assert.match(text, /晋太元中，武陵人捕鱼为业/);
   // 剥掉 HTML 标签后的纯文本里不该有 <p>
   assert.doesNotMatch(text, /<p>/);
+});
+
+/* ---------- 内置网文源（笔趣阁模板）选择器锁定 ---------- */
+
+test('笔趣阁源：搜索/详情/目录/正文 选择器能解析（锁死模板，防止改坏）', async () => {
+  const { defaultBookSources } = await import('../dist/services/bookSource.js');
+  const bq = defaultBookSources().find((s) => s.id === 'bqquge');
+  assert.ok(bq && bq.kind === 'html', '要内置 bqquge 网文源');
+
+  // 搜索（.item / h3 a / a[href^="/zuozhe/"]）
+  const soHtml = `<div class="item"><h3><a href="/5">玄鉴仙族</a></h3><a href="/zuozhe/季越人">作者：季越人</a></div>`;
+  const items = searchByHtmlSource(bq, soHtml, 'https://www.bqquge.org');
+  assert.equal(items.length, 1);
+  assert.equal(items[0].title, '玄鉴仙族');
+  assert.equal(items[0].author, '季越人', '作者前缀"作者："要剥掉');
+  assert.equal(items[0].url, 'https://www.bqquge.org/5');
+
+  // 详情（h1 / .booktxt a / .des / #list a）
+  const bookHtml = `<h1>夜无疆</h1><div class="booktxt"><a href="/zuozhe/辰东">作者：辰东</a></div><div class="des">那一天太阳落下</div><div id="list"><a href="/1/1">第1章 永夜</a><a href="/1/2">第2章 火泉</a></div>`;
+  const book = parseBookByHtmlSource(bq, bookHtml, 'https://www.bqquge.org');
+  assert.equal(book.title, '夜无疆');
+  assert.equal(book.author, '辰东');
+  assert.equal(book.chapters.length, 2);
+  assert.equal(book.intro, '那一天太阳落下');
+
+  // 正文（.con，去掉 h1 章名）
+  const chHtml = `<div class="con"><h1>第1章 永夜</h1><p>正文段落内容</p></div>`;
+  const content = parseChapterByHtmlSource(bq, chHtml);
+  assert.match(content, /正文段落内容/);
+  assert.doesNotMatch(content, /第1章 永夜/, '正文里要把章名 h1 去掉');
+});
+
+test('榜单：内置了平台榜(热榜) + 玄幻/仙侠/穿越/科幻等类型榜', async () => {
+  const { defaultRankBoards } = await import('../dist/services/bookSource.js');
+  const all = defaultRankBoards();
+  const boards = { platform: all.filter((b) => b.category === 'platform'), genre: all.filter((b) => b.category === 'genre') };
+  assert.ok(boards.platform.some((b) => b.key === 'bq-hot'), '要有平台榜');
+  for (const k of ['bq-xuanhuan', 'bq-xianxia', 'bq-chuanyue', 'bq-kehuan']) {
+    assert.ok(boards.genre.some((b) => b.key === k), `要有类型榜 ${k}`);
+  }
 });

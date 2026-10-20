@@ -4,7 +4,14 @@
 > `state/book-sources.json`（DOWNLOAD_ROOT/state/book-sources.json），可随时改、
 > 改完不用重启（每次请求都会重新读）。
 
-内置两个**开箱即用的合法公版源**：
+内置三个**开箱即用的源**（2 公版 + 1 网文）：
+
+- `gutendex`：古登堡计划（Project Gutenberg）公版电子书，搜索 + 下载整本纯文本；
+- `wikisource`：维基文库（Wikisource）中文公版作品，MediaWiki 公开 API；
+- `bqquge`：笔趣阁（bqquge.org）**网文**，搜索 `/so/{q}`、正文 `.con`、目录 `#list`、
+  榜单 `/paihang` + 分类页（玄幻/仙侠/穿越/科幻/悬疑/奇幻/武侠/都市/历史/言情）。
+
+公版两个源：
 
 - `gutendex`：古登堡计划（Project Gutenberg）公版电子书，搜索 + 下载整本纯文本；
 - `wikisource`：维基文库（Wikisource）中文公版作品，走 MediaWiki 公开 API，
@@ -86,6 +93,15 @@
 - **类型榜**：科幻/玄幻/修仙/穿越等各配一条，`category: "genre"`（把榜单 URL 换成该类型榜即可）。
 
 ---
+
+## 二点五、再加一个网文源（同模板镜像）
+
+`bqquge` 是"笔趣阁模板"的标杆源。**很多镜像站结构完全一致**（`/so/`、`.item`、`#list`、
+`.con`、`/paihang`），你只要在「书源管理」里复制 `bqquge` 这条 JSON，把 `id`/`name`/
+`baseUrl`/`searchUrl` 换成新域名即可，选择器一字不改。多配几个镜像，聚合搜索时谁挂都不怕。
+
+> 注意：不是所有笔趣阁站都这套模板（有些用 `/search.php`、`id="content"` 老模板）。
+> 换站时先手动打开它的搜索/正文页确认选择器对得上。
 
 ## 三、怎么拿到真实书源
 

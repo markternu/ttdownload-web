@@ -130,6 +130,11 @@ function clean(s: string): string {
   return String(s ?? '').replace(/\s+/g, ' ').trim();
 }
 
+/** 作者字段常带"作者："前缀，剥掉它（"作者：辰东" -> "辰东"） */
+function cleanAuthor(s: string): string {
+  return clean(s).replace(/^作者[：:]\s*/, '');
+}
+
 function abs(href: string | undefined, base: string): string {
   if (!href) return '';
   try {
@@ -189,7 +194,7 @@ export function searchByHtmlSource(source: HtmlBookSource, html: string, baseUrl
       sourceId: source.id,
       sourceName: source.name,
       title,
-      author: clean(find(node, source.searchAuthorSel).text()) || '未知',
+      author: cleanAuthor(find(node, source.searchAuthorSel).text()) || '未知',
       url,
       cover: source.searchCoverSel ? abs(find(node, source.searchCoverSel).attr('src'), baseUrl) || undefined : undefined,
       intro: source.searchIntroSel ? clean(find(node, source.searchIntroSel).text()) || undefined : undefined,
@@ -210,7 +215,7 @@ export function parseBookByHtmlSource(source: HtmlBookSource, html: string, base
   });
   return {
     title,
-    author: source.bookAuthorSel ? clean(find($('body'), source.bookAuthorSel).text()) || '未知' : '未知',
+    author: source.bookAuthorSel ? cleanAuthor(find($('body'), source.bookAuthorSel).text()) || '未知' : '未知',
     intro: source.bookIntroSel ? clean(find($('body'), source.bookIntroSel).text()) : '',
     cover: source.bookCoverSel ? abs(find($('body'), source.bookCoverSel).attr('src'), baseUrl) || undefined : undefined,
     chapters,
@@ -335,26 +340,28 @@ export function defaultBookSources(): BookSource[] {
   return [
     { kind: 'gutendex', id: 'gutendex', name: '古登堡计划（公版书）', enabled: true },
     { kind: 'wikisource', id: 'wikisource', name: '维基文库（公版书）', enabled: true },
-    // 示例：一个通用的网页书源（默认不启用，格式参考 docs/BOOK-SOURCE.md）
-    // 换成真实的起点/番茄/七猫/笔趣阁源时，把 enabled 打开，或直接在网页/文件里新增。
+    // 网文源：笔趣阁（bqquge.org），搜索 /so/{q}、正文 .con、目录 #list、榜单 /paihang + 分类页。
+    // 这是同一套"笔趣阁模板"，很多镜像站结构一致 —— 换 baseUrl 即可套用（见 docs/BOOK-SOURCE.md）。
     {
       kind: 'html',
-      id: 'demo',
-      name: '示例网页源（未启用）',
-      enabled: false,
-      baseUrl: 'https://www.example.com',
-      searchUrl: 'https://www.example.com/search?kw={q}',
-      searchListSel: '.result',
-      searchTitleSel: '.title',
-      searchUrlSel: 'a',
-      searchAuthorSel: '.author',
+      id: 'bqquge',
+      name: '笔趣阁（网文）',
+      enabled: true,
+      baseUrl: 'https://www.bqquge.org',
+      encoding: 'utf-8',
+      searchUrl: 'https://www.bqquge.org/so/{q}',
+      searchListSel: '.item',
+      searchTitleSel: 'h3 a',
+      searchAuthorSel: 'a[href^="/zuozhe/"]',
+      searchUrlSel: 'h3 a',
       bookTitleSel: 'h1',
-      bookAuthorSel: '.author',
-      catalogListSel: '.catalog li',
-      catalogTitleSel: 'a',
-      catalogUrlSel: 'a',
-      chapterContentSel: '.content',
-      removeSel: ['.ad', 'script', 'style'],
+      bookAuthorSel: '.booktxt a[href^="/zuozhe/"]',
+      bookIntroSel: '.des',
+      catalogListSel: '#list a',
+      catalogTitleSel: '.',
+      catalogUrlSel: '.',
+      chapterContentSel: '.con',
+      removeSel: ['h1', 'script', 'style'],
     },
   ];
 }
@@ -385,13 +392,24 @@ function storeFile(): string {
 }
 
 export function defaultRankBoards(): RankBoard[] {
-  // 榜单是"书源 + 榜单页选择器"的组合。默认给几个占位（source 未启用时页面显示"暂无数据"），
-  // 接真实书源后在这里/文件里改成真实榜单 URL 与选择器即可。
+  // 榜单 = 书源 + 榜单页选择器。笔趣阁（bqquge）的搜索结果/榜单/分类页都长一个样：
+  //   <div class="item"> <h3><a href="/id">书名</a></h3> <a href="/zuozhe/xx">作者：xx</a> ...
+  const item = { listSel: '.item', titleSel: 'h3 a', urlSel: 'h3 a', authorSel: 'a[href^="/zuozhe/"]' };
+  const bq = 'https://www.bqquge.org';
   return [
-    { key: 'platform-qidian', category: 'platform', label: '起点 · 热门', sourceId: 'demo', url: '', listSel: '.rank-list li', titleSel: '.name', urlSel: 'a' },
-    { key: 'platform-fanqie', category: 'platform', label: '番茄 · 热榜', sourceId: 'demo', url: '', listSel: '.rank-list li', titleSel: '.name', urlSel: 'a' },
-    { key: 'genre-xuanhuan', category: 'genre', label: '玄幻 · 热榜', sourceId: 'demo', url: '', listSel: '.rank-list li', titleSel: '.name', urlSel: 'a' },
-    { key: 'genre-kehuan', category: 'genre', label: '科幻 · 热榜', sourceId: 'demo', url: '', listSel: '.rank-list li', titleSel: '.name', urlSel: 'a' },
+    // 平台榜（笔趣阁总热榜）
+    { key: 'bq-hot', category: 'platform', label: '笔趣阁 · 热榜', sourceId: 'bqquge', url: `${bq}/paihang`, ...item },
+    // 类型榜（笔趣阁分类页）
+    { key: 'bq-xuanhuan', category: 'genre', label: '玄幻', sourceId: 'bqquge', url: `${bq}/xuanhuan`, ...item },
+    { key: 'bq-xianxia', category: 'genre', label: '仙侠', sourceId: 'bqquge', url: `${bq}/xianxia`, ...item },
+    { key: 'bq-chuanyue', category: 'genre', label: '穿越', sourceId: 'bqquge', url: `${bq}/chuanyue`, ...item },
+    { key: 'bq-kehuan', category: 'genre', label: '科幻', sourceId: 'bqquge', url: `${bq}/kehuan`, ...item },
+    { key: 'bq-xuanyi', category: 'genre', label: '悬疑', sourceId: 'bqquge', url: `${bq}/xuanyi`, ...item },
+    { key: 'bq-qihuan', category: 'genre', label: '奇幻', sourceId: 'bqquge', url: `${bq}/qihuan`, ...item },
+    { key: 'bq-wuxia', category: 'genre', label: '武侠', sourceId: 'bqquge', url: `${bq}/wuxia`, ...item },
+    { key: 'bq-dushi', category: 'genre', label: '都市', sourceId: 'bqquge', url: `${bq}/dushi`, ...item },
+    { key: 'bq-lishi', category: 'genre', label: '历史', sourceId: 'bqquge', url: `${bq}/lishi`, ...item },
+    { key: 'bq-yanqing', category: 'genre', label: '言情', sourceId: 'bqquge', url: `${bq}/yanqing`, ...item },
   ];
 }
 
