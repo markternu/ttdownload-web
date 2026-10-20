@@ -151,3 +151,13 @@ test('书源持久化：saveStore 之后 loadStore 能读回自定义源', () =>
   assert.ok(st.sources.some((s) => s.id === 'mock' && s.enabled === true));
   assert.ok(st.sources.some((s) => s.id === 'gutendex' && s.enabled === false));
 });
+
+test('【只要txt】gutendex 优先取 txt，没有 txt 才退回 html（下载时剥标签转txt）', async () => {
+  const { pickGutendexText } = await import('../dist/services/bookSource.js');
+  // 有 txt → 用 txt
+  assert.deepEqual(pickGutendexText({ 'text/plain': 'a.txt', 'application/epub+zip': 'a.epub' }), { url: 'a.txt', isHtml: false });
+  // 只有 html → 退回 html 并标记 isHtml（下载时转 txt）
+  assert.deepEqual(pickGutendexText({ 'text/html': 'a.html' }), { url: 'a.html', isHtml: true });
+  // 都没有 → 空
+  assert.deepEqual(pickGutendexText({ 'application/epub+zip': 'a.epub' }), { isHtml: false });
+});

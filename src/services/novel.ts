@@ -62,8 +62,7 @@ export async function getNovelChapter(sourceId: string, url: string): Promise<{ 
   if (src.kind === 'gutendex') {
     // gutendex 是整本书一个文本，没有"章节"概念 —— 直接给全文
     const book = await getGutendexBook(url);
-    const text = book.plainTextUrl ? await fetchText(book.plainTextUrl) : '';
-    return { title: book.title, content: text };
+    return { title: book.title, content: await fetchBookText(book) };
   }
   const html = await fetchHtml(url, src.encoding ?? 'utf-8');
   // 章节标题优先从 URL 里取个兜底，真正标题在下载时用目录名
@@ -82,6 +81,16 @@ async function fetchText(url: string): Promise<string> {
   }
 }
 
+/** 取 gutendex 整本正文：优先 txt；**只有 html 时剥标签转成 txt**（用户要求：只要 txt，没有就转成 txt） */
+async function fetchBookText(book: NovelBook): Promise<string> {
+  if (!book.plainTextUrl) return '';
+  const raw = await fetchText(book.plainTextUrl);
+  if (!book.plainTextIsHtml) return raw;
+  const $ = cheerio.load(raw);
+  $('script,style').remove();
+  return $('body').text().replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 /** 下载整本书 → 拼接成 txt（返回文件名 + 文本）。章节并发抓取（上限 4）。 */
 export async function downloadNovelTxt(sourceId: string, url: string): Promise<{ filename: string; text: string }> {
   const src = sourceById(sourceId);
@@ -94,7 +103,7 @@ export async function downloadNovelTxt(sourceId: string, url: string): Promise<{
   if (src.kind === 'gutendex') {
     const book = await getGutendexBook(url);
     title = book.title;
-    fullText = book.plainTextUrl ? await fetchText(book.plainTextUrl) : '';
+    fullText = await fetchBookText(book);
     chapters = [];
   } else {
     const html0 = await fetchHtml(url, src.encoding ?? 'utf-8');

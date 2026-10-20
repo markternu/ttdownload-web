@@ -88,6 +88,8 @@ export interface NovelBook {
   chapters: NovelChapter[];
   /** gutendex 公版书的纯文本下载地址 */
   plainTextUrl?: string;
+  /** gutendex 若只有 html、没有 txt，此标记为 true（下载时剥标签转成 txt） */
+  plainTextIsHtml?: boolean;
 }
 
 export interface RankBoard {
@@ -243,15 +245,26 @@ export async function searchGutendex(q: string): Promise<NovelSearchItem[]> {
   return (data.results ?? []).slice(0, 30).map(gutendexItem);
 }
 
+/** 从 gutendex 的 formats 里挑"最能转成 txt"的那个：txt 优先，否则 html（下载时剥标签） */
+export function pickGutendexText(formats: Record<string, string> | undefined): { url?: string; isHtml: boolean } {
+  const f = formats ?? {};
+  const plain = f['text/plain'] ?? f['text/plain; charset=utf-8'] ?? f['text/plain; charset=us-ascii'];
+  if (plain) return { url: plain, isHtml: false };
+  const html = f['text/html'] ?? f['text/html; charset=utf-8'];
+  if (html) return { url: html, isHtml: true };
+  return { isHtml: false };
+}
+
 export async function getGutendexBook(id: string): Promise<NovelBook> {
   const data = await fetchJson<GutendexResult>(`https://gutendex.com/books/${encodeURIComponent(id)}`);
-  const plain = data.formats?.['text/plain'] ?? data.formats?.['text/plain; charset=utf-8'] ?? data.formats?.['text/plain; charset=us-ascii'];
+  const text = pickGutendexText(data.formats);
   return {
     title: clean(data.title),
     author: (data.authors ?? []).map((a) => a.name).join('、') || '佚名',
     intro: '古登堡计划（Project Gutenberg）公版电子书。',
     chapters: [],
-    plainTextUrl: plain,
+    plainTextUrl: text.url,
+    plainTextIsHtml: text.isHtml,
   };
 }
 
