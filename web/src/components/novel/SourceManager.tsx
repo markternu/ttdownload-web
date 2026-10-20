@@ -138,7 +138,7 @@ export function SourceManager({ open, onClose }: { open: boolean; onClose: () =>
                 <div className="min-w-0 flex-1">
                   <span className="font-medium text-slate-800 dark:text-slate-100">{s.name}</span>
                   <span className="ml-2 font-mono text-xs text-slate-400">{s.id}</span>
-                  <Badge tone={s.kind === 'gutendex' ? 'success' : 'info'}>{s.kind === 'gutendex' ? '公版' : '网页'}</Badge>
+                  <Badge tone={s.kind === 'html' ? 'info' : 'success'}>{s.kind === 'html' ? '网页' : '公版'}</Badge>
                 </div>
                 <Switch checked={s.enabled !== false} onChange={(v) => void toggleSource(s.id, v)} disabled={busy} />
                 <button type="button" title="删除" className="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={() => void removeSource(s.id)}>

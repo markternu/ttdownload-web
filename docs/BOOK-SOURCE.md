@@ -4,9 +4,13 @@
 > `state/book-sources.json`（DOWNLOAD_ROOT/state/book-sources.json），可随时改、
 > 改完不用重启（每次请求都会重新读）。
 
-内置一个**开箱即用的合法公版源**：
+内置两个**开箱即用的合法公版源**：
 
-- `gutendex`：古登堡计划（Project Gutenberg）公版电子书，搜索 + 下载整本纯文本。
+- `gutendex`：古登堡计划（Project Gutenberg）公版电子书，搜索 + 下载整本纯文本；
+- `wikisource`：维基文库（Wikisource）中文公版作品，走 MediaWiki 公开 API，
+  搜索 + 直接拿正文文本（整本一页，下载就是纯 txt）。
+
+两个源都是"整本一页、无章节目录"的公版源；想要带目录的连载小说，按下面格式加 `html` 源。
 
 其余平台（起点/晋江/番茄/七猫/笔趣阁等）需要按下面的格式**自己加**（你已确认允许
 "书源能抓到就下载"，但平台有反爬、书源会失效，需要持续维护）。

@@ -62,7 +62,14 @@ export interface GutendexSource {
   enabled?: boolean;
 }
 
-export type BookSource = HtmlBookSource | GutendexSource;
+export interface WikisourceSource {
+  kind: 'wikisource';
+  id: string;
+  name: string;
+  enabled?: boolean;
+}
+
+export type BookSource = HtmlBookSource | GutendexSource | WikisourceSource;
 
 export interface NovelSearchItem {
   sourceId: string;
@@ -90,6 +97,8 @@ export interface NovelBook {
   plainTextUrl?: string;
   /** gutendex 若只有 html、没有 txt，此标记为 true（下载时剥标签转成 txt） */
   plainTextIsHtml?: boolean;
+  /** wikisource 这类"整本一页"的源：打开书时就把全文剥好存这里（下载/阅读直接用） */
+  fullText?: string;
 }
 
 export interface RankBoard {
@@ -241,7 +250,7 @@ function gutendexItem(r: GutendexResult): NovelSearchItem {
 }
 
 export async function searchGutendex(q: string): Promise<NovelSearchItem[]> {
-  const data = await fetchJson<GutendexResponse>(`https://gutendex.com/books?search=${encodeURIComponent(q)}`);
+  const data = await fetchJson<GutendexResponse>(`${config.novel.gutendexBase}/books?search=${encodeURIComponent(q)}`);
   return (data.results ?? []).slice(0, 30).map(gutendexItem);
 }
 
@@ -256,7 +265,7 @@ export function pickGutendexText(formats: Record<string, string> | undefined): {
 }
 
 export async function getGutendexBook(id: string): Promise<NovelBook> {
-  const data = await fetchJson<GutendexResult>(`https://gutendex.com/books/${encodeURIComponent(id)}`);
+  const data = await fetchJson<GutendexResult>(`${config.novel.gutendexBase}/books/${encodeURIComponent(id)}`);
   const text = pickGutendexText(data.formats);
   return {
     title: clean(data.title),
@@ -269,12 +278,63 @@ export async function getGutendexBook(id: string): Promise<NovelBook> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  维基文库（Wikisource）—— 中文公版，MediaWiki API，直接拿正文文本      */
+/* ------------------------------------------------------------------ */
+
+interface WsSearchResponse {
+  query?: { search?: { title: string; snippet?: string }[] };
+}
+interface WsParseResponse {
+  parse?: { title?: string; text?: string };
+}
+
+/** 去掉 wikisource 摘要里的 HTML 标签 */
+function stripHtml(html: string): string {
+  return cheerio.load(`<body>${html}</body>`)('body').text().replace(/\s+/g, ' ').trim();
+}
+
+export async function searchWikisource(q: string): Promise<NovelSearchItem[]> {
+  const url = `${config.novel.wikisourceBase}/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=30&format=json&formatversion=2`;
+  const data = await fetchJson<WsSearchResponse>(url);
+  return (data.query?.search ?? []).map((r) => ({
+    sourceId: 'wikisource',
+    sourceName: '维基文库（公版）',
+    title: clean(r.title),
+    author: '维基文库',
+    url: r.title,
+    intro: r.snippet ? stripHtml(r.snippet) : undefined,
+  }));
+}
+
+/** 取 wikisource 某页的正文（MediaWiki parse → HTML → 剥标签成纯文本） */
+export async function fetchWikisourceText(title: string): Promise<string> {
+  const url = `${config.novel.wikisourceBase}/w/api.php?action=parse&page=${encodeURIComponent(title)}&prop=text&format=json&formatversion=2`;
+  const data = await fetchJson<WsParseResponse>(url);
+  const html = data.parse?.text ?? '';
+  const $ = cheerio.load(html);
+  $('script,style,.mw-editsection').remove();
+  return $('body').text().replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+export async function getWikisourceBook(title: string): Promise<NovelBook> {
+  const fullText = await fetchWikisourceText(title);
+  return {
+    title: clean(title),
+    author: '维基文库',
+    intro: '维基文库（Wikisource）公有领域作品。',
+    chapters: [],
+    fullText,
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /*  书源清单（可持久化到 state/book-sources.json，用户可自行增删）        */
 /* ------------------------------------------------------------------ */
 
 export function defaultBookSources(): BookSource[] {
   return [
     { kind: 'gutendex', id: 'gutendex', name: '古登堡计划（公版书）', enabled: true },
+    { kind: 'wikisource', id: 'wikisource', name: '维基文库（公版书）', enabled: true },
     // 示例：一个通用的网页书源（默认不启用，格式参考 docs/BOOK-SOURCE.md）
     // 换成真实的起点/番茄/七猫/笔趣阁源时，把 enabled 打开，或直接在网页/文件里新增。
     {

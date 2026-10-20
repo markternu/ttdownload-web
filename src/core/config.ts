@@ -199,6 +199,15 @@ export const config = {
     extraArgs: str(process.env.YTDLP_EXTRA_ARGS, ''),
   },
 
+  /**
+   * 小说资源模块：内置公版源的 API 基址（可被环境变量覆盖，测试/镜像站用）。
+   * gutendex=古登堡计划；wikisource=维基文库（中文公版，MediaWiki API）。
+   */
+  novel: {
+    gutendexBase: str(process.env.GUTENDEX_BASE, 'https://gutendex.com'),
+    wikisourceBase: str(process.env.WIKISOURCE_BASE, 'https://zh.wikisource.org'),
+  },
+
   /** 调度器/流水线节拍（毫秒，测试可调小） */
   schedulerIntervalMs: num(process.env.SCHEDULER_INTERVAL_MS, 3000),
   pipelineIntervalMs: num(process.env.PIPELINE_INTERVAL_MS, 5000),

@@ -30,6 +30,20 @@ const server = http.createServer((req, res) => {
   } else if (/^\/ch\//.test(u.pathname)) {
     const n = Number(u.pathname.split('/').pop());
     res.end(`<div class="content">${chapters[n] ?? '空'}</div>`);
+  } else if (u.pathname === '/w/api.php') {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    if (u.searchParams.get('list') === 'search') {
+      const q = u.searchParams.get('srsearch') ?? '';
+      // 只对含"桃花"的搜索返回结果，避免干扰其它用例的"聚合搜索"计数
+      const results = q.includes('桃花')
+        ? [{ title: '桃花源记', snippet: '<span class="searchmatch">桃花源记</span> 是陶渊明的作品。' }]
+        : [];
+      res.end(JSON.stringify({ query: { search: results } }));
+    } else if (u.searchParams.get('action') === 'parse') {
+      res.end(JSON.stringify({ parse: { title: '桃花源记', text: '<p>晋太元中，武陵人捕鱼为业。</p><p>缘溪行，忘路之远近。</p>' } }));
+    } else {
+      res.end('{}');
+    }
   } else if (u.pathname === '/rank') {
     res.end(`<ul class="rank-list"><li><a class="name" href="/book/1">星辰大海</a><span class="author">张三</span></li></ul>`);
   } else {
@@ -50,6 +64,7 @@ const { saveStore, loadStore, searchByHtmlSource, parseBookByHtmlSource, parseCh
 const { searchNovels, getNovelBook, getNovelChapter, downloadNovelTxt, fetchBoard, listBoards } =
   await import('../dist/services/novel.js');
 const { config } = await import('../dist/core/config.js');
+config.novel.wikisourceBase = base;   // 让 wikisource 源走本地 mock
 
 const mockSource = {
   kind: 'html',
@@ -204,4 +219,27 @@ test('PUT /api/novel/sources：保存后 GET 能读回；坏配置返回 400', a
   } finally {
     await new Promise((r) => srv.close(r));
   }
+});
+
+
+/* ---------- 维基文库（wikisource）公版源 ---------- */
+
+test('wikisource：搜索 / 打开整本 / 下载 txt（MediaWiki API）', async () => {
+  // 搜索
+  const r = await searchNovels('桃花');
+  const ws = r.items.find((i) => i.sourceId === 'wikisource');
+  assert.ok(ws, '要能搜到维基文库的结果');
+  assert.equal(ws.title, '桃花源记');
+
+  // 打开书 → fullText
+  const book = await getNovelBook('wikisource', '桃花源记');
+  assert.match(String(book.fullText), /晋太元中/);
+  assert.match(String(book.fullText), /武陵人/);
+
+  // 下载 txt
+  const { filename, text } = await downloadNovelTxt('wikisource', '桃花源记');
+  assert.match(filename, /桃花源记\.txt/);
+  assert.match(text, /晋太元中，武陵人捕鱼为业/);
+  // 剥掉 HTML 标签后的纯文本里不该有 <p>
+  assert.doesNotMatch(text, /<p>/);
 });

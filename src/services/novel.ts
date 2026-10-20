@@ -19,6 +19,9 @@ import {
   parseChapterByHtmlSource,
   searchByHtmlSource,
   searchGutendex,
+  searchWikisource,
+  getWikisourceBook,
+  fetchWikisourceText,
   type HtmlBookSource,
 } from './bookSource';
 
@@ -37,6 +40,8 @@ export async function searchNovels(q: string): Promise<{ items: NovelSearchItem[
     try {
       if (src.kind === 'gutendex') {
         items.push(...(await searchGutendex(q)));
+      } else if (src.kind === 'wikisource') {
+        items.push(...(await searchWikisource(q)));
       } else {
         const html = await fetchHtml(src.searchUrl.replace('{q}', encodeURIComponent(q)), src.encoding ?? 'utf-8');
         items.push(...searchByHtmlSource(src, html.html, html.finalUrl));
@@ -52,6 +57,7 @@ export async function getNovelBook(sourceId: string, url: string): Promise<Novel
   const src = sourceById(sourceId);
   if (!src) throw new Error(`书源不存在：${sourceId}`);
   if (src.kind === 'gutendex') return getGutendexBook(url);
+  if (src.kind === 'wikisource') return getWikisourceBook(url);
   const html = await fetchHtml(url, src.encoding ?? 'utf-8');
   return parseBookByHtmlSource(src, html.html, html.finalUrl);
 }
@@ -63,6 +69,10 @@ export async function getNovelChapter(sourceId: string, url: string): Promise<{ 
     // gutendex 是整本书一个文本，没有"章节"概念 —— 直接给全文
     const book = await getGutendexBook(url);
     return { title: book.title, content: await fetchBookText(book) };
+  }
+  if (src.kind === 'wikisource') {
+    // 维基文库也是整本一页
+    return { title: url, content: await fetchWikisourceText(url) };
   }
   const html = await fetchHtml(url, src.encoding ?? 'utf-8');
   // 章节标题优先从 URL 里取个兜底，真正标题在下载时用目录名
@@ -104,6 +114,10 @@ export async function downloadNovelTxt(sourceId: string, url: string): Promise<{
     const book = await getGutendexBook(url);
     title = book.title;
     fullText = await fetchBookText(book);
+    chapters = [];
+  } else if (src.kind === 'wikisource') {
+    title = url;
+    fullText = await fetchWikisourceText(url);
     chapters = [];
   } else {
     const html0 = await fetchHtml(url, src.encoding ?? 'utf-8');
