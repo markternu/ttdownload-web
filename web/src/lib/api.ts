@@ -31,6 +31,10 @@ import type {
   Settings,
   CleanJunkResult,
   JunkReport,
+  NovelBook,
+  NovelRankBoard,
+  NovelRankItem,
+  NovelSearchResponse,
   TaskBulkResult,
   UpdateStatus,
   Stats,
@@ -319,6 +323,15 @@ export const api = {
    */
   tasksBulkAction: (ids: number[], action: TaskAction, extra: { deleteFile?: boolean } = {}) =>
     request<TaskBulkResult>('/api/tasks/actions', jsonBody({ ids, action, ...extra })),
+
+  /* ---------------- 小说资源 ---------------- */
+
+  novelSearch: (q: string) => request<NovelSearchResponse>('/api/novel/search', {}, { q }),
+  novelBook: (source: string, url: string) => request<NovelBook>('/api/novel/book', {}, { source, url }),
+  novelChapter: (source: string, url: string) => request<{ title: string; content: string }>('/api/novel/chapter', {}, { source, url }),
+  novelDownloadUrl: (source: string, url: string): string => buildUrl('/api/novel/download', { source, url }),
+  novelBoards: () => request<{ platform: NovelRankBoard[]; genre: NovelRankBoard[] }>('/api/novel/boards'),
+  novelBoard: (key: string) => request<{ items: NovelRankItem[] }>('/api/novel/board', {}, { key }),
 
   /* ---------------- 「扫描与清理垃圾」 ---------------- */
 

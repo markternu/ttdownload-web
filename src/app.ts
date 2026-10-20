@@ -17,6 +17,7 @@ import { originalRouter } from './routes/original';
 import { androidRouter } from './routes/android';
 import { usbRouter } from './routes/usb';
 import { updateRouter } from './routes/update';
+import { novelRouter } from './routes/novel';
 
 export function createApp(): express.Express {
   const app = express();
@@ -69,6 +70,7 @@ export function createApp(): express.Express {
   app.use('/api/android', androidRouter);
   app.use('/api', usbRouter);
   app.use('/api', updateRouter);
+  app.use('/api/novel', novelRouter);
 
   app.get('/api', (_req, res) => {
     res.json({

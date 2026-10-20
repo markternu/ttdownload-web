@@ -21,6 +21,8 @@ const ReportPage = lazy(() => import('./pages/ReportPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const UpdatePage = lazy(() => import('./pages/UpdatePage'))
 const JunkPage = lazy(() => import('./pages/JunkPage'))
+const NovelPage = lazy(() => import('./pages/NovelPage'))
+const NovelRankPage = lazy(() => import('./pages/NovelRankPage'))
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
 
 export default function App() {
@@ -182,6 +184,30 @@ export default function App() {
               element={
                 <Suspense fallback={<LoadingBlock text="正在扫描垃圾…" />}>
                   <JunkPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/novel"
+              element={
+                <Suspense fallback={<LoadingBlock text="正在加载小说搜索…" />}>
+                  <NovelPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/novel-ranks"
+              element={
+                <Suspense fallback={<LoadingBlock text="正在加载榜单…" />}>
+                  <NovelRankPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/novel-rank"
+              element={
+                <Suspense fallback={<LoadingBlock text="正在加载榜单…" />}>
+                  <NovelRankPage />
                 </Suspense>
               }
             />
