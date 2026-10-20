@@ -1047,6 +1047,11 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.goto(`${base}/novel`, { waitUntil: 'networkidle' });
     await page.waitForSelector('text=小说资源', { timeout: 15000 });
     assert.ok(await page.getByPlaceholder('输入小说名').first().isVisible(), '要有书名搜索框');
+    // 书源管理按钮能打开弹窗（可增删启停书源）
+    await page.getByRole('button', { name: /书源管理/ }).first().click();
+    await page.waitForSelector('text=书源（', { timeout: 8000 });
+    assert.ok((await page.locator('text=/古登堡计划|示例网页源/').count()) > 0, '弹窗里要列出内置书源');
+    await page.getByRole('button', { name: /关闭|×/ }).first().click();
 
     await page.goto(`${base}/novel-ranks`, { waitUntil: 'networkidle' });
     await page.waitForSelector('text=小说榜单', { timeout: 15000 });

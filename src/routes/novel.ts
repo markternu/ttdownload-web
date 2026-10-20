@@ -10,7 +10,8 @@
 import { Router } from 'express';
 import { asyncHandler, badRequest } from '../utils/http';
 import { downloadNovelTxt, fetchBoard, getNovelBook, getNovelChapter, listBoards, searchNovels } from '../services/novel';
-import { loadStore } from '../services/bookSource';
+import type { BookSource, RankBoard } from '../services/bookSource';
+import { loadStore, saveStore, validateStore } from '../services/bookSource';
 
 export const novelRouter = Router();
 
@@ -71,6 +72,22 @@ novelRouter.get(
   }),
 );
 
+/** 书源/榜单配置（书源管理页用）：返回 sources + rankBoards 两份 */
 novelRouter.get('/sources', (_req, res) => {
-  res.json(loadStore().sources);
+  res.json(loadStore());
 });
+
+/** 保存书源/榜单配置（整份替换；保存前逐条校验，拼错直接 400 并指出哪条错） */
+novelRouter.put(
+  '/sources',
+  asyncHandler(async (req, res) => {
+    const err = validateStore(req.body ?? {});
+    if (err) throw badRequest(err, 'INVALID_SOURCE');
+    const next = {
+      sources: req.body.sources as BookSource[],
+      rankBoards: req.body.rankBoards as RankBoard[],
+    };
+    saveStore(next);
+    res.json({ ok: true, ...loadStore() });
+  }),
+);

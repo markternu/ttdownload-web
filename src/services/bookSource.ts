@@ -360,3 +360,64 @@ export function saveStore(store: BookSourceStore): void {
     throw new Error(`写书源配置失败：${(e as Error).message}`);
   }
 }
+
+/* ------------------------------------------------------------------ */
+/*  校验（网页「书源管理」保存前用；也拦下手工 JSON 拼错的情况）          */
+/* ------------------------------------------------------------------ */
+
+const REQUIRED_HTML_FIELDS: (keyof HtmlBookSource)[] = [
+  'baseUrl', 'searchUrl', 'searchListSel', 'searchTitleSel', 'searchUrlSel',
+  'bookTitleSel', 'catalogListSel', 'catalogTitleSel', 'catalogUrlSel', 'chapterContentSel',
+];
+
+/** 校验一个书源，返回错误信息（null = 通过） */
+export function validateBookSource(s: unknown): string | null {
+  const src = s as Partial<BookSource>;
+  if (!src || typeof src !== 'object') return '书源必须是对象';
+  if (typeof src.id !== 'string' || !src.id.trim()) return '缺 id（唯一标识）';
+  if (/\s/.test(src.id)) return `id 不能含空格：${src.id}`;
+  if (typeof src.name !== 'string' || !src.name.trim()) return '缺 name（显示名）';
+  if (src.kind === 'gutendex') return null;
+  if (src.kind !== 'html') return `kind 只支持 html / gutendex（收到 ${src.kind}）`;
+  for (const f of REQUIRED_HTML_FIELDS) {
+    if (typeof src[f] !== 'string' || !(src[f] as string).trim()) return `HTML 源缺必填字段 ${f}`;
+  }
+  if (src.searchUrl && !src.searchUrl.includes('{q}')) return 'searchUrl 里必须含 {q}（搜索词占位）';
+  return null;
+}
+
+/** 校验一个榜单，返回错误信息 */
+export function validateRankBoard(b: unknown): string | null {
+  const board = b as Partial<RankBoard>;
+  if (!board || typeof board !== 'object') return '榜单必须是对象';
+  if (typeof board.key !== 'string' || !board.key.trim()) return '榜单缺 key';
+  if (board.category !== 'platform' && board.category !== 'genre') return `category 只支持 platform / genre（收到 ${board.category}）`;
+  if (typeof board.label !== 'string' || !board.label.trim()) return '榜单缺 label';
+  if (typeof board.sourceId !== 'string' || !board.sourceId.trim()) return '榜单缺 sourceId';
+  if (typeof board.url !== 'string' || !board.url.trim()) return '榜单缺 url（榜单页地址）';
+  for (const f of ['listSel', 'titleSel', 'urlSel'] as const) {
+    if (typeof board[f] !== 'string' || !(board[f] as string).trim()) return `榜单缺 ${f}`;
+  }
+  return null;
+}
+
+/** 校验整个 store；返回第一条错误或 null */
+export function validateStore(store: { sources?: unknown; rankBoards?: unknown }): string | null {
+  if (!Array.isArray(store.sources)) return 'sources 必须是数组';
+  const seen = new Set<string>();
+  for (const s of store.sources) {
+    const err = validateBookSource(s);
+    if (err) return `书源错误：${err}`;
+    const id = (s as BookSource).id;
+    if (seen.has(id)) return `书源 id 重复：${id}`;
+    seen.add(id);
+  }
+  if (store.rankBoards !== undefined) {
+    if (!Array.isArray(store.rankBoards)) return 'rankBoards 必须是数组';
+    for (const b of store.rankBoards) {
+      const err = validateRankBoard(b);
+      if (err) return `榜单错误：${err}`;
+    }
+  }
+  return null;
+}

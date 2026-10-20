@@ -533,6 +533,20 @@ export interface NovelRankItem {
   cover?: string
 }
 
+/** 书源（书源管理页的列表项 + JSON 粘贴用的是完整对象） */
+export interface NovelSourceMeta {
+  id: string
+  name: string
+  kind: 'html' | 'gutendex'
+  enabled?: boolean
+  baseUrl?: string
+}
+
+export interface NovelSourcesStore {
+  sources: NovelSourceMeta[]
+  rankBoards: NovelRankBoard[]
+}
+
 /** 列表页的状态筛选：「已发布」与「待下载」已合并成一个列表，用这个区分 */
 export type FileStatusFilter = 'all' | 'pending' | 'downloaded'
 /** 各状态计数（筛选徽章 + 「等待最久」用） */

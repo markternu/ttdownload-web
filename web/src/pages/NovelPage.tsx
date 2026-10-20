@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ArrowLeft, BookOpen, Download, FileText, Search } from 'lucide-react'
+import { ArrowLeft, BookOpen, Download, FileText, Search, Settings2 } from 'lucide-react'
 import { Badge, Button, Card, CardHeader, EmptyState, Input, Spinner } from '../components/ui'
 import { useToast } from '../context/ToastContext'
 import { api } from '../lib/api'
+import { SourceManager } from '../components/novel/SourceManager'
 import type { NovelBook, NovelChapter, NovelSearchItem } from '../types'
 
 /**
@@ -27,6 +28,7 @@ export default function NovelPage() {
   const [readingUrl, setReadingUrl] = useState('')
   const [reading, setReading] = useState(false)
   const [downloading, setDownloading] = useState(false)
+  const [showSources, setShowSources] = useState(false)
 
   const openBook = useCallback(async (sourceId: string, url: string) => {
     setLoadingBook(true)
@@ -101,7 +103,12 @@ export default function NovelPage() {
       <Card>
         <CardHeader
           title={<span className="flex items-center gap-2"><BookOpen className="h-5 w-5" /> 小说资源</span>}
-          subtitle="输入书名搜索，选书后可看目录、读章节、下载整本 txt（书源可自行增删）"
+          subtitle="输入书名搜索，选书后可看目录、读章节、下载整本 txt"
+          action={
+            <Button variant="outline" size="sm" icon={<Settings2 className="h-4 w-4" />} onClick={() => setShowSources(true)}>
+              书源管理
+            </Button>
+          }
         />
         <div className="flex gap-2">
           <Input
@@ -205,6 +212,8 @@ export default function NovelPage() {
       ) : (
         <EmptyState title="搜索小说" description="在上方输入书名，例如「星辰大海」，会从所有启用的书源里聚合搜索结果。" />
       )}
+
+      <SourceManager open={showSources} onClose={() => setShowSources(false)} />
     </div>
   )
 }

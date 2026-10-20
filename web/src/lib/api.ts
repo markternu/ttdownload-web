@@ -34,6 +34,7 @@ import type {
   NovelBook,
   NovelRankBoard,
   NovelRankItem,
+  NovelSourcesStore,
   NovelSearchResponse,
   TaskBulkResult,
   UpdateStatus,
@@ -332,6 +333,12 @@ export const api = {
   novelDownloadUrl: (source: string, url: string): string => buildUrl('/api/novel/download', { source, url }),
   novelBoards: () => request<{ platform: NovelRankBoard[]; genre: NovelRankBoard[] }>('/api/novel/boards'),
   novelBoard: (key: string) => request<{ items: NovelRankItem[] }>('/api/novel/board', {}, { key }),
+  novelSources: () => request<NovelSourcesStore>('/api/novel/sources'),
+  novelSaveSources: (store: { sources: unknown[]; rankBoards: unknown[] }) =>
+    request<{ ok: boolean } & NovelSourcesStore>('/api/novel/sources', {
+      method: 'PUT',
+      body: JSON.stringify(store),
+    }),
 
   /* ---------------- 「扫描与清理垃圾」 ---------------- */
 

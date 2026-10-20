@@ -161,3 +161,47 @@ test('【只要txt】gutendex 优先取 txt，没有 txt 才退回 html（下载
   // 都没有 → 空
   assert.deepEqual(pickGutendexText({ 'application/epub+zip': 'a.epub' }), { isHtml: false });
 });
+
+/* ---------- 书源管理（校验 + 保存接口） ---------- */
+
+test('validateStore：缺必填/重复 id/坏榜单 都会被拦下并指出', async () => {
+  const { validateStore } = await import('../dist/services/bookSource.js');
+  // 缺必填字段
+  assert.match(String(validateStore({ sources: [{ kind: 'html', id: 'x', name: 'x' }] })), /缺必填字段/);
+  // searchUrl 缺 {q}
+  assert.match(String(validateStore({ sources: [{ ...mockSource, searchUrl: 'http://x/noq' }] })), /\{q\}/);
+  // 重复 id
+  assert.match(String(validateStore({ sources: [mockSource, mockSource] })), /重复/);
+  // 坏榜单
+  assert.match(String(validateStore({ sources: [], rankBoards: [{ key: 'k', category: 'xxx' }] })), /榜单/);
+  // 合法的应通过
+  assert.equal(validateStore({ sources: [mockSource], rankBoards: [] }), null);
+});
+
+test('PUT /api/novel/sources：保存后 GET 能读回；坏配置返回 400', async () => {
+  const { createApp } = await import('../dist/app.js');
+  const httpmod = await import('node:http');
+  const app = createApp();
+  const srv = httpmod.createServer(app);
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const base2 = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const good = await fetch(`${base2}/api/novel/sources`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sources: [mockSource], rankBoards: [] }),
+    });
+    assert.equal(good.status, 200);
+    const got = await (await fetch(`${base2}/api/novel/sources`)).json();
+    assert.ok(got.sources.some((s) => s.id === 'mock'));
+
+    const bad = await fetch(`${base2}/api/novel/sources`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sources: [{ id: 'noid', name: 'x' }], rankBoards: [] }),
+    });
+    assert.equal(bad.status, 400);
+  } finally {
+    await new Promise((r) => srv.close(r));
+  }
+});
