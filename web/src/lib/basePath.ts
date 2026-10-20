@@ -45,10 +45,6 @@ export const APP_ROUTES = [
   'update',
   // 扫描与清理垃圾
   'cleanup',
-  // 小说资源
-  'novel',
-  'novel-ranks',
-  'novel-rank',
 ] as const
 
 const ROUTE_SET = new Set<string>(APP_ROUTES)

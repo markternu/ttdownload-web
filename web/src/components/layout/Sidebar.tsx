@@ -19,8 +19,6 @@ import {
   Video,
   Archive,
   ArrowUpCircle,
-  BookOpen,
-  ListOrdered,
   Trash2,
   X,
   Activity,
@@ -52,8 +50,6 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/report', label: '问题反馈', icon: LifeBuoy, description: '一键下载诊断报告并发给开发者' },
   { to: '/update', label: '更新', icon: ArrowUpCircle, description: '检查并升级服务器上的项目（升级会自动暂停/恢复下载）' },
   { to: '/cleanup', label: '垃圾清理', icon: Trash2, description: '扫描并一键清理断电/中断留下的临时文件' },
-  { to: '/novel', label: '小说', icon: BookOpen, description: '按书名搜索、看目录、下载整本 txt' },
-  { to: '/novel-ranks', label: '小说榜单', icon: ListOrdered, description: '平台榜 / 类型榜，点书下载' },
   { to: '/settings', label: '设置', icon: SettingsIcon, description: '下载 / 网络 / 外观 / 系统' },
 ]
 

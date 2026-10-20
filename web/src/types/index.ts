@@ -488,65 +488,6 @@ export interface CleanJunkResult {
   errors: string[]
 }
 
-/* ---------------- 小说资源 ---------------- */
-
-export interface NovelSearchItem {
-  sourceId: string
-  sourceName: string
-  title: string
-  author: string
-  url: string
-  cover?: string
-  intro?: string
-}
-
-export interface NovelChapter {
-  title: string
-  url: string
-}
-
-export interface NovelBook {
-  title: string
-  author: string
-  intro: string
-  cover?: string
-  chapters: NovelChapter[]
-  plainTextUrl?: string
-}
-
-export interface NovelSearchResponse {
-  items: NovelSearchItem[]
-  errors: { source: string; message: string }[]
-}
-
-export interface NovelRankBoard {
-  key: string
-  category: 'platform' | 'genre'
-  label: string
-  sourceId: string
-}
-
-export interface NovelRankItem {
-  title: string
-  author: string
-  url: string
-  cover?: string
-}
-
-/** 书源（书源管理页的列表项 + JSON 粘贴用的是完整对象） */
-export interface NovelSourceMeta {
-  id: string
-  name: string
-  kind: 'html' | 'gutendex'
-  enabled?: boolean
-  baseUrl?: string
-}
-
-export interface NovelSourcesStore {
-  sources: NovelSourceMeta[]
-  rankBoards: NovelRankBoard[]
-}
-
 /** 列表页的状态筛选：「已发布」与「待下载」已合并成一个列表，用这个区分 */
 export type FileStatusFilter = 'all' | 'pending' | 'downloaded'
 /** 各状态计数（筛选徽章 + 「等待最久」用） */

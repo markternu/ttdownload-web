@@ -1,6 +1,6 @@
 {
   "name": "ttdownload-web",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "private": true,
   "description": "统一下载管理器 Web 应用：transmission / aria2 / 公开视频URL 三大下载模块 + 统一等待队列 + 加密发布 + 安卓通信 API",
   "license": "MIT",
@@ -21,11 +21,9 @@
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",
-    "cheerio": "^1.2.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "iconv-lite": "^0.7.3",
     "multer": "^1.4.5-lts.1",
     "playwright": "^1.63.0",
     "zod": "^3.23.8"
