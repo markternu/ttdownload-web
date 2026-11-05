@@ -518,6 +518,8 @@ systemRouter.put(
       'autoDeleteAfterReport',
       'clearLogsAfterReport',
       'btEvict',
+      'btSelect',
+      'btPolicy',
     ];
     const clean: Record<string, unknown> = {};
     for (const key of allowed) {
@@ -528,6 +530,12 @@ systemRouter.put(
       keys: Object.keys(clean),
       patch: clean,
     });
+    if ('btPolicy' in clean) {
+      // ⚠️ 血案：BT 超时策略改完以前不生效 —— 白名单漏了 btPolicy，保存被静默丢掉。
+      //    现在补上白名单，并且保存后**立刻**按新策略跑一次，不用等下一轮 10 分钟巡检。
+      const { runBtEvict } = await import('../services/btEvict');
+      void runBtEvict().catch((e) => logger.child('settings').warn(`BT 超时策略保存后立即巡检失败：${(e as Error).message}`));
+    }
     kickScheduler();
     res.json({ ...next, encryptPassword: next.encryptPassword ? '******' : '' });
   }),

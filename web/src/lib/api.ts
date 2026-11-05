@@ -371,6 +371,7 @@ export const api = {
 
   /** BT 出清：立即执行一次 */
   btEvict: () => request<BtEvictSummary>('/api/bt/evict', { method: 'POST' }),
+  btReviveTimedOut: () => request<{ ok: boolean; revived: number; items: { id: number; name: string }[] }>('/api/bt/revive-timed-out', { method: 'POST' }),
 
   /** transmission 反向代理开关状态（GET /api/bt/proxy；含 nginx / transmission 诊断信息） */
   btProxy: () => request<BtProxyStatus>('/api/bt/proxy'),

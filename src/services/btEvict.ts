@@ -338,6 +338,50 @@ export function stopBtEvictWorker(): void {
   timer = null;
 }
 
+/**
+ * 拉活：把「因下载时间过长被超时清理」而失败的任务，重新丢回下载队列。
+ *
+ * 为什么需要：用户改大了超时窗口后，之前按旧窗口被清掉的任务不会自动回来 ——
+ * 数据已经删了（torrent-remove delete-local-data + 清理目录），但 .torrent 全程
+ * 留档在 btQueued，可以重新加回 transmission 重新下。所以这里：
+ *   · 清掉 torrentId（transmission 里那个种子早被删了）→ prepare 会用留档 .torrent 重新加；
+ *   · 计时清零（btActiveMs=0、btHandedAt=null）→ 按**新设置**重新给一个完整窗口；
+ *   · 清掉超时标记，状态回 waiting，交给调度器重新排队。
+ */
+export function reviveTimedOutBt(): { revived: number; items: { id: number; name: string }[] } {
+  const tasks = tasksRepo.byStatus(['failed']) as TaskWithPayload[];
+  const items: { id: number; name: string }[] = [];
+  for (const task of tasks) {
+    if (task.module !== 'transmission') continue;
+    const payload = (task.payload ?? {}) as Record<string, unknown>;
+    if (!payload.timedOutAt) continue;
+
+    tasksRepo.update(task.id, {
+      status: 'waiting',
+      error: null,
+      progress: 0,
+      speedBps: 0,
+      downloadedBytes: 0,
+      startedAt: null,
+      finishedAt: null,
+      payload: {
+        ...payload,
+        torrentId: 0,
+        btHandedAt: null,
+        btActiveMs: 0,
+        btLastProgress: 0,
+        timedOutAt: null,
+        timedOutReason: null,
+        timedOutAgeHours: null,
+      },
+    });
+    const name = String(payload.torrentName ?? task.title ?? `task_${task.id}`);
+    items.push({ id: Number(task.id), name });
+    taskLog(task.id).mark('BT_REVIVE', '超时任务已拉活：重新加入下载队列（按新设置重新计时）');
+  }
+  return { revived: items.length, items };
+}
+
 /** 给设置页"预览"用：只报告不动作 */
 export async function previewBtEvict(): Promise<EvictSummary> {
   return runBtEvict({ dryRun: true });

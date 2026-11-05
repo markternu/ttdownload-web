@@ -7,7 +7,7 @@ import { seedsRepo, tasksRepo } from '../core/db';
 import { kickScheduler } from '../core/scheduler';
 import { logger } from '../core/logger';
 import { enqueueSeed, registerPendingSeeds, scanZipUploads, transmissionClient } from '../modules/transmission';
-import { runBtEvict } from '../services/btEvict';
+import { runBtEvict, reviveTimedOutBt } from '../services/btEvict';
 import { transmissionRpc } from '../services/settings';
 import { disableBtProxy, enableBtProxy, getBtProxyStatus, originFromRequest, previewBtProxy } from '../services/btProxy';
 import { asyncHandler, badRequest, notFound } from '../utils/http';
@@ -136,6 +136,16 @@ btRouter.post(
     const summary = await runBtEvict({ dryRun: false });
     kickScheduler();
     res.json(summary);
+  }),
+);
+
+/** 拉活：把因「下载时间过长被超时清理」而失败的任务重新丢回下载队列 */
+btRouter.post(
+  '/revive-timed-out',
+  asyncHandler(async (_req, res) => {
+    const r = reviveTimedOutBt();
+    kickScheduler();
+    res.json({ ok: true, revived: r.revived, items: r.items });
   }),
 );
 

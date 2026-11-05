@@ -306,6 +306,24 @@ export default function BtPage() {
     }
   }
 
+  const [reviving, setReviving] = useState(false)
+  const reviveTimedOut = async () => {
+    setReviving(true)
+    try {
+      const res = await api.btReviveTimedOut()
+      if (res.revived === 0) {
+        toast.info('没有可拉活的超时任务', '当前没有「因下载时间过长被超时清理」而失败的任务')
+      } else {
+        toast.success('已拉活', `${res.revived} 个超时任务重新加入下载队列（按新设置重新计时）`)
+      }
+      void load()
+    } catch (err) {
+      toast.error('拉活失败', humanizeError('', err instanceof Error ? err.message : String(err)))
+    } finally {
+      setReviving(false)
+    }
+  }
+
   /* -------------------- transmission 反向代理（远程访问 9091） -------------------- */
 
   /** transmission 连得上且没有设 RPC 密码 → 开启需要用户显式确认风险 */
@@ -703,6 +721,9 @@ export default function BtPage() {
               </Button>
               <Button variant="danger" size="sm" loading={evicting} onClick={() => void runEvict()}>
                 立即出清
+              </Button>
+              <Button variant="outline" size="sm" loading={reviving} onClick={() => void reviveTimedOut()}>
+                拉活超时任务
               </Button>
             </span>
           }
