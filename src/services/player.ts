@@ -2,15 +2,18 @@
  * 「播放器」后端：把**加密归档的成品**变成浏览器能直接 <video> 播放的 mp4。
  *
  * 流程（后台跑，前端轮询）：
- *   ① 解密（openssl -d，密码同加密时）
- *   ② 砍掉尾部 V-L-T 标记
- *   ③ 如果解出来是 **zip**（归档时多文件会打包，名字带 `_z`）→ 解压，
- *      收集**里面所有视频**当成播放列表（不是只挑一个！）
- *   ④ 每个视频单独准备：不是 mp4 + moov 在前的，用 ffmpeg 重封装成 mp4 + faststart
- *      （-c copy，不重新编码；moov 在前的 mp4 浏览器才能边下边播）
- *   ⑤ 每个视频提供支持 HTTP Range 的流，给 <video> 拖进度条
+ *   ① 解密（openssl -d，密码同加密时）——**如果【还原文件目录】里已经有上次解密好的，
+ *      直接复用，不再重复解密**（一一对应：restored_files 表用 source_file_id 记着）
+ *   ② 砍掉尾部 V-L-T 标记（原始名存进 workDir/meta.json，复用时靠它）
+ *   ③ 内容判定（不能只看扩展名 —— 名字可能是「1（4）」这种）：
+ *        zip → 解压 → 递归收集**所有视频**（zip 里是文件夹也行，进去找）
+ *        视频（按文件头识别 mp4/mkv/avi/flv/ts/…）→ 直接进列表
+ *        其它（rar/7z 等）→ 明确提示，而不是含糊的"不是视频"
+ *   ④ 每个视频单独准备：不是 mp4 + moov 在前的，用 ffmpeg 重封装（-c copy + faststart）
+ *   ⑤ 每个视频提供支持 HTTP Range 的流
  *
  * 临时文件放在【还原文件目录】（state/restored），每个任务从还原成功起活 4 小时。
+ * 所有路径都用 argv 数组传给子进程，**名字里有空格/中文/特殊字符都不受影响**。
  */
 
 import crypto from 'node:crypto';
@@ -22,8 +25,8 @@ import { filesRepo } from '../core/db';
 import { freeBytes } from '../core/disk';
 import { logger } from '../core/logger';
 import { deriveKeyIv, passwordOf, readVltOriginalName } from './crypto';
-import { isMp4Faststart, isVideoExt, isZipFile, pickVideoFiles, remuxToMp4 } from './media';
-import { RESTORED_TTL_MS, ensureRestoredDir, registerRestored, removeRestored, restoredDir } from './restored';
+import { detectArchiveKind, isMp4Faststart, isVideoExt, looksLikeVideo, pickVideoFiles, remuxToMp4 } from './media';
+import { RESTORED_TTL_MS, ensureRestoredDir, listRestored, registerRestored, removeRestored, restoredDir } from './restored';
 import { runCommand } from './archive';
 
 const scoped = logger.child('player');
@@ -123,22 +126,68 @@ export function cancelPlayJob(id: string): boolean {
   return true;
 }
 
+/* ------------------------------------------------------------------ */
+/*  复用上次解密好的文件（一一对应）                                     */
+/* ------------------------------------------------------------------ */
+
+interface PlayMeta {
+  fileId: number;
+  originalName: string;
+}
+
+function metaFile(workDir: string): string {
+  return path.join(workDir, 'meta.json');
+}
+
+function readMeta(workDir: string): PlayMeta | null {
+  try {
+    const m = JSON.parse(fs.readFileSync(metaFile(workDir), 'utf8')) as Partial<PlayMeta>;
+    if (typeof m.originalName === 'string' && m.originalName) return { fileId: Number(m.fileId ?? 0), originalName: m.originalName };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * 开始准备一个可播放文件。同一个文件已经有 ready 的任务就复用，避免重复解密。
+ * 找上一次已经解密好的工作目录：restored_files 表里 kind='player' 且
+ * source_file_id = fileId（这就是"一一对应"的链接），还没过期、目录还在、有 meta.json。
+ */
+function findReusableWorkDir(fileId: number): string | null {
+  const now = Date.now();
+  for (const row of listRestored()) {
+    if (row.kind !== 'player' || Number(row.source_file_id) !== fileId) continue;
+    if (row.expires_at <= now) continue;
+    try {
+      if (!fs.statSync(row.path).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    if (!readMeta(row.path)) continue;
+    return row.path;
+  }
+  return null;
+}
+
+/**
+ * 开始准备一个可播放文件。同一个文件已经有 ready 的任务就复用；
+ * 否则优先复用【还原文件目录】里上次解密好的内容（不再重复解密）。
  */
 export function preparePlayable(fileId: number): { ok: true; job: PlayJob } | { ok: false; error: string; code: string } {
   const row = filesRepo.get(fileId);
   if (!row) return { ok: false, error: '文件记录不存在', code: 'FILE_NOT_FOUND' };
   if (!fs.existsSync(row.path)) return { ok: false, error: '磁盘上的加密文件已不存在（可能已被安卓端取走）', code: 'FILE_MISSING' };
 
+  // 同一个文件已经有任务（含失败后重试阶段）→ 直接复用，绝不重复解密
   for (const j of jobs.values()) {
     if (j.fileId === fileId && j.state !== 'failed') return { ok: true, job: j };
   }
 
   const size = fs.statSync(row.path).size;
-  // 解密要写一份，解压/重封装可能再写一份 → 预留 2 倍 + 余量
+  const reusable = findReusableWorkDir(fileId);
   const free = freeBytes(config.dirs.state);
-  const need = size * 2 + 64 * 1024 * 1024;
+  // 复用时不写解密文件，只需要解压/转换的空间
+  const need = (reusable ? size : size * 2) + 64 * 1024 * 1024;
   if (free < need) {
     return {
       ok: false,
@@ -148,12 +197,12 @@ export function preparePlayable(fileId: number): { ok: true; job: PlayJob } | { 
   }
 
   const id = crypto.randomBytes(10).toString('hex');
-  const workDir = fs.mkdtempSync(path.join(ensurePlayTempDir(), `play_${fileId}_`));
+  const workDir = reusable ?? fs.mkdtempSync(path.join(ensurePlayTempDir(), `play_${fileId}_`));
   const job: PlayJob = {
     id,
     fileId,
-    state: 'decrypting',
-    progress: 0,
+    state: reusable ? 'extracting' : 'decrypting',
+    progress: reusable ? 40 : 0,
     error: null,
     items: [],
     sizeBytes: 0,
@@ -163,7 +212,12 @@ export function preparePlayable(fileId: number): { ok: true; job: PlayJob } | { 
     workDir,
   };
   jobs.set(id, job);
-  scoped.mark('PLAY', `开始准备播放 #${fileId}（${row.name}，${(size / 1024 ** 2).toFixed(1)} MiB）`);
+  scoped.mark(
+    'PLAY',
+    reusable
+      ? `复用上次已解密好的文件（不再重复解密）#${fileId}`
+      : `开始准备播放 #${fileId}（${row.name}，${(size / 1024 ** 2).toFixed(1)} MiB）`,
+  );
   void runPrepare(job).catch((e) => {
     job.state = 'failed';
     job.error = `准备失败：${(e as Error).message}`;
@@ -196,77 +250,109 @@ async function runPrepare(job: PlayJob): Promise<void> {
   const row = filesRepo.get(job.fileId);
   if (!row) throw new Error('文件记录已不存在');
 
-  // ① 解密
-  job.state = 'decrypting';
-  job.progress = 10;
   const decPath = path.join(job.workDir, 'decrypted.bin');
-  const dec = await decryptTo(row.path, decPath);
-  if (!dec.ok) {
-    job.state = 'failed';
-    job.error = dec.error ?? '解密失败';
-    return;
-  }
-  job.progress = 40;
+  const unzDir = path.join(job.workDir, 'unzipped');
+  const meta = readMeta(job.workDir);
+  let originalName = meta?.originalName ?? '';
+  const haveUnzipped = fs.existsSync(unzDir) && fs.readdirSync(unzDir).length > 0;
+  const haveDecrypted = !!originalName && (fs.existsSync(decPath) || haveUnzipped);
 
-  // ② 砍掉 V-L-T 标记
-  const name = readVltOriginalName(decPath);
-  if (!name) {
-    job.state = 'failed';
-    job.error = '解密结果里没有 FKY996 标记（文件可能不是本工具加密的，或密码不对）';
-    return;
-  }
-  const nameLen = Buffer.byteLength(name, 'utf8');
-  const contentLen = fs.statSync(decPath).size - 104 - nameLen;
-  if (contentLen <= 0) {
-    job.state = 'failed';
-    job.error = '解密结果长度异常，文件可能已损坏';
-    return;
-  }
-  fs.truncateSync(decPath, contentLen);
-
-  // ③ zip → 解压 → 收集**所有**视频（播放列表）
-  job.state = 'extracting';
-  job.progress = 50;
-  let videos: string[];
-  if (isZipFile(decPath)) {
-    const unzDir = path.join(job.workDir, 'unzipped');
-    fs.mkdirSync(unzDir, { recursive: true });
-    const r = await runCommand(config.bins.unzip, ['-o', '-q', decPath, '-d', unzDir], undefined, {
-      label: '解压归档里的 zip',
-      hideArgs: true,
-      hideOutput: true,
-    });
-    videos = pickVideoFiles(unzDir);
-    if (!videos.length) {
+  if (haveDecrypted) {
+    // 复用上次解密好的：不再跑 openssl
+    job.progress = 40;
+    scoped.mark('PLAY', `复用已解密的文件 #${job.fileId}（原始名已记录，跳过解密）`);
+  } else {
+    // ① 解密
+    job.state = 'decrypting';
+    job.progress = 10;
+    const dec = await decryptTo(row.path, decPath);
+    if (!dec.ok) {
       job.state = 'failed';
-      job.error = r.code === 0 ? 'zip 里没有找到视频文件' : `解压失败（unzip 退出码 ${r.code}）：${r.stderr.trim().slice(-200)}`;
+      job.error = dec.error ?? '解密失败';
       return;
     }
-    try {
-      fs.rmSync(decPath, { force: true });
-    } catch {
-      /* ignore */
+    job.progress = 40;
+
+    // ② 砍 V-L-T 标记，并把原始名写进 meta.json（下次复用靠它）
+    const name = readVltOriginalName(decPath);
+    if (!name) {
+      job.state = 'failed';
+      job.error = '解密结果里没有 FKY996 标记（文件可能不是本工具加密的，或密码不对）';
+      return;
     }
-  } else if (!isVideoExt(name)) {
-    // ⚠️ 用原始文件名判断：解密出来的临时文件固定叫 decrypted.bin
-    job.state = 'failed';
-    job.error = `解密出来的不是视频文件（原始名：${name}），既不是 zip 也不是常见视频格式`;
-    return;
+    const contentLen = fs.statSync(decPath).size - 104 - Buffer.byteLength(name, 'utf8');
+    if (contentLen <= 0) {
+      job.state = 'failed';
+      job.error = '解密结果长度异常，文件可能已损坏';
+      return;
+    }
+    fs.truncateSync(decPath, contentLen);
+    originalName = name;
+    fs.writeFileSync(metaFile(job.workDir), JSON.stringify({ fileId: job.fileId, originalName }));
+  }
+
+  // ③ 内容判定 + 收集视频（zip 里是文件夹也没关系，递归进去找）
+  job.state = 'extracting';
+  job.progress = 50;
+  let videos: string[] = [];
+
+  if (haveUnzipped) {
+    videos = pickVideoFiles(unzDir);
   } else {
-    videos = [decPath];
+    const kind = fs.existsSync(decPath) ? detectArchiveKind(decPath) : null;
+    if (kind === 'zip') {
+      fs.mkdirSync(unzDir, { recursive: true });
+      const r = await runCommand(config.bins.unzip, ['-o', '-q', decPath, '-d', unzDir], undefined, {
+        label: '解压归档里的 zip',
+        hideArgs: true,
+        hideOutput: true,
+      });
+      videos = pickVideoFiles(unzDir);
+      if (!videos.length) {
+        job.state = 'failed';
+        job.error =
+          r.code === 0
+            ? `zip 里没有找到视频（可能里面只有图片/文档；原始名：${originalName}）`
+            : `解压失败（unzip 退出码 ${r.code}）：${r.stderr.trim().slice(-200)}`;
+        return;
+      }
+      try {
+        fs.rmSync(decPath, { force: true });
+      } catch {
+        /* ignore */
+      }
+    } else if (kind === 'rar' || kind === '7z') {
+      job.state = 'failed';
+      job.error = `这是一个 ${kind} 压缩包（原始名：${originalName}），暂不支持自动解压；请重新以 zip 或视频文件归档`;
+      return;
+    } else if (fs.existsSync(decPath) && (isVideoExt(originalName) || looksLikeVideo(decPath))) {
+      // 名字没有视频扩展名（比如「1（4）」）也能靠文件头认出来
+      videos = [decPath];
+    } else {
+      job.state = 'failed';
+      job.error = `解密出来的内容不是视频（原始名：${originalName}）；既不是 zip 压缩包，也不是能识别的视频格式`;
+      return;
+    }
   }
   job.progress = 70;
 
-  // ④ 组装播放列表：已经是 mp4+faststart 的直接就绪，其余的等用户选中时再重封装
+  // ④ 组装播放列表：faststart mp4 直接就绪；上次转好的 play_N.mp4 也复用；其余等选中时再转
   job.items = videos.map((p, i) => {
     const size = fs.existsSync(p) ? fs.statSync(p).size : 0;
     const fast = isMp4Faststart(p);
+    const pre = path.join(job.workDir, `play_${i}.mp4`);
+    let preOk = false;
+    try {
+      preOk = fs.existsSync(pre) && fs.statSync(pre).size > 0;
+    } catch {
+      preOk = false;
+    }
     return {
       index: i,
       name: path.basename(p),
       sizeBytes: size,
-      state: fast ? 'ready' : 'pending',
-      playPath: fast ? p : null,
+      state: fast || preOk ? 'ready' : 'pending',
+      playPath: fast ? p : preOk ? pre : null,
       error: null,
       srcPath: p,
     } as PlayItem;
@@ -276,7 +362,13 @@ async function runPrepare(job: PlayJob): Promise<void> {
   job.state = 'ready';
   job.readyAt = Date.now();
   job.touchedAt = job.readyAt;
-  registerRestored({ path: job.workDir, kind: 'player', sourceFileId: job.fileId, sizeBytes: job.sizeBytes, readyAt: job.readyAt });
+  registerRestored({
+    path: job.workDir,
+    kind: 'player',
+    sourceFileId: job.fileId,
+    sizeBytes: job.sizeBytes,
+    readyAt: job.readyAt,
+  });
   scoped.mark('PLAY', `播放列表已就绪 #${job.fileId}：${job.items.length} 个视频（${(job.sizeBytes / 1024 ** 2).toFixed(1)} MiB）`);
 }
 

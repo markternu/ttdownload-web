@@ -329,17 +329,21 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
-  test('手机视口：无横向滚动', async (t) => {
+  test('手机视口：主要页面都不能横向滚动（首页/设置/文件/任务/垃圾清理/BT）', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     await loginContext(mobileContext);
     const page = await mobileContext.newPage();
     page.on('pageerror', (e) => pageErrors.push(String(e)));
-    await page.goto(base, { waitUntil: 'networkidle' });
-    await page.waitForTimeout(800);
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-    assert.ok(overflow <= 1, `不应有横向滚动（溢出 ${overflow}px）`);
+    const routes = ['/', '/settings', '/files', '/tasks', '/cleanup', '/bt'];
+    for (const route of routes) {
+      await page.goto(`${base}${route}`, { waitUntil: 'networkidle' });
+      await page.waitForTimeout(600);
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      assert.ok(overflow <= 1, `${route} 在手机宽度下不应横向滚动（溢出 ${overflow}px）`);
+    }
     await page.close();
+    await mobileContext.close();
   });
 
   test('BT 页面：出清机制面板与预览按钮可用', async (t) => {

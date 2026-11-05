@@ -148,6 +148,13 @@ function pendingEdits(draft: Settings, settings: Settings | null): Partial<Setti
   return out
 }
 
+/** 工具版本可能很长（如 openssl 的整行 "OpenSSL 3.5.1 1 Jul 2025 (Library: ...)"），
+ *  手机上会把徽章撑爆 → 只留第一行并截断 */
+function shortVersion(v: unknown): string {
+  const s = String(v ?? '').split('\n')[0].trim()
+  return s.length > 26 ? `${s.slice(0, 26)}…` : s
+}
+
 export default function SettingsPage() {
   const toast = useToast()
   const { settings, loading, error, saving, refresh, save } = useSettingsStore()
@@ -1311,7 +1318,7 @@ export default function SettingsPage() {
                   {Object.entries(system.tools).map(([name, tool]) => (
                     <Badge key={name} tone={tool.ok ? 'success' : 'danger'} dot>
                       {name}
-                      {tool.ok ? (tool.version ? ` v${tool.version}` : '') : ' 不可用'}
+                      {tool.ok ? (tool.version ? ` v${shortVersion(tool.version)}` : '') : ' 不可用'}
                     </Badge>
                   ))}
                 </div>

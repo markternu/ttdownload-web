@@ -57,7 +57,9 @@ export function pickVideoFiles(dir: string, maxDepth = 6): string[] {
         walk(p, depth + 1);
         continue;
       }
-      if (!e.isFile() || !isVideoExt(e.name)) continue;
+      if (!e.isFile()) continue;
+      // 扩展名认不出时，再看**文件头**（用户下到的视频可能没扩展名 / 名字带一堆特殊字符）
+      if (!isVideoExt(e.name) && !looksLikeVideo(p)) continue;
       try {
         found.push({ p, size: fs.statSync(p).size });
       } catch {
@@ -198,4 +200,56 @@ export async function normalizeVideosForArchive(
     }
   }
   return { files: out, converted, skipped };
+}
+
+/** 读文件头前 n 字节 */
+export function readHead(file: string, n = 16): Buffer | null {
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(n);
+      const got = fs.readSync(fd, buf, 0, n, 0);
+      return got > 0 ? buf.subarray(0, got) : null;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 靠**文件内容**判断是不是视频（不能只看扩展名 —— 用户下到的文件可能叫「1（4）」
+ * 这种没扩展名的，或者扩展名被改掉了）。
+ */
+export function looksLikeVideo(file: string): boolean {
+  // mp4/mov：顶层 box 里有 ftyp/moov/mdat
+  if (isMp4Faststart(file)) return true;
+  const head = readHead(file, 16);
+  if (!head || head.length < 4) return false;
+  // mp4/mov：偏移 4 处是 ftyp
+  if (head.length >= 8 && head.toString('latin1', 4, 8) === 'ftyp') return true;
+  // mkv / webm：EBML 头 1A 45 DF A3
+  if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return true;
+  // avi：RIFF....AVI
+  if (head.length >= 12 && head.toString('latin1', 0, 4) === 'RIFF' && head.toString('latin1', 8, 12) === 'AVI ') return true;
+  // flv
+  if (head.toString('latin1', 0, 3) === 'FLV') return true;
+  // mpeg-ts：同步字节 0x47
+  if (head[0] === 0x47) return true;
+  // mpeg-ps：00 00 01 BA/B3
+  if (head[0] === 0x00 && head[1] === 0x00 && head[2] === 0x01) return true;
+  // ogg / rmvb
+  if (head.toString('latin1', 0, 4) === 'OggS' || head.toString('latin1', 0, 4) === '.RMF') return true;
+  return false;
+}
+
+/** 是不是 rar / 7z（我们不支持自动解压这两种，给出明确提示而不是"不是视频"） */
+export function detectArchiveKind(file: string): 'zip' | 'rar' | '7z' | null {
+  if (isZipFile(file)) return 'zip';
+  const head = readHead(file, 8);
+  if (!head || head.length < 6) return null;
+  if (head.toString('latin1', 0, 4) === 'Rar!') return 'rar';
+  if (head[0] === 0x37 && head[1] === 0x7a && head[2] === 0xbc && head[3] === 0xaf && head[4] === 0x27 && head[5] === 0x1c) return '7z';
+  return null;
 }

@@ -269,3 +269,84 @@ test('多文件 zip 归档 / 单个 zip 文件 → 归档名带 _z；单文件�
   assert.equal(single.ok, true);
   assert.doesNotMatch(single.publishedName, /_z$/, '单个普通文件不带 _z');
 });
+
+/* ---------- 复用已解密 + 无扩展名/文件夹/特殊字符 ---------- */
+
+test('复用：同一文件再次点播放，不会再解密（同一 job）', async () => {
+  const plain = tmpFile(root, 'p5/reuse.mp4', Buffer.concat([ftyp, moov, mdat]));
+  const fileId = await publishEncrypted(plain, '复用.mp4');
+
+  const a = preparePlayable(fileId);
+  const b = preparePlayable(fileId);
+  assert.equal(a.job.id, b.job.id, '同一个文件已有任务 → 直接复用，不能重复解密');
+  const job = await waitReady(a.job.id);
+  assert.equal(job.state, 'ready');
+  const metaPath = path.join(job.workDir, 'meta.json');
+  assert.ok(fs.existsSync(metaPath), '要写 meta.json（记录原始名，供下次复用）');
+});
+
+test('复用：还原目录里已有解密好的文件 → 直接取用，不再跑 openssl', async () => {
+  const { registerRestored, restoredDir, ensureRestoredDir } = await import('../dist/services/restored.js');
+  const plain = tmpFile(root, 'p6/reuse2.mp4', Buffer.concat([ftyp, moov, mdat]));
+  const fileId = await publishEncrypted(plain, '复用2.mp4');
+
+  // 手工造一个"上次已经解密好"的工作目录（解密结果 = 去掉 VLT 尾的 mp4 + meta.json）
+  ensureRestoredDir();
+  const workDir = fs.mkdtempSync(path.join(restoredDir(), `play_${fileId}_`));
+  fs.writeFileSync(path.join(workDir, 'decrypted.bin'), Buffer.concat([ftyp, moov, mdat]));
+  fs.writeFileSync(path.join(workDir, 'meta.json'), JSON.stringify({ fileId, originalName: '复用2.mp4' }));
+  registerRestored({ path: workDir, kind: 'player', sourceFileId: fileId, sizeBytes: 3000, readyAt: Date.now() });
+
+  const prep = preparePlayable(fileId);
+  assert.equal(prep.job.workDir, workDir, '要复用还原目录里上次的工作目录');
+  const job = await waitReady(prep.job.id);
+  assert.equal(job.state, 'ready');
+  assert.equal(job.items.length, 1);
+  assert.equal(job.items[0].state, 'ready', '已经是 faststart mp4 → 直接可播');
+});
+
+test('文件名没有扩展名（如「1（4）」）→ 靠文件内容识别成视频', async () => {
+  const plain = tmpFile(root, 'p7/noext.mp4', Buffer.concat([ftyp, moov, mdat]));
+  const fileId = await publishEncrypted(plain, '1（4）');
+  const prep = preparePlayable(fileId);
+  const job = await waitReady(prep.job.id);
+  assert.equal(job.state, 'ready', `无扩展名的 mp4 也要能播：${job.error ?? ''}`);
+  assert.equal(job.items.length, 1);
+  assert.equal(job.items[0].state, 'ready');
+});
+
+test('zip 里是文件夹 + 中文/空格/特殊字符名 → 递归进去，全部进播放列表', async () => {
+  const src = path.join(root, 'zip-folder');
+  const sub = path.join(src, '文件夹（1）');
+  fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(sub, '第一集 测试（1）.mp4'), Buffer.concat([ftyp, moov, mdat]));
+  fs.writeFileSync(path.join(sub, '第二集 测试（2）.mkv'), Buffer.from('fake-mkv'));
+  const zipPath = path.join(root, 'folder-bundle.zip');
+  const { execFileSync } = await import('node:child_process');
+  execFileSync('zip', ['-r', '-q', zipPath, '文件夹（1）'], { cwd: src });
+
+  const fileId = await publishEncrypted(zipPath, '合集（文件夹）.zip');
+  const prep = preparePlayable(fileId);
+  const job = await waitReady(prep.job.id);
+  assert.equal(job.state, 'ready', `zip 里套文件夹也要能播：${job.error ?? ''}`);
+  assert.equal(job.items.length, 2, '文件夹里的两个视频都要进播放列表');
+  assert.ok(
+    job.items.some((it) => it.name.includes('第一集 测试（1）')),
+    '特殊字符文件名要能正确识别',
+  );
+  // 第二个（mkv）按需转封装
+  const mkvItem = job.items.find((it) => it.name.endsWith('.mkv'));
+  assert.equal(mkvItem.state, 'pending');
+  assert.ok(preparePlayItem(job.id, mkvItem.index));
+  const it = await waitItem(job.id, mkvItem.index);
+  assert.equal(it.state, 'ready', it.error ?? '');
+});
+
+test('rar/7z 压缩包 → 明确提示不支持，而不是含糊的"不是视频"', async () => {
+  const plain = tmpFile(root, 'p8/archive.bin', 'Rar!\x1a\x07\x00' + 'x'.repeat(200));
+  const fileId = await publishEncrypted(plain, '压缩包.rar');
+  const prep = preparePlayable(fileId);
+  const job = await waitReady(prep.job.id);
+  assert.equal(job.state, 'failed');
+  assert.match(String(job.error), /rar|7z|压缩包/i);
+});
