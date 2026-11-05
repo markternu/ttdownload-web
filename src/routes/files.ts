@@ -308,12 +308,15 @@ filesRouter.post(
   }),
 );
 
-/** 播放流（支持 Range，给 <video> 边下边播/拖进度条）；index = 播放列表第几个 */
-filesRouter.get(
-  '/play/stream/:jobId/:index',
-  asyncHandler(async (req, res) => {
+/**
+ * 播放流（支持 Range，给 <video> 边下边播/拖进度条）；index = 播放列表第几个。
+ * · 兼容 `0` 与 `0.mp4` 两种写法（Safari 对没有扩展名的视频 URL 更挑剔）
+ * · 兼容旧的 `/play/stream/:jobId`（老缓存前端可能还在用）→ 默认第 0 个
+ */
+async function streamPlay(req: import('express').Request, res: import('express').Response): Promise<void> {
+  {
     const jobId = String(req.params.jobId);
-    const index = Number(req.params.index);
+    const index = Number.parseInt(String(req.params.index ?? '0'), 10) || 0;
     const j = getPlayJob(jobId);
     if (!j) throw notFound('播放任务不存在或已过期', 'PLAY_JOB_NOT_FOUND');
     const item = getPlayItem(jobId, index);
@@ -345,5 +348,7 @@ filesRouter.get(
     }
     res.setHeader('Content-Length', String(stat.size));
     streamFileTo(res, item.playPath);
-  }),
-);
+  }
+}
+filesRouter.get('/play/stream/:jobId', asyncHandler(streamPlay));
+filesRouter.get('/play/stream/:jobId/:index', asyncHandler(streamPlay));

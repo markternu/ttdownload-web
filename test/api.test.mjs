@@ -948,6 +948,13 @@ test('★下载原始文件：解密出来就是原文件（字节一致），�
   assert.equal(after.status, 404, '任务记录也应被清掉');
 });
 
+test('index.html 必须 no-store（防止手机缓存旧前端 → 打已改名的接口 404）', async () => {
+  const res = await fetch(`${base}/`);
+  assert.equal(res.status, 200);
+  const cc = String(res.headers.get('cache-control') ?? '');
+  assert.match(cc, /no-store/, `index.html 的 Cache-Control 应为 no-store，实际：${cc}`);
+});
+
 test('★下载原始文件：临时文件有两条兜底清理（4 小时超时 + 开机清空）', async () => {
   const { sweepOnce, tempDir, getJob, TEMP_MAX_AGE_MS } = await import('../dist/services/originalDownload.js');
   const { currentCode } = await import('../dist/services/originalCode.js');

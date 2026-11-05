@@ -533,7 +533,7 @@ export const api = {
   filePlayPrepareItem: (jobId: string, index: number) =>
     request<PlayItemInfo>('/api/files/play/prepare-item', jsonBody({ jobId, index })),
   filePlayStreamUrl: (jobId: string, index: number): string =>
-    `${API_BASE}/api/files/play/stream/${encodeURIComponent(jobId)}/${index}`,
+    `${API_BASE}/api/files/play/stream/${encodeURIComponent(jobId)}/${index}.mp4`,
 
   /* ------------------------------ 设置 ------------------------------ */
 

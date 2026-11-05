@@ -43,9 +43,9 @@ test('【识别】能扫出各类垃圾：aria2 控制文件、yt-dlp 分片、�
   const ytdlp = mk(config.dirs.webTools, 'video.part', 'partial');
   age(ytdlp, 7 * 3600_000);
 
-  // 解密临时（>1h）
-  const origTmp = path.join(config.dirs.state, 'original-tmp');
-  const ot = mk(origTmp, 'abc123.part', 'decrypted-stuff');
+  // 还原文件目录（播放/下载原始文件解密还原出来的文件；全部列出，不再看年龄）
+  const { restoredDir } = await import('../dist/services/restored.js');
+  const ot = mk(restoredDir(), 'abc123.part', 'decrypted-stuff');
   age(ot, 2 * 3600_000);
 
   // 加密临时（>6h）

@@ -81,8 +81,23 @@ export function createApp(): express.Express {
   // 前端静态资源（Vite 构建产物），不存在时给出提示
   const publicDir = path.resolve(__dirname, '..', 'public');
   if (fs.existsSync(publicDir)) {
-    app.use(express.static(publicDir, { index: 'index.html', maxAge: '1h' }));
+    app.use(
+      express.static(publicDir, {
+        index: false,
+        maxAge: '1h',
+        setHeaders: (res, filePath) => {
+          // ⚠️ 真机事故：index.html 被缓存 1 小时 → iPhone 上跑的还是旧前端，
+          //    而前端发版后接口路径可能已变（比如播放流加了 /:index）→ 旧 JS 打新接口 404。
+          //    index.html 必须 no-store；带 hash 的 assets 才长期缓存。
+          if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store');
+          else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      }),
+    );
     app.get(/^(?!\/api\/).*/, (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
       res.sendFile(path.join(publicDir, 'index.html'));
     });
   } else {

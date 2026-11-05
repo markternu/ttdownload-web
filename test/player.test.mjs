@@ -205,6 +205,13 @@ test('播放流：支持 Range（206 + Content-Range）', async () => {
     assert.equal(ranged.headers.get('accept-ranges'), 'bytes');
     const body = Buffer.from(await ranged.arrayBuffer());
     assert.equal(body.length, 10);
+
+    // Safari 友好：URL 带 .mp4 也能播
+    const mp4 = await fetch(`${base}/api/files/play/stream/${start.id}/0.mp4`, { headers: { Range: 'bytes=0-9' } });
+    assert.equal(mp4.status, 206, '带 .mp4 后缀的播放地址要能用');
+    // 兼容老缓存前端（旧的 /play/stream/:jobId 没有 index）
+    const legacy = await fetch(`${base}/api/files/play/stream/${start.id}`, { headers: { Range: 'bytes=0-9' } });
+    assert.equal(legacy.status, 206, '旧播放地址（无 index）要向后兼容');
   } finally {
     await new Promise((r) => server.close(r));
   }

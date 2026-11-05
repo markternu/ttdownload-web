@@ -383,7 +383,7 @@ export default function SettingsPage() {
             下载 / 网络 / 外观 / 系统状态 · 保存调用 PUT /api/settings
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {dirty ? <Badge tone="warning">有未保存的修改</Badge> : <Badge tone="success">已同步</Badge>}
           <Button
             variant="outline"
@@ -468,7 +468,7 @@ export default function SettingsPage() {
               label="模块并发（BT / 直链 / 在线视频）"
               hint="0=不限（推荐）。一般不用管这项 —— 真正决定下多少的是磁盘空间"
             >
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                 <Input
                   type="number"
                   min={0}
@@ -1059,7 +1059,7 @@ export default function SettingsPage() {
               <p className="text-xs font-medium text-slate-600 dark:text-slate-300">
                 多个视频时的挑法：<b>独树一帜，下最大；相差无几，一起下</b>
               </p>
-              <div className="mt-2 grid grid-cols-3 gap-3">
+              <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <Field label="相差多少倍算异类" hint="比如设 5：最大的比第二名大 5 倍以上就只下最大的。默认 5">
                   <Input
                     type="number"
@@ -1130,7 +1130,7 @@ export default function SettingsPage() {
             subtitle="交给 transmission 后 12 小时内完全不干涉（有的资源过一会儿才上线）；到点还没下完才按下面的规则清理"
           />
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <Field label="多少小时后检查" hint="从交给 transmission 那一刻算起，默认 12 小时">
                 <Input
                   type="number"

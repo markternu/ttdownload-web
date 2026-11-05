@@ -164,7 +164,8 @@ export function VideoPlayerModal({ file, onClose }: { file: PlayableFile | null;
                 controls
                 autoPlay
                 playsInline
-                className="w-full rounded-xl bg-black"
+                preload="metadata"
+                className="max-h-[50vh] w-full rounded-xl bg-black"
                 src={api.filePlayStreamUrl(job.id, selectedItem.index)}
                 onEnded={() => {
                   if (hasNext) playNext()
