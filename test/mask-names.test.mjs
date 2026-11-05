@@ -79,3 +79,68 @@ test('再关掉「眼睛」→ 立刻回到 ****（接口出口遮蔽）', async
   const tasks = await json('/api/tasks?pageSize=50');
   assert.equal(tasks.items.find((x) => x.id === task.id).title, '****');
 });
+
+test('SSE 事件也不能漏真名（任务页"一闪一闪"的根因）', async () => {
+  const { bus } = await import('../dist/core/events.js');
+  const res = await fetch(`${base}/api/events`);
+  assert.equal(res.status, 200);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const readUntil = async (needle, timeoutMs = 6000) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      if (buf.includes(needle)) return true;
+    }
+    return false;
+  };
+  try {
+    // 先等连接建立
+    assert.equal(await readUntil('retry:'), true, 'SSE 应建立');
+    // 推一条"真名"任务事件
+    bus.emitTask({ id: 9999, module: 'aria2', title: '真名泄漏.mp4', status: 'downloading' });
+    assert.equal(await readUntil('event: task'), true, '应收到 task 事件');
+    assert.match(buf, /"title":"\*\*\*\*"/, 'SSE 任务事件里的名字必须被遮蔽成 ****');
+    assert.doesNotMatch(buf, /真名泄漏/, '绝不能把真名通过 SSE 推给浏览器');
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
+test('SSE stats 里的 recentTasks 名字也要遮蔽', async () => {
+  const { bus } = await import('../dist/core/events.js');
+  const res = await fetch(`${base}/api/events`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const readUntil = async (needle, timeoutMs = 6000) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      if (buf.includes(needle)) return true;
+    }
+    return false;
+  };
+  try {
+    await readUntil('retry:');
+    bus.emitStats({ recentTasks: [{ id: 1, title: '统计里的真名.mp4' }], totalTasks: 1 });
+    assert.equal(await readUntil('event: stats'), true, '应收到 stats 事件');
+    assert.match(buf, /"title":"\*\*\*\*"/, 'stats 里的任务名也要遮蔽');
+    assert.doesNotMatch(buf, /统计里的真名/, 'stats 不能泄漏真名');
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      /* ignore */
+    }
+  }
+});

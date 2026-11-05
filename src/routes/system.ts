@@ -30,7 +30,7 @@ import {
 import { kickScheduler } from '../core/scheduler';
 import { cleanFromReport, scanJunk } from '../services/junkScan';
 import { cleanAllRestored } from '../services/restored';
-import { maskFields, showFileNames } from '../services/mask';
+import { maskFields, maskOne, showFileNames } from '../services/mask';
 import { asyncHandler, badRequest, notFound } from '../utils/http';
 import type { Settings, Task } from '../types';
 
@@ -464,9 +464,29 @@ systemRouter.get('/events', (req, res) => {
   const send = (event: string, data: unknown): void => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
-  const onTask = (task: unknown): void => send('task', task);
-  const onStats = (stats: unknown): void => send('stats', stats);
-  const onFile = (payload: unknown): void => send('file', payload);
+  // ⚠️ 真机 bug：SSE 以前直接推原始 task，任务页刚刷新时是 ****，收到一条 SSE 就变回真名，
+  //    下一次轮询又变回 **** —— 名字一闪一闪。所以**出口统一遮蔽**（和 REST 接口同一套规则）。
+  const maskTask = (task: unknown): unknown => {
+    if (!task || typeof task !== 'object') return task;
+    return maskOne(task as Record<string, unknown>, ['title']);
+  };
+  const maskStats = (stats: unknown): unknown => {
+    if (!stats || typeof stats !== 'object') return stats;
+    const out = { ...(stats as Record<string, unknown>) };
+    if (Array.isArray(out.recentTasks)) out.recentTasks = maskFields(out.recentTasks as Record<string, unknown>[], ['title']);
+    return out;
+  };
+  const maskFileEvent = (payload: unknown): unknown => {
+    if (!payload || typeof payload !== 'object') return payload;
+    const out = { ...(payload as Record<string, unknown>) };
+    if (out.file && typeof out.file === 'object') {
+      out.file = maskOne(out.file as Record<string, unknown>, ['name', 'title']);
+    }
+    return out;
+  };
+  const onTask = (task: unknown): void => send('task', maskTask(task));
+  const onStats = (stats: unknown): void => send('stats', maskStats(stats));
+  const onFile = (payload: unknown): void => send('file', maskFileEvent(payload));
   const onLog = (entry: unknown): void => send('log', entry);
   const onSpace = (payload: unknown): void => send('space', payload);
   logger.child('sse').debug('[MARK:SSE] 已建立事件流连接');
@@ -477,7 +497,7 @@ systemRouter.get('/events', (req, res) => {
   bus.on('log', onLog);
   bus.on('space-freed', onSpace);
 
-  const statsTimer = setInterval(() => send('stats', computeStats()), 5000);
+  const statsTimer = setInterval(() => send('stats', maskStats(computeStats())), 5000);
   const ping = setInterval(() => res.write(': ping\n\n'), 15000);
 
   req.on('close', () => {
