@@ -21,6 +21,7 @@ import path from 'node:path';
 import { config } from '../core/config';
 import { filesRepo, tasksRepo } from '../core/db';
 import { logger } from '../core/logger';
+import { restoredDir } from './restored';
 import { aria2Client } from '../modules/aria2Client';
 import { nowIso } from '../core/clock';
 
@@ -319,17 +320,22 @@ export async function scanJunk(): Promise<JunkReport> {
     push({ key: 'ytdlp', label: '视频解析下载残留', description: 'yt-dlp 被中断留下的 .part/.ytdl/.tmp 分片', autoClean: true, skipped: false, items });
   }
 
-  // ---- ③ 解密临时（original-tmp，>1 小时）----
+  // ---- ③ 还原文件目录（播放器 / 「下载原始文件」解密还原出来的文件）----
   {
-    const dir = path.join(config.dirs.state, 'original-tmp');
+    const dir = restoredDir();
     const items: JunkItem[] = [];
-    for (const p of walk(dir, 3)) {
+    for (const p of walk(dir)) {
       const s = statOf(p);
-      if (s && now - s.mtime > 1 * HOUR) {
-        items.push({ path: p, name: path.basename(p), sizeBytes: s.size, mtimeMs: s.mtime, reason: '解密临时文件（断电/中断后残留）' });
-      }
+      if (!s) continue;
+      items.push({
+        path: p,
+        name: path.relative(dir, p) || path.basename(p),
+        sizeBytes: s.size,
+        mtimeMs: s.mtime,
+        reason: '还原文件（4 小时自动清理；也可在设置页一键清空）',
+      });
     }
-    push({ key: 'original_tmp', label: '解密临时文件', description: '「下载原始文件」断电后残留的临时解密文件', autoClean: true, skipped: false, items });
+    push({ key: 'original_tmp', label: '还原文件目录', description: '播放 / 「下载原始文件」解密还原产生的文件（每个活 4 小时）', autoClean: true, skipped: false, items });
   }
 
   // ---- ④ 加密临时（encryptTmp）----
@@ -426,7 +432,7 @@ export async function scanJunk(): Promise<JunkReport> {
     { dir: config.dirs.encryptTmp, label: '加密临时区' },
     { dir: config.dirs.archiveReady, label: '归档完成区' },
     { dir: config.dirs.consumer, label: '消费者目录（成品）' },
-    { dir: path.join(config.dirs.state, 'original-tmp'), label: '解密临时目录' },
+    { dir: restoredDir(), label: '还原文件目录' },
   ];
   const fileListing: FileListing[] = listingDirs.map((d) => {
     const f = listFilesOf(d.dir);

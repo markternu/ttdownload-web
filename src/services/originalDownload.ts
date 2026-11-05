@@ -7,6 +7,7 @@ import { filesRepo } from '../core/db';
 import { freeBytes } from '../core/disk';
 import { logger } from '../core/logger';
 import { deriveKeyIv, hasVltMarker, passwordOf, readVltOriginalName } from './crypto';
+import { RESTORED_TTL_MS, cleanAllRestored, ensureRestoredDir, registerRestored, removeRestored, restoredDir } from './restored';
 import { CODE_WINDOW_MS, originalDownloadEnabled, pruneUnlockState } from './originalCode';
 
 /**
@@ -28,46 +29,26 @@ const scoped = logger.child('original');
 /*  临时目录与清理                                                       */
 /* ------------------------------------------------------------------ */
 
-/** 临时解密文件放这里（每次开机先把整个目录清空） */
+/** 还原出来的文件统一放【还原文件目录】（与播放器共用） */
 export function tempDir(): string {
-  return path.join(config.dirs.state, 'original-tmp');
+  return restoredDir();
 }
 
-/** 没下完/没确认下完的临时文件最多留多久 */
-export const TEMP_MAX_AGE_MS = 60 * 60_000;
+/** 每个还原文件可活 4 小时（从还原成功那一刻起） */
+export const TEMP_MAX_AGE_MS = RESTORED_TTL_MS;
 
 export function ensureTempDir(): string {
-  const dir = tempDir();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return dir;
+  return ensureRestoredDir();
 }
 
 /**
- * 开机清空临时目录。
- * 断电/重启后内存里的任务全丢了，"谁还在下"无从得知 —— 按用户要求一律清干净。
+ * 开机清空【还原文件目录】。
+ * 断电/重启后内存里的任务全丢了，"谁还在用"无从得知 —— 一律清干净（用户要求）。
  */
 export function purgeTempOnBoot(): { removed: number; bytes: number } {
-  const dir = tempDir();
-  let removed = 0;
-  let bytes = 0;
-  try {
-    if (!fs.existsSync(dir)) return { removed: 0, bytes: 0 };
-    for (const name of fs.readdirSync(dir)) {
-      const p = path.join(dir, name);
-      try {
-        const st = fs.statSync(p);
-        bytes += st.isFile() ? st.size : 0;
-        fs.rmSync(p, { recursive: true, force: true });
-        removed += 1;
-      } catch (e) {
-        scoped.warn(`[MARK:ORIGINAL_DL] 开机清理失败 ${p}：${(e as Error).message}`);
-      }
-    }
-  } catch (e) {
-    scoped.warn(`[MARK:ORIGINAL_DL] 开机清理目录异常：${(e as Error).message}`);
-  }
+  const r = cleanAllRestored();
   ensureTempDir();
-  return { removed, bytes };
+  return r;
 }
 
 /* ------------------------------------------------------------------ */
@@ -132,11 +113,7 @@ export function publicJob(j: OriginalJob): Record<string, unknown> {
 export function dropJob(id: string, reason: string): void {
   const j = jobs.get(id);
   if (!j) return;
-  try {
-    if (j.tempPath && fs.existsSync(j.tempPath)) fs.rmSync(j.tempPath, { force: true });
-  } catch (e) {
-    scoped.warn(`[MARK:ORIGINAL_DL] 删除临时文件失败 ${j.tempPath}：${(e as Error).message}`);
-  }
+  if (j.tempPath) removeRestored(j.tempPath);
   j.finished = true;
   jobs.delete(id);
   scoped.mark('ORIGINAL_DL', `已清理临时文件（${reason}）：#${j.fileId} ${j.originalName}`);
@@ -276,6 +253,7 @@ async function runDecrypt(job: OriginalJob): Promise<void> {
         job.progress = 100;
         job.state = 'ready';
         job.readyAt = Date.now();
+        registerRestored({ path: job.tempPath, kind: 'original', sourceFileId: job.fileId, sizeBytes: contentLen, readyAt: job.readyAt });
         scoped.mark('ORIGINAL_DL', `临时解密完成 #${job.fileId} → ${name}（${(contentLen / 1024 ** 2).toFixed(1)} MiB，${Date.now() - job.createdAt}ms）`);
       } catch (e) {
         job.state = 'failed';
@@ -323,24 +301,6 @@ export function sweepOnce(): void {
       job.error = '解密超时（超过 1 小时），已中止';
       dropJob(job.id, '解密超时');
     }
-  }
-  // 目录里不该有任务认领的文件（比如上一轮进程被杀留下的）→ 兜底删掉
-  try {
-    const dir = tempDir();
-    if (fs.existsSync(dir)) {
-      const known = new Set([...jobs.values()].map((j) => path.basename(j.tempPath)));
-      for (const name of fs.readdirSync(dir)) {
-        if (known.has(name)) continue;
-        const p = path.join(dir, name);
-        const st = fs.statSync(p);
-        if (now - st.mtimeMs > TEMP_MAX_AGE_MS) {
-          fs.rmSync(p, { force: true });
-          scoped.mark('ORIGINAL_DL', `清理孤儿临时文件：${name}`);
-        }
-      }
-    }
-  } catch {
-    /* ignore */
   }
 }
 

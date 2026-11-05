@@ -1033,9 +1033,9 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.waitForSelector('text=各目录占用', { timeout: 15000 });
     // 也要能看到"文件清单"（用户要看某个目录里到底有哪些文件）
     await page.waitForSelector('text=文件清单', { timeout: 15000 });
-    // 至少一个分类标题出现（aria2 直链残留 / 视频解析下载残留 / 解密临时文件 …）
+    // 至少一个分类标题出现（aria2 直链残留 / 视频解析下载残留 / 还原文件目录 …）
     assert.ok(
-      (await page.locator('text=/aria2 直链残留|视频解析下载残留|解密临时文件/').count()) > 0,
+      (await page.locator('text=/aria2 直链残留|视频解析下载残留|还原文件目录/').count()) > 0,
       '要列出垃圾分类',
     );
     await page.close();

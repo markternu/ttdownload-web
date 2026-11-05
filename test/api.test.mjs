@@ -944,7 +944,7 @@ test('★下载原始文件：解密出来就是原文件（字节一致），�
   assert.equal(after.status, 404, '任务记录也应被清掉');
 });
 
-test('★下载原始文件：临时文件有两条兜底清理（1 小时超时 + 开机清空）', async () => {
+test('★下载原始文件：临时文件有两条兜底清理（4 小时超时 + 开机清空）', async () => {
   const { sweepOnce, tempDir, getJob, TEMP_MAX_AGE_MS } = await import('../dist/services/originalDownload.js');
   const { currentCode } = await import('../dist/services/originalCode.js');
   const a = await makeEncryptedArchive('origdl2', '超时清理.mp4');
@@ -963,11 +963,11 @@ test('★下载原始文件：临时文件有两条兜底清理（1 小时超时
   const t = tempDir();
   assert.ok(fs.existsSync(path.join(t, `${jobId}.part`)), '临时文件应在');
 
-  // 模拟"没能确认下载完成、已经放了 1 小时以上" → 清理线程必须删掉它
+  // 模拟"没能确认下载完成、已经放了 4 小时以上" → 清理线程必须删掉它
   const live = getJob(jobId);
   live.readyAt = Date.now() - TEMP_MAX_AGE_MS - 1000;
   sweepOnce();
-  assert.equal(fs.existsSync(path.join(t, `${jobId}.part`)), false, '超过 1 小时的临时文件必须被清理');
+  assert.equal(fs.existsSync(path.join(t, `${jobId}.part`)), false, '超过 4 小时的临时文件必须被清理');
   assert.equal(getJob(jobId), undefined, '任务记录也要清掉');
 
   // 开机清空：往临时目录里丢文件，purgeTempOnBoot 应清干净

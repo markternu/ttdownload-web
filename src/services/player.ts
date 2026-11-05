@@ -22,6 +22,7 @@ import { freeBytes } from '../core/disk';
 import { logger } from '../core/logger';
 import { deriveKeyIv, passwordOf, readVltOriginalName } from './crypto';
 import { isMp4Faststart, isVideoExt, isZipFile, pickVideoFile, remuxToMp4 } from './media';
+import { RESTORED_TTL_MS, ensureRestoredDir, registerRestored, removeRestored, restoredDir } from './restored';
 import { runCommand } from './archive';
 
 const scoped = logger.child('player');
@@ -39,6 +40,8 @@ export interface PlayJob {
   contentType: string;
   sizeBytes: number;
   createdAt: number;
+  /** 还原成功（可播放）的时刻；4 小时从这里开始算 */
+  readyAt: number | null;
   touchedAt: number;
   /** 临时目录（整个目录在清理时删掉） */
   workDir: string;
@@ -46,14 +49,13 @@ export interface PlayJob {
 
 const jobs = new Map<string, PlayJob>();
 
-/** 临时目录：state/play-tmp */
+/** 播放器的临时目录也放【还原文件目录】下面（与「下载原始文件」共用） */
 export function playTempDir(): string {
-  return path.join(config.dirs.state, 'play-tmp');
+  return restoredDir();
 }
 
 function ensurePlayTempDir(): string {
-  fs.mkdirSync(playTempDir(), { recursive: true });
-  return playTempDir();
+  return ensureRestoredDir();
 }
 
 export function getPlayJob(id: string): PlayJob | undefined {
@@ -78,11 +80,7 @@ function dropJob(id: string, reason: string): void {
   const j = jobs.get(id);
   if (!j) return;
   jobs.delete(id);
-  try {
-    fs.rmSync(j.workDir, { recursive: true, force: true });
-  } catch {
-    /* ignore */
-  }
+  removeRestored(j.workDir);
   scoped.mark('PLAY', `播放任务清理 #${j.fileId}：${reason}`);
 }
 
@@ -129,6 +127,7 @@ export function preparePlayable(fileId: number): { ok: true; job: PlayJob } | { 
     contentType: 'video/mp4',
     sizeBytes: 0,
     createdAt: Date.now(),
+    readyAt: null,
     touchedAt: Date.now(),
     workDir,
   };
@@ -246,7 +245,9 @@ async function runPrepare(job: PlayJob): Promise<void> {
   job.sizeBytes = fs.statSync(job.playPath).size;
   job.progress = 100;
   job.state = 'ready';
-  job.touchedAt = Date.now();
+  job.readyAt = Date.now();
+  job.touchedAt = job.readyAt;
+  registerRestored({ path: job.workDir, kind: 'player', sourceFileId: job.fileId, sizeBytes: job.sizeBytes, readyAt: job.readyAt });
   scoped.mark('PLAY', `播放已就绪 #${job.fileId} → ${path.basename(job.playPath)}（${(job.sizeBytes / 1024 ** 2).toFixed(1)} MiB）`);
 }
 
@@ -254,13 +255,14 @@ async function runPrepare(job: PlayJob): Promise<void> {
 /*  后台清理                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 任务超过这个时间没人看就清掉（避免长期占磁盘） */
-export const PLAY_JOB_TTL_MS = 2 * 60 * 60_000;
+/** 每个播放任务还原出来的文件可活 4 小时（从还原成功那一刻起） */
+export const PLAY_JOB_TTL_MS = RESTORED_TTL_MS;
 
 export function sweepPlayJobs(now = Date.now()): number {
   let removed = 0;
   for (const [id, j] of [...jobs]) {
-    if (now - j.touchedAt > PLAY_JOB_TTL_MS) {
+    const born = j.readyAt ?? j.createdAt;
+    if (now - born > PLAY_JOB_TTL_MS) {
       dropJob(id, '超时清理');
       removed += 1;
     }

@@ -326,6 +326,13 @@ export const api = {
 
   junkClean: (categories: string[]) => request<CleanJunkResult>('/api/junk/clean', jsonBody({ categories })),
 
+  /** 设置页「手动清理垃圾」：清空【还原文件目录】+ 其它能自动清的临时垃圾 */
+  cleanJunkAll: () =>
+    request<{ ok: boolean; restored: { removed: number; bytes: number }; junk: { deleted: number; freedBytes: number; errors: string[] } }>(
+      '/api/system/clean-junk',
+      { method: 'POST' },
+    ),
+
   /** 按当前筛选条件取**全部**任务 id（「全选（跨页）」用，列表是分页的） */
   taskIds: (query: TaskQuery = {}) =>
     request<{ ids: number[]; total: number; capped: boolean }>('/api/tasks/ids', {}, {

@@ -29,6 +29,7 @@ import {
 } from '../services/report';
 import { kickScheduler } from '../core/scheduler';
 import { cleanFromReport, scanJunk } from '../services/junkScan';
+import { cleanAllRestored } from '../services/restored';
 import { asyncHandler, badRequest, notFound } from '../utils/http';
 import type { Settings, Task } from '../types';
 
@@ -583,6 +584,27 @@ systemRouter.get(
   asyncHandler(async (_req, res) => {
     const report = await scanJunk();
     res.json(report);
+  }),
+);
+
+/**
+ * 设置页「手动清理垃圾」：一键清空【还原文件目录】（不管有没有到期），
+ * 再把其它能自动清的临时垃圾（aria2 残留 / yt-dlp 分片 / 加密临时 / 归档暂存…）一起清掉。
+ */
+systemRouter.post(
+  '/system/clean-junk',
+  asyncHandler(async (_req, res) => {
+    const restored = cleanAllRestored();
+    const report = await scanJunk();
+    const keys = report.categories.filter((c) => c.autoClean && !c.skipped).map((c) => c.key);
+    const junk = keys.length ? cleanFromReport(report, keys) : { deleted: 0, freedBytes: 0, errors: [] as string[] };
+    logger.child('system').mark('JUNK_CLEAN', `手动清理垃圾：还原文件目录 ${restored.removed} 项 / 其它 ${junk.deleted} 项`, {
+      restoredRemoved: restored.removed,
+      restoredBytes: restored.bytes,
+      junkDeleted: junk.deleted,
+      junkBytes: junk.freedBytes,
+    });
+    res.json({ ok: true, restored, junk });
   }),
 );
 

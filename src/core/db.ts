@@ -80,6 +80,19 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- 【还原文件目录】的登记表：播放器 / 「下载原始文件」解密还原出来的文件
+-- 每个文件从"还原成功"起单独活 4 小时（expires_at）；重启后依然能按表清理。
+CREATE TABLE IF NOT EXISTS restored_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  source_file_id INTEGER,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  ready_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_restored_expires ON restored_files(expires_at);
 `);
 
 /**
@@ -525,6 +538,40 @@ export const seedsRepo = {
   },
   delete(id: number): void {
     db.prepare('DELETE FROM seeds WHERE id=?').run(id);
+  },
+};
+
+export interface RestoredRow {
+  id: number;
+  path: string;
+  kind: string;
+  source_file_id: number | null;
+  size_bytes: number;
+  ready_at: number;
+  expires_at: number;
+}
+
+/** 【还原文件目录】登记表 */
+export const restoredRepo = {
+  upsert(input: { path: string; kind: string; sourceFileId?: number | null; sizeBytes?: number; readyAt: number; expiresAt: number }): void {
+    db.prepare(
+      `INSERT INTO restored_files (path,kind,source_file_id,size_bytes,ready_at,expires_at)
+       VALUES (?,?,?,?,?,?)
+       ON CONFLICT(path) DO UPDATE SET kind=excluded.kind, source_file_id=excluded.source_file_id,
+         size_bytes=excluded.size_bytes, ready_at=excluded.ready_at, expires_at=excluded.expires_at`,
+    ).run(input.path, input.kind, input.sourceFileId ?? null, input.sizeBytes ?? 0, input.readyAt, input.expiresAt);
+  },
+  list(): RestoredRow[] {
+    return db.prepare('SELECT * FROM restored_files ORDER BY ready_at ASC').all() as RestoredRow[];
+  },
+  expired(now: number): RestoredRow[] {
+    return db.prepare('SELECT * FROM restored_files WHERE expires_at <= ?').all(now) as RestoredRow[];
+  },
+  remove(path: string): void {
+    db.prepare('DELETE FROM restored_files WHERE path=?').run(path);
+  },
+  clear(): void {
+    db.exec('DELETE FROM restored_files');
   },
 };
 
