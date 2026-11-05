@@ -189,3 +189,76 @@ test('一个任务带多个成品单元 -> 流水线产出多个成品（大文�
     assert.equal(fs.existsSync(f.path), true, `成品文件应存在: ${f.path}`);
   }
 });
+
+/* ---------- 下载任务不能一直挂在「下载中 100%」 ---------- */
+
+test('downloads：货物交给归档任务后，下载任务立刻 completed（不再显示下载中 100%）', async () => {
+  const dir = path.join(completeDir, 'Demo');
+  writeFile(path.join(dir, 'movie.mp4'), 50);
+  mock.state.torrents = [{ id: 7, name: 'Demo', hashString: 'h1', percentDone: 1 }];
+
+  // 对应的下载任务：进度 100 但状态还是 downloading（用户看到的就是这种）
+  const dt = tasksRepo.create({
+    module: 'transmission',
+    title: 'Demo',
+    platform: 'BT',
+    url: null,
+    status: 'downloading',
+    payload: { torrentId: 7 },
+  });
+
+  await btHarvestTick();
+
+  const after = tasksRepo.get(dt.id);
+  assert.equal(after.status, 'completed', '下载已完成并交给归档任务 → 下载任务必须标完成，不能继续显示下载中');
+  assert.equal(after.progress, 100);
+  assert.equal(after.speedBps, 0);
+  assert.equal(harvestTasks().length, 1, '归档任务照常创建');
+});
+
+test('历史遗留：已经 100% 且货物早被归档任务接手 → 下一轮扫货把下载任务归位', async () => {
+  const dir = path.join(completeDir, 'Demo');
+  writeFile(path.join(dir, 'movie.mp4'), 50); // 目录还在（还没收尾）
+  mock.state.torrents = [{ id: 7, name: 'Demo', hashString: 'h1', percentDone: 1 }];
+
+  const dt = tasksRepo.create({
+    module: 'transmission',
+    title: 'Demo',
+    platform: 'BT',
+    url: null,
+    status: 'downloading',
+    payload: { torrentId: 7 },
+  });
+  // 模拟"修复前就已经建过归档任务"的状态
+  tasksRepo.create({
+    module: 'transmission',
+    title: 'Demo',
+    platform: 'BT',
+    url: null,
+    status: 'archiving',
+    payload: { harvest: { dir, torrentId: 7, torrentName: 'Demo', files: [path.join(dir, 'movie.mp4')] } },
+  });
+
+  await btHarvestTick();
+
+  assert.equal(tasksRepo.get(dt.id).status, 'completed', '历史遗留的「下载中 100%」应被归位成已完成');
+});
+
+test('种子 100% 但没有任何视频 → 下载任务也标完成（不永远挂下载中）', async () => {
+  const dir = path.join(completeDir, 'Demo');
+  writeFile(path.join(dir, 'readme.txt'), 30);
+  mock.state.torrents = [{ id: 7, name: 'Demo', hashString: 'h1', percentDone: 1 }];
+
+  const dt = tasksRepo.create({
+    module: 'transmission',
+    title: 'Demo',
+    platform: 'BT',
+    url: null,
+    status: 'downloading',
+    payload: { torrentId: 7 },
+  });
+
+  await btHarvestTick();
+  assert.equal(tasksRepo.get(dt.id).status, 'completed', '没有可发布视频的种子下完了也应标完成');
+  assert.equal(harvestTasks().length, 0, '没有视频就不该建归档任务');
+});

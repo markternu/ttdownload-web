@@ -160,6 +160,36 @@ async function markFilesUnwanted(torrent: TorrentLite, dir: string, files: strin
   }
 }
 
+/** 找到这个种子对应的"下载任务"（还在下载区的） */
+function findDownloadTask(torrentId: number): TaskWithPayload | undefined {
+  return (tasksRepo.list({ modules: ['transmission'], statuses: ['waiting', 'parsing', 'downloading', 'paused'], pageSize: 500 }).items as TaskWithPayload[])
+    .find((t) => Number((t.payload ?? {}).torrentId ?? 0) === torrentId);
+}
+
+/**
+ * 下载已经 100%、货物交给归档任务之后，把**下载任务**标成 completed。
+ *
+ * 真机 bug（用户报）：任务页里一堆"进度 100% 但状态还是下载中"。
+ * 根因：BT 的完成判定由扫货负责，扫货只建**归档任务**，原来的下载任务要等到
+ * 整个归档→加密→发布→收尾全做完才被置 completed；中间这段时间它一直挂着
+ * "下载中 100%"，看起来就像卡死。现在一交给归档任务就标完成 ——
+ * 下载确实已经完成了，后面的归档发布是另一个任务，会显示在「归档发布」里。
+ */
+function markDownloadCompleted(taskId: number, note: string): void {
+  const t = tasksRepo.get(taskId);
+  if (!t || t.status === 'completed') return;
+  tasksRepo.update(taskId, {
+    status: 'completed',
+    progress: 100,
+    speedBps: 0,
+    finishedAt: new Date().toISOString(),
+    error: null,
+  });
+  taskLog(taskId).mark('BT_HARVEST', note);
+  const updated = tasksRepo.get(taskId);
+  if (updated) bus.emitTask(updated);
+}
+
 /** 已经有发布任务在处理的文件（防止每个 tick 重复交同一个文件） */
 function filesInFlight(): Set<string> {
   const out = new Set<string>();
@@ -240,13 +270,19 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
     const all = entry.isDirectory() ? collectFiles(abs) : [abs];
     const inflightDone = filesInFlight();
     const videos = all.filter((f) => isVideo(f) && sizeOf(f) > 0 && !inflightDone.has(path.resolve(f)));
-    if (!videos.length) continue;
+    // 这个种子对应的下载任务（用于收尾、以及"下载完成"的状态标记）
+    const downloadTask = torrent ? findDownloadTask(torrent.id) : undefined;
+    if (!videos.length) {
+      // 没有可发布的视频（音频/文本/压缩包，或文件已被别的任务处理过）：
+      // 种子已经 100% 的话，别让下载任务永远挂在"下载中" —— 标完成并说明原因。
+      if (torrent && torrent.percentDone >= 1 && downloadTask) {
+        markDownloadCompleted(Number(downloadTask.id), '没有可发布的视频文件，下载已完成（不再计入"下载中"）');
+        summary.finished += 1;
+      }
+      continue;
+    }
 
     const units = buildPublishUnits(videos, maxSmall, sizeOf, baseName, entry.name);
-    const downloadTask = torrent
-      ? (tasksRepo.list({ modules: ['transmission'], statuses: ['waiting', 'parsing', 'downloading', 'paused'], pageSize: 500 }).items as TaskWithPayload[])
-          .find((t) => Number((t.payload ?? {}).torrentId ?? 0) === torrent.id)
-      : undefined;
 
     // ⚠️ 一个目录只建**一个**任务（带多个成品单元）。若拆成多个任务，
     //    先完成的那个会在收尾时把目录删掉，正在打包的那个源文件就没了。
@@ -275,6 +311,8 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
     });
     summary.published += units.length;
     summary.tasks.push(id);
+    // 下载已完成、货已交给归档任务 → 立刻把下载任务标完成，别让它继续显示"下载中 100%"
+    if (downloadTask) markDownloadCompleted(Number(downloadTask.id), '下载已完成，已交给归档任务（后续在「归档发布」里看）');
     // ⚠️ entry.name 就是种子名 / 内容文件夹名 → 日志只记目录（hidePath 隐藏最后一段）
     logger.child('bt-harvest').mark('BT_HARVEST',
       `扫到货（${hidePath(abs)}）：${videos.length} 个视频 / ${units.length} 个成品（${(totalBytes / 1024 ** 2).toFixed(1)}MB）→ 任务 #${id}`, {
@@ -459,6 +497,30 @@ export async function btHarvestTick({ dryRun = false } = {}): Promise<HarvestSum
       continue;
     }
     tasksRepo.update(t.id, { payload: { ...((t.payload ?? {}) as Record<string, unknown>), harvestDone: true } });
+  }
+
+  // ---------- ③ 收尾：下载已 100% 且货物已交给归档任务 → 下载任务标完成 ----------
+  // 这条同时修**历史遗留**：修复前就卡在「下载中 100%」的任务，升级后下一轮扫货就会归位。
+  if (!dryRun) {
+    const active = tasksRepo.list({ modules: ['transmission'], statuses: ['waiting', 'parsing', 'downloading', 'paused'], pageSize: 500 })
+      .items as TaskWithPayload[];
+    const publishTasks = tasksRepo.list({
+      statuses: ['waiting', 'parsing', 'downloading', 'archiving', 'encrypting', 'completed'],
+      pageSize: 1000,
+    }).items as TaskWithPayload[];
+    const torrentById = new Map(torrents.map((t) => [t.id, t]));
+    for (const dt of active) {
+      const tid = Number((dt.payload ?? {}).torrentId ?? 0);
+      if (!tid) continue;
+      const tor = torrentById.get(tid);
+      if (!tor || tor.percentDone < 1) continue;
+      const handled = publishTasks.some(
+        (pt) => Number(((pt.payload ?? {}).harvest as HarvestInfo | undefined)?.torrentId ?? 0) === tid,
+      );
+      if (handled) {
+        markDownloadCompleted(Number(dt.id), '下载已完成，货物已交给归档任务（历史遗留任务归位）');
+      }
+    }
   }
 
   return summary;
