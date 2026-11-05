@@ -111,6 +111,11 @@ export interface Settings {
   requestTimeoutSec: number;
   autoRetry: number;
   theme: 'light' | 'dark' | 'system';
+  /**
+   * 是否显示下载文件的原始名字（设置页「眼睛」按钮）。
+   * 默认 false = 所有页面显示 ****；true 才显示真实名字。
+   */
+  showFileNames: boolean;
   encryptPassword: string;
   moduleConcurrency: { transmission: number; aria2: number; webvideo: number };
   /** BT：只挑视频 + 多视频挑同类 + 小文件打包阈值 */

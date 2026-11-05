@@ -11,6 +11,7 @@ import { runBtEvict, reviveTimedOutBt } from '../services/btEvict';
 import { transmissionRpc } from '../services/settings';
 import { disableBtProxy, enableBtProxy, getBtProxyStatus, originFromRequest, previewBtProxy } from '../services/btProxy';
 import { asyncHandler, badRequest, notFound } from '../utils/http';
+import { maskFields } from '../services/mask';
 
 export const btRouter = Router();
 
@@ -50,7 +51,8 @@ btRouter.post(
 
 btRouter.get('/seeds', (_req, res) => {
   registerPendingSeeds();
-  res.json({ items: seedsRepo.all() });
+  // 隐私开关：隐藏时种子名统一显示 ****
+  res.json({ items: maskFields(seedsRepo.all() as unknown as Record<string, unknown>[], ['name']) });
 });
 
 btRouter.post(
@@ -152,7 +154,7 @@ btRouter.post(
 /** 该模块任务列表（便于前端单独展示） */
 btRouter.get('/tasks', (_req, res) => {
   const { items, total } = tasksRepo.list({ modules: ['transmission'], pageSize: 100 });
-  res.json({ items, total });
+  res.json({ items: maskFields(items as unknown as Record<string, unknown>[], ['title']), total });
 });
 
 // ---------------------------------------------------------------------------

@@ -58,6 +58,8 @@ export function defaultSettings(): Settings {
     requestTimeoutSec: config.requestTimeoutSec,
     autoRetry: config.autoRetry,
     theme: 'system',
+    // 隐私默认：所有页面不显示下载文件的原始名字（设置页「眼睛」按钮才打开）
+    showFileNames: false,
     encryptPassword: config.encryptPassword,
     moduleConcurrency: { ...config.moduleConcurrency },
     btSelect: { ...config.btSelect },

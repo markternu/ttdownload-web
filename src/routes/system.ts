@@ -30,6 +30,7 @@ import {
 import { kickScheduler } from '../core/scheduler';
 import { cleanFromReport, scanJunk } from '../services/junkScan';
 import { cleanAllRestored } from '../services/restored';
+import { maskFields, showFileNames } from '../services/mask';
 import { asyncHandler, badRequest, notFound } from '../utils/http';
 import type { Settings, Task } from '../types';
 
@@ -86,7 +87,10 @@ systemRouter.get(
 );
 
 systemRouter.get('/stats', (_req, res) => {
-  res.json(computeStats());
+  const s = computeStats() as unknown as { recentTasks?: Record<string, unknown>[] };
+  // 隐私开关：隐藏时把最近任务的名字换成 ****
+  if (Array.isArray(s.recentTasks)) s.recentTasks = maskFields(s.recentTasks, ['title']);
+  res.json(s);
 });
 
 /** 日志状态（网页「日志」页顶部信息） */
@@ -521,6 +525,7 @@ systemRouter.put(
       'btEvict',
       'btSelect',
       'btPolicy',
+      'showFileNames',
     ];
     const clean: Record<string, unknown> = {};
     for (const key of allowed) {
@@ -583,6 +588,15 @@ systemRouter.get(
   '/junk',
   asyncHandler(async (_req, res) => {
     const report = await scanJunk();
+    if (!showFileNames()) {
+      // 隐私开关：垃圾页里的文件名/清单也统一显示 ****（清理走 /junk/clean，不依赖这些名字）
+      for (const cat of report.categories) {
+        for (const item of cat.items) item.name = '****';
+      }
+      for (const listing of report.fileListing) {
+        for (const f of listing.files) f.name = '****';
+      }
+    }
     res.json(report);
   }),
 );

@@ -4,6 +4,8 @@ import {
   CheckCircle2,
   Cookie,
   Database,
+  Eye,
+  EyeOff,
   Gauge,
   Globe,
   HardDrive,
@@ -252,6 +254,23 @@ export default function SettingsPage() {
     }
   }
 
+  /** 「眼睛」：切换所有页面是否显示下载文件的原始名字 */
+  const toggleShowFileNames = async () => {
+    if (!settings) return
+    try {
+      await save({ showFileNames: !settings.showFileNames })
+      toast.success(
+        settings.showFileNames ? '已切换为隐藏文件名' : '已切换为显示文件名',
+        settings.showFileNames
+          ? '所有页面里下载文件的名字都会显示为 ****（刷新页面后完全生效）'
+          : '现在可以看到下载文件的真实名字（刷新页面后完全生效）',
+      )
+      void refreshSystem()
+    } catch (err) {
+      toast.error('切换失败', humanizeError((err as { code?: string }).code ?? '', (err as Error).message))
+    }
+  }
+
   const handleTest = async (tool: TestTool) => {
     setTesting(tool)
     setTestResult(null)
@@ -407,6 +426,19 @@ export default function SettingsPage() {
         </div>
         <div className="flex items-center gap-2">
           {dirty ? <Badge tone="warning">有未保存的修改</Badge> : <Badge tone="success">已同步</Badge>}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void toggleShowFileNames()}
+            title={
+              settings?.showFileNames
+                ? '当前：所有页面显示文件名 —— 点一下改成隐藏（****）'
+                : '当前：所有页面隐藏文件名（****） —— 点一下显示真实名字'
+            }
+          >
+            {settings?.showFileNames ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+            {settings?.showFileNames ? '显示文件名' : '隐藏文件名'}
+          </Button>
           <Button variant="outline" size="sm" disabled={!dirty} onClick={() => setDraft(settings)}>
             <Undo2 className="h-3.5 w-3.5" />
             还原

@@ -91,6 +91,8 @@ export interface Settings {
   requestTimeoutSec: number // 默认 30
   autoRetry: number // 默认 2
   theme: 'light' | 'dark' | 'system'
+  /** 「眼睛」开关：是否显示下载文件的原始名字（默认 false=显示 ****） */
+  showFileNames: boolean
   encryptPassword: string // GET 时返回掩码 '******'；PUT 传新值才修改
   moduleConcurrency: { transmission: number; aria2: number; webvideo: number }
   /** BT：只挑视频 + 多视频挑同类 + 打包阈值 */

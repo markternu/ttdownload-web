@@ -6,6 +6,7 @@ import { config } from '../core/config';
 import { filesRepo } from '../core/db';
 import { deletePublished } from '../services/cleanup';
 import { getPlayJob, preparePlayable, publicPlayJob } from '../services/player';
+import { maskFields } from '../services/mask';
 import { logger } from '../core/logger';
 import { asyncHandler, badRequest, notFound, streamFileTo } from '../utils/http';
 import { tarEnd, tarHeader, tarPadding } from '../utils/tar';
@@ -62,7 +63,8 @@ filesRouter.get('/', (req, res) => {
     pendingOnly: status === 'pending',
     downloadedOnly: status === 'downloaded',
   });
-  res.json({ items: rows.map(toApi), total, totalBytes: sum, page, pageSize, status, counts: filesRepo.counts() });
+  // 隐私开关：隐藏时文件名统一显示 ****
+  res.json({ items: maskFields(rows.map(toApi) as unknown as Record<string, unknown>[], ['name', 'title']), total, totalBytes: sum, page, pageSize, status, counts: filesRepo.counts() });
 });
 
 /**
@@ -77,8 +79,8 @@ filesRouter.get('/pending', (req, res) => {
     page,
     pageSize,
   });
-  const items = rows.map(toApi);
-  const oldest = items.reduce<number>((acc, f) => Math.max(acc, f.waitingSec ?? 0), 0);
+  const items = maskFields(rows.map(toApi) as unknown as Record<string, unknown>[], ['name', 'title']);
+  const oldest = items.reduce<number>((acc, f) => Math.max(acc, Number(f.waitingSec ?? 0)), 0);
   res.json({
     items,
     total,

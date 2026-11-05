@@ -43,6 +43,10 @@ process.env.YTDLP_BIN = fakeYtdlp;
 const { createApp } = await import('../dist/app.js');
 const { handoffToArchive, pipelineTick } = await import('../dist/services/pipeline.js');
 const { tasksRepo, filesRepo } = await import('../dist/core/db.js');
+// 本文件的老用例断言的是「真实文件名」（功能改前的行为）；文件名隐私开关默认隐藏，
+// 这里显式打开，保持这些用例测的是它们本来要测的东西（隐私默认由 mask-names.test.mjs 覆盖）。
+const { updateSettings } = await import('../dist/services/settings.js');
+updateSettings({ showFileNames: true });
 
 const server = http.createServer(createApp());
 await new Promise((r) => server.listen(0, '127.0.0.1', r));

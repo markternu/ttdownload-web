@@ -4,6 +4,7 @@ import { cancelTask, deleteTask, pauseTask, resumeTask, retryTask, kickScheduler
 import { asyncHandler, badRequest, notFound } from '../utils/http';
 import { logger } from '../core/logger';
 import type { ModuleId, TaskStatus } from '../types';
+import { maskFields, maskOne } from '../services/mask';
 
 export const tasksRouter = Router();
 
@@ -51,7 +52,8 @@ tasksRouter.get('/', (req, res) => {
   // 同一套筛选条件的统计：页面头部用它把 total 解释清楚
   // （BT 的「归档发布」是**子任务**，不算种子下载任务 —— 否则数字永远对不上）
   const summary = tasksRepo.summary(filter);
-  res.json({ items, total, page, pageSize, summary });
+  // 隐私开关：隐藏时任务名统一显示 ****
+  res.json({ items: maskFields(items as unknown as Record<string, unknown>[], ['title']), total, page, pageSize, summary });
 });
 
 /**
@@ -157,7 +159,7 @@ tasksRouter.post(
 tasksRouter.get('/:id', (req, res) => {
   const task = tasksRepo.get(Number(req.params.id));
   if (!task) throw notFound('任务不存在', 'TASK_NOT_FOUND');
-  res.json(task);
+  res.json(maskOne(task as unknown as Record<string, unknown>, ['title']));
 });
 
 tasksRouter.post(

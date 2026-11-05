@@ -49,6 +49,10 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
   process.env.ORIGINAL_DL_SECRET = 'browser-test-secret-0123456789abcdef0123456789';
   const { createApp } = await import('../dist/app.js');
   const { filesRepo, tasksRepo } = await import('../dist/core/db.js');
+  // 本文件的老用例断言的是真实文件名（功能改前行为）；文件名隐私开关默认隐藏，
+  // 这里显式打开，保持它们在测「列表怎么显示/怎么搜」而不是隐私默认。
+  const { updateSettings } = await import('../dist/services/settings.js');
+  updateSettings({ showFileNames: true });
   // 供「复制下载链接」测试：一条带来源链接的下载任务
   {
     const t = tasksRepo.create({
