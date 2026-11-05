@@ -96,6 +96,40 @@ export default function JunkPage() {
     }
   }
 
+  /**
+   * 「全部清理」：从设置页合并过来的那个一键清理 ——
+   * 清空【还原文件目录】（不管有没有到 4 小时）+ 所有可自动清理的垃圾。
+   */
+  const cleanAll = async () => {
+    const go = window.confirm(
+      [
+        '将执行「全部清理」：',
+        '',
+        '· 清空【还原文件目录】（播放 / 下载原始文件解密出来的文件，不管有没有到 4 小时）；',
+        `· 清理所有可自动清理的垃圾（当前合计 ${formatBytes(report?.junkBytes ?? 0)}）。`,
+        '',
+        '注意：正在播放或正在下载原始文件的会中断。',
+        '',
+        '确定清理吗？',
+      ].join('\n'),
+    )
+    if (!go) return
+    setCleaning(true)
+    try {
+      const r = await api.cleanJunkAll()
+      const total = (r.restored?.bytes ?? 0) + (r.junk?.freedBytes ?? 0)
+      toast.success(
+        '全部清理完成',
+        `还原文件目录 ${r.restored?.removed ?? 0} 项、其它垃圾 ${r.junk?.deleted ?? 0} 项，共释放 ${formatBytes(total, '0 B')}`,
+      )
+      await scan()
+    } catch (e) {
+      toast.error('清理失败', (e as Error).message)
+    } finally {
+      setCleaning(false)
+    }
+  }
+
   const cleanableCats = report?.categories ?? []
 
   return (
@@ -103,7 +137,7 @@ export default function JunkPage() {
       <Card>
         <CardHeader
           title={<span className="flex items-center gap-2"><HardDrive className="h-5 w-5" /> 扫描与清理垃圾</span>}
-          subtitle="断电重启会留下各种临时/半成品文件，这里帮你找出来并一键清理（不碰正在下载和已归档的成品）"
+          subtitle="断电重启会留下各种临时/半成品文件；这里统计所有垃圾的总大小并一键清理（不碰正在下载和已归档的成品）。设置页的清理入口已合并到这里"
           action={
             <Button variant="outline" size="sm" icon={<RefreshCw className="h-4 w-4" />} loading={scanning} onClick={() => void scan()}>
               重新扫描
@@ -126,8 +160,18 @@ export default function JunkPage() {
                 <strong className="tabular-nums text-slate-800 dark:text-slate-100">{report.junkCount}</strong> 项 ·
                 <strong className="tabular-nums text-brand-600 dark:text-brand-400"> {formatBytes(report.junkBytes)}</strong>
               </div>
-              {report.junkCount > 0 ? (
-                <div className="ml-auto flex items-center gap-2">
+              <div className="ml-auto flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  icon={<Trash2 className="h-4 w-4" />}
+                  loading={cleaning}
+                  onClick={() => void cleanAll()}
+                  title="清空【还原文件目录】（不管有没有到 4 小时）+ 所有可自动清理的垃圾"
+                >
+                  全部清理（含还原文件）
+                </Button>
+                {report.junkCount > 0 ? (
                   <Button
                     size="sm"
                     variant="danger"
@@ -138,8 +182,8 @@ export default function JunkPage() {
                   >
                     一键清理已选（{formatBytes(selectedBytes)}）
                   </Button>
-                </div>
-              ) : null}
+                ) : null}
+              </div>
             </div>
 
             {/* 各分类 */}

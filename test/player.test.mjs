@@ -42,7 +42,7 @@ try {
 const root = setupRuntime({ env: { FFMPEG_BIN: fakeFfmpeg } });
 
 const { encryptFile, markVlt } = await import('../dist/services/crypto.js');
-const { preparePlayable, getPlayJob } = await import('../dist/services/player.js');
+const { preparePlayable, getPlayJob, getPlayItem, preparePlayItem } = await import('../dist/services/player.js');
 const { isMp4Faststart, isZipFile, pickVideoFile } = await import('../dist/services/media.js');
 const { filesRepo } = await import('../dist/core/db.js');
 const { createApp } = await import('../dist/app.js');
@@ -83,6 +83,16 @@ async function publishEncrypted(plainPath, title) {
   });
 }
 
+async function waitItem(jobId, index, timeoutMs = 8000) {
+  const t0 = Date.now();
+  for (;;) {
+    const it = getPlayItem(jobId, index);
+    if (it && (it.state === 'ready' || it.state === 'failed')) return it;
+    if (Date.now() - t0 > timeoutMs) throw new Error(`等待视频准备超时（${it?.state} / ${it?.error}）`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 async function waitReady(jobId, timeoutMs = 8000) {
   const t0 = Date.now();
   for (;;) {
@@ -103,7 +113,12 @@ test('mp4（moov 在后）→ 会重封装成 mp4+faststart 再播放', async ()
   assert.equal(prep.ok, true);
   const job = await waitReady(prep.job.id);
   assert.equal(job.state, 'ready', `应准备好，实际 ${job.state} / ${job.error}`);
-  assert.ok(job.playPath && fs.existsSync(job.playPath), '要产出可播放文件');
+  assert.equal(job.items.length, 1, '播放列表 1 个视频');
+  assert.equal(job.items[0].state, 'pending', 'moov 在后 → 选中时才转');
+  assert.ok(preparePlayItem(job.id, 0));
+  const it = await waitItem(job.id, 0);
+  assert.equal(it.state, 'ready', it.error ?? '');
+  assert.ok(it.playPath && fs.existsSync(it.playPath), '要产出可播放文件');
   assert.ok(ffmpegCalls().length >= 1, 'moov 在后 → 必须调用 ffmpeg 重封装');
 });
 
@@ -116,6 +131,8 @@ test('mp4（moov 在前 / faststart）→ 直接用，不白跑 ffmpeg', async (
   const prep = preparePlayable(fileId);
   const job = await waitReady(prep.job.id);
   assert.equal(job.state, 'ready');
+  assert.equal(job.items[0].state, 'ready', 'faststart 的 mp4 直接可播');
+  assert.ok(job.items[0].playPath);
   assert.equal(ffmpegCalls().length, 0, '已经 faststart 的 mp4 不该再跑 ffmpeg');
 });
 
@@ -135,7 +152,11 @@ test('zip 归档 → 先解压再挑视频，再重封装', async () => {
   const prep = preparePlayable(fileId);
   const job = await waitReady(prep.job.id);
   assert.equal(job.state, 'ready', `zip 应能解压播放，实际 ${job.state} / ${job.error}`);
-  assert.ok(fs.existsSync(job.playPath), '要产出可播放文件');
+  assert.equal(job.items.length, 2, 'zip 里两个视频都要进播放列表（不是只挑一个）');
+  assert.ok(preparePlayItem(job.id, 0));
+  const it = await waitItem(job.id, 0);
+  assert.equal(it.state, 'ready', it.error ?? '');
+  assert.ok(fs.existsSync(it.playPath), '要产出可播放文件');
 });
 
 test('不是视频也不是 zip → 明确失败（不瞎调用 ffmpeg）', async () => {
@@ -176,8 +197,9 @@ test('播放流：支持 Range（206 + Content-Range）', async () => {
       await new Promise((r) => setTimeout(r, 50));
     }
     assert.equal(status.state, 'ready', `应准备好：${status.error ?? ''}`);
+    assert.equal(status.items[0].state, 'ready', 'faststart mp4 应直接可播');
 
-    const ranged = await fetch(`${base}/api/files/play/stream/${start.id}`, { headers: { Range: 'bytes=0-9' } });
+    const ranged = await fetch(`${base}/api/files/play/stream/${start.id}/0`, { headers: { Range: 'bytes=0-9' } });
     assert.equal(ranged.status, 206);
     assert.match(String(ranged.headers.get('content-range')), /^bytes 0-9\//);
     assert.equal(ranged.headers.get('accept-ranges'), 'bytes');
@@ -207,4 +229,36 @@ test('normalizeVideosForArchive：非 mp4 / moov 在后 → 转成 mp4 并替换
   assert.ok(fs.existsSync(path.join(dir, 'movie.mp4')), '应产出 movie.mp4');
   assert.ok(r.files.some((f) => f.endsWith('movie.mp4')), '返回的文件列表要换成新 mp4');
   assert.equal(ffmpegCalls().length, 1, '只对需要转的那一个调用 ffmpeg');
+});
+
+/* ---------- zip 归档名字带 _z 标记 ---------- */
+
+test('多文件 zip 归档 / 单个 zip 文件 → 归档名带 _z；单文件不带', async () => {
+  const { archiveTaskFiles } = await import('../dist/services/archive.js');
+  const { initNamePrefix } = await import('../dist/services/crypto.js');
+  const { execFileSync } = await import('node:child_process');
+  initNamePrefix('zzz');
+
+  const dir = path.join(root, 'mark');
+  fs.mkdirSync(dir, { recursive: true });
+  const a = path.join(dir, 'a.mp4');
+  const b = path.join(dir, 'b.mp4');
+  fs.writeFileSync(a, 'a-bytes');
+  fs.writeFileSync(b, 'b-bytes');
+
+  const multi = await archiveTaskFiles([a, b], { originalName: 'multi' });
+  assert.equal(multi.ok, true);
+  assert.match(multi.publishedName, /_z$/, '多文件打成 zip → 名字要带 _z');
+
+  const zipPath = path.join(dir, 'bundle.zip');
+  execFileSync('zip', ['-j', '-q', zipPath, path.join(dir, 'a.mp4')]);
+  const singleZip = await archiveTaskFiles([zipPath], { originalName: 'single-zip' });
+  assert.equal(singleZip.ok, true);
+  assert.match(singleZip.publishedName, /_z$/, '原始文件本身就是 zip → 也要带 _z');
+
+  const c = path.join(dir, 'c.mp4');
+  fs.writeFileSync(c, 'c-bytes');
+  const single = await archiveTaskFiles([c], { originalName: 'single' });
+  assert.equal(single.ok, true);
+  assert.doesNotMatch(single.publishedName, /_z$/, '单个普通文件不带 _z');
 });

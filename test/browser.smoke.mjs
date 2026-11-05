@@ -1037,6 +1037,11 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.waitForSelector('text=各目录占用', { timeout: 15000 });
     // 也要能看到"文件清单"（用户要看某个目录里到底有哪些文件）
     await page.waitForSelector('text=文件清单', { timeout: 15000 });
+    // 设置页的清理入口已合并到这里：要有「全部清理（含还原文件）」按钮
+    assert.ok(
+      (await page.locator('text=/全部清理（含还原文件）/').count()) > 0,
+      '垃圾清理页要有「全部清理」按钮（含还原文件目录）',
+    );
     // 至少一个分类标题出现（aria2 直链残留 / 视频解析下载残留 / 还原文件目录 …）
     assert.ok(
       (await page.locator('text=/aria2 直链残留|视频解析下载残留|还原文件目录/').count()) > 0,

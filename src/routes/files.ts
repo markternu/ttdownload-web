@@ -5,7 +5,7 @@ import { Router } from 'express';
 import { config } from '../core/config';
 import { filesRepo } from '../core/db';
 import { deletePublished } from '../services/cleanup';
-import { getPlayJob, preparePlayable, publicPlayJob } from '../services/player';
+import { getPlayItem, getPlayJob, preparePlayItem, preparePlayable, publicPlayJob } from '../services/player';
 import { maskFields } from '../services/mask';
 import { logger } from '../core/logger';
 import { asyncHandler, badRequest, notFound, streamFileTo } from '../utils/http';
@@ -288,17 +288,41 @@ filesRouter.get(
   }),
 );
 
-/** 播放流（支持 Range，给 <video> 边下边播/拖进度条） */
-filesRouter.get(
-  '/play/stream/:jobId',
+/** 播放列表里某个视频还没转好时，点它就开始转（幂等） */
+filesRouter.post(
+  '/play/prepare-item',
   asyncHandler(async (req, res) => {
-    const j = getPlayJob(String(req.params.jobId));
+    const jobId = String(req.body?.jobId ?? '');
+    const index = Number(req.body?.index ?? NaN);
+    if (!jobId || !Number.isFinite(index)) throw badRequest('缺少 jobId / index', 'MISSING_PARAM');
+    const item = preparePlayItem(jobId, index);
+    if (!item) throw notFound('播放任务或视频不存在', 'PLAY_ITEM_NOT_FOUND');
+    res.json({
+      index: item.index,
+      name: item.name,
+      sizeBytes: item.sizeBytes,
+      state: item.state,
+      ready: item.state === 'ready',
+      error: item.error,
+    });
+  }),
+);
+
+/** 播放流（支持 Range，给 <video> 边下边播/拖进度条）；index = 播放列表第几个 */
+filesRouter.get(
+  '/play/stream/:jobId/:index',
+  asyncHandler(async (req, res) => {
+    const jobId = String(req.params.jobId);
+    const index = Number(req.params.index);
+    const j = getPlayJob(jobId);
     if (!j) throw notFound('播放任务不存在或已过期', 'PLAY_JOB_NOT_FOUND');
-    if (j.state !== 'ready' || !j.playPath || !fs.existsSync(j.playPath)) {
-      throw badRequest('还没准备好，请稍后再试', 'NOT_READY');
+    const item = getPlayItem(jobId, index);
+    if (!item) throw notFound('视频不在播放列表里', 'PLAY_ITEM_NOT_FOUND');
+    if (item.state !== 'ready' || !item.playPath || !fs.existsSync(item.playPath)) {
+      throw badRequest('这个视频还没准备好，请稍后再试', 'NOT_READY');
     }
     j.touchedAt = Date.now();
-    const stat = fs.statSync(j.playPath);
+    const stat = fs.statSync(item.playPath);
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Cache-Control', 'no-store');
@@ -316,10 +340,10 @@ filesRouter.get(
       res.status(206);
       res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
       res.setHeader('Content-Length', String(end - start + 1));
-      streamFileTo(res, j.playPath, { start, end });
+      streamFileTo(res, item.playPath, { start, end });
       return;
     }
     res.setHeader('Content-Length', String(stat.size));
-    streamFileTo(res, j.playPath);
+    streamFileTo(res, item.playPath);
   }),
 );

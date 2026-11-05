@@ -117,6 +117,22 @@ function stageForZip(files: string[], tag: string): { dir: string | null; files:
  *  - 单文件 -> 原样使用
  *  - 统一重命名为 <随机前缀><序号>，并把原始名写入 V-L-T 标记
  */
+/** 文件头是不是 zip（PK\x03\x04）—— 只读 4 字节，不引入 media 避免循环依赖 */
+function isZipMagic(file: string): boolean {
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(4);
+      if (fs.readSync(fd, buf, 0, 4, 0) < 4) return false;
+      return buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
 export async function archiveTaskFiles(
   files: string[],
   opts: { originalName: string; multiFileHint?: boolean; title?: string; logName?: string; hideNames?: boolean },
@@ -134,7 +150,10 @@ export async function archiveTaskFiles(
   fs.mkdirSync(wd.archiveReady, { recursive: true });
   fs.mkdirSync(config.dirs.state, { recursive: true });
 
-  const publishedName = nextPublishName();
+  // 归档结果是 zip（多文件打包，或原始文件本身就是 zip）→ 名字加 `_z` 标记，
+  // 方便一眼认出"这是压缩包归档的（里面可能有多集视频）"。
+  const zipResult = existing.length > 1 || (existing.length === 1 && isZipMagic(existing[0]));
+  const publishedName = zipResult ? `${nextPublishName()}_z` : nextPublishName();
   const target = path.join(wd.archiveReady, publishedName);
   const originalName = safeFileName(opts.originalName || path.basename(existing[0]));
 

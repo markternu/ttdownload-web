@@ -157,8 +157,6 @@ export default function SettingsPage() {
   const [draft, setDraft] = useState<Settings | null>(null)
   const [speedInput, setSpeedInput] = useState('0')
   const [testing, setTesting] = useState<TestTool | null>(null)
-  /** 「手动清理垃圾」正在进行 */
-  const [cleaningJunk, setCleaningJunk] = useState(false)
   const [testResult, setTestResult] = useState<{ tool: TestTool; ok: boolean; message: string } | null>(
     null,
   )
@@ -232,27 +230,6 @@ export default function SettingsPage() {
     }
   }
 
-  /** 顶部「手动清理垃圾」：清空【还原文件目录】+ 其它临时垃圾 */
-  const handleCleanJunk = async () => {
-    const ok = window.confirm(
-      '确定清理垃圾吗？\n\n会做两件事：\n① 清空【还原文件目录】（播放 / 下载原始文件解密出来的文件，不管有没有到 4 小时）；\n② 清掉其它临时垃圾（aria2 残留、yt-dlp 分片、加密临时、归档暂存…）。\n\n注意：正在播放或正在下载原始文件的会中断。',
-    )
-    if (!ok) return
-    setCleaningJunk(true)
-    try {
-      const r = await api.cleanJunkAll()
-      const total = (r.restored?.bytes ?? 0) + (r.junk?.freedBytes ?? 0)
-      toast.success(
-        '清理完成',
-        `还原文件目录 ${r.restored?.removed ?? 0} 项、其它垃圾 ${r.junk?.deleted ?? 0} 项，共释放 ${formatBytes(total, '0 B')}`,
-      )
-      void refreshSystem()
-    } catch (err) {
-      toast.error('清理失败', humanizeError((err as { code?: string }).code ?? '', (err as Error).message))
-    } finally {
-      setCleaningJunk(false)
-    }
-  }
 
   /** 「眼睛」：切换所有页面是否显示下载文件的原始名字 */
   const toggleShowFileNames = async () => {
@@ -399,24 +376,6 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-5">
-      {/* 顶部：手动清理垃圾（清空【还原文件目录】+ 其它临时垃圾） */}
-      <Card>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="flex items-center gap-2 text-sm font-semibold text-slate-800 dark:text-slate-100">
-              <Trash2 className="h-4 w-4" /> 手动清理垃圾
-            </p>
-            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-              一键清空【还原文件目录】（播放 / 下载原始文件解密还原出来的文件，不用等 4 小时），并清理其它临时垃圾
-            </p>
-          </div>
-          <Button variant="danger" size="sm" loading={cleaningJunk} onClick={() => void handleCleanJunk()}>
-            <Trash2 className="h-3.5 w-3.5" />
-            立即清理垃圾
-          </Button>
-        </div>
-      </Card>
-
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">设置</h2>

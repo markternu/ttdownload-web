@@ -39,8 +39,8 @@ export function isZipFile(file: string): boolean {
   }
 }
 
-/** 递归找目录里**最大**的视频文件（BT 里常见多集、多 CD，取最大的那个） */
-export function pickVideoFile(dir: string, maxDepth = 6): string | null {
+/** 递归找目录里**所有**视频文件（按体积从大到小；zip 里可能有很多集） */
+export function pickVideoFiles(dir: string, maxDepth = 6): string[] {
   const found: { p: string; size: number }[] = [];
   const walk = (d: string, depth: number): void => {
     if (depth > maxDepth) return;
@@ -67,7 +67,12 @@ export function pickVideoFile(dir: string, maxDepth = 6): string | null {
   };
   walk(dir, 0);
   found.sort((a, b) => b.size - a.size);
-  return found[0]?.p ?? null;
+  return found.map((f) => f.p);
+}
+
+/** 递归找目录里**最大**的视频文件（BT 里常见多集、多 CD，取最大的那个） */
+export function pickVideoFile(dir: string, maxDepth = 6): string | null {
+  return pickVideoFiles(dir, maxDepth)[0] ?? null;
 }
 
 /**

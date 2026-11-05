@@ -1,15 +1,16 @@
 /**
  * 「播放器」后端：把**加密归档的成品**变成浏览器能直接 <video> 播放的 mp4。
  *
- * 流程（全部在后台跑，前端轮询进度）：
+ * 流程（后台跑，前端轮询）：
  *   ① 解密（openssl -d，密码同加密时）
  *   ② 砍掉尾部 V-L-T 标记
- *   ③ 如果解出来是 **zip**（归档时多文件会打包）→ 解压，挑最大的视频文件
- *   ④ 如果不是 **mp4 + moov 在前**（faststart）→ ffmpeg 重封装成 mp4 + faststart
+ *   ③ 如果解出来是 **zip**（归档时多文件会打包，名字带 `_z`）→ 解压，
+ *      收集**里面所有视频**当成播放列表（不是只挑一个！）
+ *   ④ 每个视频单独准备：不是 mp4 + moov 在前的，用 ffmpeg 重封装成 mp4 + faststart
  *      （-c copy，不重新编码；moov 在前的 mp4 浏览器才能边下边播）
- *   ⑤ 提供支持 HTTP Range 的流，给 <video> 拖进度条
+ *   ⑤ 每个视频提供支持 HTTP Range 的流，给 <video> 拖进度条
  *
- * 临时文件放在 state/play-tmp，后台定时清理；失败不会动原始加密文件（只读）。
+ * 临时文件放在【还原文件目录】（state/restored），每个任务从还原成功起活 4 小时。
  */
 
 import crypto from 'node:crypto';
@@ -21,26 +22,41 @@ import { filesRepo } from '../core/db';
 import { freeBytes } from '../core/disk';
 import { logger } from '../core/logger';
 import { deriveKeyIv, passwordOf, readVltOriginalName } from './crypto';
-import { isMp4Faststart, isVideoExt, isZipFile, pickVideoFile, remuxToMp4 } from './media';
+import { isMp4Faststart, isVideoExt, isZipFile, pickVideoFiles, remuxToMp4 } from './media';
 import { RESTORED_TTL_MS, ensureRestoredDir, registerRestored, removeRestored, restoredDir } from './restored';
 import { runCommand } from './archive';
 
 const scoped = logger.child('player');
 
-export type PlayState = 'decrypting' | 'extracting' | 'remuxing' | 'ready' | 'failed';
+export type PlayJobState = 'decrypting' | 'extracting' | 'ready' | 'failed';
+export type PlayItemState = 'pending' | 'remuxing' | 'ready' | 'failed';
+
+/** 一个可播放的视频（zip 里可能有很多个） */
+export interface PlayItem {
+  index: number;
+  /** 解压出来/解密出来的文件名（不是原始下载名） */
+  name: string;
+  sizeBytes: number;
+  state: PlayItemState;
+  /** 可播放的 mp4 路径（ready 之后才有；内部字段，不下发前端） */
+  playPath: string | null;
+  error: string | null;
+  /** 源文件绝对路径（内部用，不下发） */
+  srcPath: string;
+}
 
 export interface PlayJob {
   id: string;
   fileId: number;
-  state: PlayState;
+  state: PlayJobState;
   progress: number;
   error: string | null;
-  /** 可播放的 mp4 路径（ready 之后才有） */
-  playPath: string | null;
-  contentType: string;
+  /** 播放列表（解密+解压完成后才有） */
+  items: PlayItem[];
+  /** 所有视频总大小 */
   sizeBytes: number;
   createdAt: number;
-  /** 还原成功（可播放）的时刻；4 小时从这里开始算 */
+  /** 还原成功（播放列表就绪）的时刻；4 小时从这里开始算 */
   readyAt: number | null;
   touchedAt: number;
   /** 临时目录（整个目录在清理时删掉） */
@@ -62,6 +78,21 @@ export function getPlayJob(id: string): PlayJob | undefined {
   return jobs.get(id);
 }
 
+export function getPlayItem(jobId: string, index: number): PlayItem | undefined {
+  return jobs.get(jobId)?.items.find((it) => it.index === index);
+}
+
+function publicItem(it: PlayItem): Record<string, unknown> {
+  return {
+    index: it.index,
+    name: it.name,
+    sizeBytes: it.sizeBytes,
+    state: it.state,
+    ready: it.state === 'ready',
+    error: it.error,
+  };
+}
+
 /** 对外（API）用的字段，别把内部路径全暴露出去 */
 export function publicPlayJob(j: PlayJob): Record<string, unknown> {
   return {
@@ -70,7 +101,8 @@ export function publicPlayJob(j: PlayJob): Record<string, unknown> {
     state: j.state,
     progress: j.progress,
     error: j.error,
-    playable: j.state === 'ready' && !!j.playPath,
+    items: j.items.map(publicItem),
+    playable: j.state === 'ready' && j.items.length > 0,
     sizeBytes: j.sizeBytes,
     createdAt: j.createdAt,
   };
@@ -123,8 +155,7 @@ export function preparePlayable(fileId: number): { ok: true; job: PlayJob } | { 
     state: 'decrypting',
     progress: 0,
     error: null,
-    playPath: null,
-    contentType: 'video/mp4',
+    items: [],
     sizeBytes: 0,
     createdAt: Date.now(),
     readyAt: null,
@@ -193,10 +224,10 @@ async function runPrepare(job: PlayJob): Promise<void> {
   }
   fs.truncateSync(decPath, contentLen);
 
-  // ③ zip → 解压 → 挑最大的视频
+  // ③ zip → 解压 → 收集**所有**视频（播放列表）
   job.state = 'extracting';
   job.progress = 50;
-  let source = decPath;
+  let videos: string[];
   if (isZipFile(decPath)) {
     const unzDir = path.join(job.workDir, 'unzipped');
     fs.mkdirSync(unzDir, { recursive: true });
@@ -205,50 +236,78 @@ async function runPrepare(job: PlayJob): Promise<void> {
       hideArgs: true,
       hideOutput: true,
     });
-    const picked = pickVideoFile(unzDir);
-    if (!picked) {
+    videos = pickVideoFiles(unzDir);
+    if (!videos.length) {
       job.state = 'failed';
       job.error = r.code === 0 ? 'zip 里没有找到视频文件' : `解压失败（unzip 退出码 ${r.code}）：${r.stderr.trim().slice(-200)}`;
       return;
     }
-    source = picked;
     try {
       fs.rmSync(decPath, { force: true });
     } catch {
       /* ignore */
     }
   } else if (!isVideoExt(name)) {
-    // ⚠️ 用原始文件名判断：解密出来的临时文件固定叫 decrypted.bin，按它的扩展名判断会全失败
+    // ⚠️ 用原始文件名判断：解密出来的临时文件固定叫 decrypted.bin
     job.state = 'failed';
     job.error = `解密出来的不是视频文件（原始名：${name}），既不是 zip 也不是常见视频格式`;
     return;
+  } else {
+    videos = [decPath];
   }
   job.progress = 70;
 
-  // ④ 不是 mp4 + faststart → 重封装
-  const playPath = path.join(job.workDir, 'play.mp4');
-  if (isMp4Faststart(source)) {
-    // 已经是 moov 在前的 mp4，直接用
-    job.playPath = source;
-  } else {
-    job.state = 'remuxing';
-    job.progress = 75;
-    const remux = await remuxToMp4(source, playPath);
-    if (!remux.ok) {
-      job.state = 'failed';
-      job.error = remux.error ?? '重封装失败（服务器可能缺少 ffmpeg）';
-      return;
-    }
-    job.playPath = playPath;
-  }
-
-  job.sizeBytes = fs.statSync(job.playPath).size;
+  // ④ 组装播放列表：已经是 mp4+faststart 的直接就绪，其余的等用户选中时再重封装
+  job.items = videos.map((p, i) => {
+    const size = fs.existsSync(p) ? fs.statSync(p).size : 0;
+    const fast = isMp4Faststart(p);
+    return {
+      index: i,
+      name: path.basename(p),
+      sizeBytes: size,
+      state: fast ? 'ready' : 'pending',
+      playPath: fast ? p : null,
+      error: null,
+      srcPath: p,
+    } as PlayItem;
+  });
+  job.sizeBytes = job.items.reduce((n, it) => n + it.sizeBytes, 0);
   job.progress = 100;
   job.state = 'ready';
   job.readyAt = Date.now();
   job.touchedAt = job.readyAt;
   registerRestored({ path: job.workDir, kind: 'player', sourceFileId: job.fileId, sizeBytes: job.sizeBytes, readyAt: job.readyAt });
-  scoped.mark('PLAY', `播放已就绪 #${job.fileId} → ${path.basename(job.playPath)}（${(job.sizeBytes / 1024 ** 2).toFixed(1)} MiB）`);
+  scoped.mark('PLAY', `播放列表已就绪 #${job.fileId}：${job.items.length} 个视频（${(job.sizeBytes / 1024 ** 2).toFixed(1)} MiB）`);
+}
+
+/**
+ * 准备播放列表里的第 index 个视频（不是 mp4+faststart 的会启动 ffmpeg 重封装）。
+ * 幂等：已就绪/正在转的直接返回当前状态。
+ */
+export function preparePlayItem(jobId: string, index: number): PlayItem | null {
+  const job = jobs.get(jobId);
+  if (!job) return null;
+  const item = job.items.find((it) => it.index === index);
+  if (!item) return null;
+  job.touchedAt = Date.now();
+  if (item.state === 'pending') {
+    item.state = 'remuxing';
+    const out = path.join(job.workDir, `play_${item.index}.mp4`);
+    void (async () => {
+      const r = await remuxToMp4(item.srcPath, out);
+      if (r.ok) {
+        item.playPath = out;
+        item.state = 'ready';
+        scoped.mark('PLAY', `第 ${item.index + 1} 个视频已转好（${path.basename(item.srcPath)}）`);
+      } else {
+        item.state = 'failed';
+        item.error = r.error ?? '重封装失败（服务器可能缺少 ffmpeg）';
+        scoped.warn(`[MARK:PLAY] 第 ${item.index + 1} 个视频重封装失败：${item.error}`);
+      }
+      job.touchedAt = Date.now();
+    })();
+  }
+  return item;
 }
 
 /* ------------------------------------------------------------------ */
@@ -268,26 +327,6 @@ export function sweepPlayJobs(now = Date.now()): number {
     }
   }
   return removed;
-}
-
-/** 开机清空残留的播放临时目录（上次没清干净的） */
-export function purgePlayTempOnBoot(): { removed: number } {
-  let removed = 0;
-  try {
-    if (!fs.existsSync(playTempDir())) return { removed: 0 };
-    for (const name of fs.readdirSync(playTempDir())) {
-      try {
-        fs.rmSync(path.join(playTempDir(), name), { recursive: true, force: true });
-        removed += 1;
-      } catch {
-        /* ignore */
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  if (removed) scoped.mark('PLAY', `开机清理播放临时文件 ${removed} 个`);
-  return { removed };
 }
 
 let timer: NodeJS.Timeout | null = null;

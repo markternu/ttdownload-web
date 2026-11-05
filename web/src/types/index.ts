@@ -490,6 +490,28 @@ export interface CleanJunkResult {
   errors: string[]
 }
 
+/* ---------------- 播放器 ---------------- */
+
+export interface PlayItemInfo {
+  index: number
+  name: string
+  sizeBytes: number
+  state: 'pending' | 'remuxing' | 'ready' | 'failed'
+  ready: boolean
+  error: string | null
+}
+
+export interface PlayJobInfo {
+  id: string
+  fileId: number
+  state: 'decrypting' | 'extracting' | 'ready' | 'failed'
+  progress: number
+  error: string | null
+  items: PlayItemInfo[]
+  playable: boolean
+  sizeBytes: number
+}
+
 /** 列表页的状态筛选：「已发布」与「待下载」已合并成一个列表，用这个区分 */
 export type FileStatusFilter = 'all' | 'pending' | 'downloaded'
 /** 各状态计数（筛选徽章 + 「等待最久」用） */

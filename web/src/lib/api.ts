@@ -41,6 +41,8 @@ import type {
   TaskListResponse,
   TaskQuery,
   TestTool,
+  PlayItemInfo,
+  PlayJobInfo,
 } from '../types'
 
 /**
@@ -526,16 +528,12 @@ export const api = {
 
   /* ---------------- 播放器（解密归档 → 解压 → 重封装 mp4） ---------------- */
 
-  filePlay: (id: number) =>
-    request<{ id: string; fileId: number; state: string; progress: number; error: string | null; playable: boolean; sizeBytes: number }>(
-      `/api/files/${id}/play`,
-      { method: 'POST' },
-    ),
-  filePlayStatus: (jobId: string) =>
-    request<{ id: string; fileId: number; state: string; progress: number; error: string | null; playable: boolean; sizeBytes: number }>(
-      `/api/files/play/status/${encodeURIComponent(jobId)}`,
-    ),
-  filePlayStreamUrl: (jobId: string): string => `${API_BASE}/api/files/play/stream/${encodeURIComponent(jobId)}`,
+  filePlay: (id: number) => request<PlayJobInfo>(`/api/files/${id}/play`, { method: 'POST' }),
+  filePlayStatus: (jobId: string) => request<PlayJobInfo>(`/api/files/play/status/${encodeURIComponent(jobId)}`),
+  filePlayPrepareItem: (jobId: string, index: number) =>
+    request<PlayItemInfo>('/api/files/play/prepare-item', jsonBody({ jobId, index })),
+  filePlayStreamUrl: (jobId: string, index: number): string =>
+    `${API_BASE}/api/files/play/stream/${encodeURIComponent(jobId)}/${index}`,
 
   /* ------------------------------ 设置 ------------------------------ */
 
