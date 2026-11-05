@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Clock, Download, FileOutput, FileVideo2, HardDrive, RefreshCw, Search, Trash2, X } from 'lucide-react'
+import { Clock, Download, FileOutput, FileVideo2, HardDrive, PlayCircle, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import {
   Badge,
   Button,
@@ -18,6 +18,7 @@ import {
 } from '../components/ui'
 import type { Column } from '../components/ui'
 import { useFileEvents } from '../context/AppDataContext'
+import { VideoPlayerModal, type PlayableFile } from '../components/player/VideoPlayerModal'
 import { useToast } from '../context/ToastContext'
 import { useOriginalDownload } from '../context/OriginalDownloadContext'
 import { useDebouncedValue, useFiles } from '../hooks/useAsync'
@@ -73,6 +74,8 @@ export default function FilesPage() {
 
   /* ---------------- 单条删除（原有功能） ---------------- */
   const [target, setTarget] = useState<PublishedFile | null>(null)
+  /** 正在播放的文件（null = 没开播放器） */
+  const [playing, setPlaying] = useState<PlayableFile | null>(null)
   const [withFile, setWithFile] = useState(false)
   const [deleting, setDeleting] = useState(false)
 
@@ -355,6 +358,15 @@ export default function FilesPage() {
         <div className="flex flex-wrap items-center justify-end gap-1.5">
           {file.available ? (
             <>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setPlaying({ id: file.id, name: file.name, title: file.title })}
+                title="在线播放（服务器先解密/解压/重封装成 mp4，moov 在文件头可边下边播）"
+              >
+                <PlayCircle className="h-3.5 w-3.5" />
+                播放
+              </Button>
               <a
                 href={api.fileDownloadUrl(file.id, file.name)}
                 target="_blank"
@@ -705,6 +717,8 @@ export default function FilesPage() {
         onClose={closeBulk}
         onConfirm={() => void handleBulkDelete()}
       />
+
+      <VideoPlayerModal file={playing} onClose={() => setPlaying(null)} />
     </div>
   )
 }

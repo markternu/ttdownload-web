@@ -517,6 +517,19 @@ export const api = {
     return name ? `${base}?name=${encodeURIComponent(name)}` : base
   },
 
+  /* ---------------- 播放器（解密归档 → 解压 → 重封装 mp4） ---------------- */
+
+  filePlay: (id: number) =>
+    request<{ id: string; fileId: number; state: string; progress: number; error: string | null; playable: boolean; sizeBytes: number }>(
+      `/api/files/${id}/play`,
+      { method: 'POST' },
+    ),
+  filePlayStatus: (jobId: string) =>
+    request<{ id: string; fileId: number; state: string; progress: number; error: string | null; playable: boolean; sizeBytes: number }>(
+      `/api/files/play/status/${encodeURIComponent(jobId)}`,
+    ),
+  filePlayStreamUrl: (jobId: string): string => `${API_BASE}/api/files/play/stream/${encodeURIComponent(jobId)}`,
+
   /* ------------------------------ 设置 ------------------------------ */
 
   settings: () => request<Settings>('/api/settings'),

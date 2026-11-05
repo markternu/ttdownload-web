@@ -5,6 +5,7 @@ import { Router } from 'express';
 import { config } from '../core/config';
 import { filesRepo } from '../core/db';
 import { deletePublished } from '../services/cleanup';
+import { getPlayJob, preparePlayable, publicPlayJob } from '../services/player';
 import { logger } from '../core/logger';
 import { asyncHandler, badRequest, notFound, streamFileTo } from '../utils/http';
 import { tarEnd, tarHeader, tarPadding } from '../utils/tar';
@@ -257,3 +258,65 @@ filesRouter.get('/orphans', (_req, res) => {
   }
   res.json({ orphans });
 });
+
+
+/* ------------------------------------------------------------------ */
+/*  播放器：加密归档 → 解密 →（zip 解压）→（重封装 mp4+faststart）→ 流     */
+/* ------------------------------------------------------------------ */
+
+/** 开始准备播放（后台解密/解压/重封装，立即返回 job） */
+filesRouter.post(
+  '/:id/play',
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    const r = preparePlayable(id);
+    if (!r.ok) throw badRequest(r.error, r.code);
+    res.json(publicPlayJob(r.job));
+  }),
+);
+
+/** 查询播放准备进度 */
+filesRouter.get(
+  '/play/status/:jobId',
+  asyncHandler(async (req, res) => {
+    const j = getPlayJob(String(req.params.jobId));
+    if (!j) throw notFound('播放任务不存在或已过期', 'PLAY_JOB_NOT_FOUND');
+    res.json(publicPlayJob(j));
+  }),
+);
+
+/** 播放流（支持 Range，给 <video> 边下边播/拖进度条） */
+filesRouter.get(
+  '/play/stream/:jobId',
+  asyncHandler(async (req, res) => {
+    const j = getPlayJob(String(req.params.jobId));
+    if (!j) throw notFound('播放任务不存在或已过期', 'PLAY_JOB_NOT_FOUND');
+    if (j.state !== 'ready' || !j.playPath || !fs.existsSync(j.playPath)) {
+      throw badRequest('还没准备好，请稍后再试', 'NOT_READY');
+    }
+    j.touchedAt = Date.now();
+    const stat = fs.statSync(j.playPath);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Cache-Control', 'no-store');
+
+    const range = req.header('range');
+    if (range) {
+      const m = /bytes=(\d*)-(\d*)/.exec(range);
+      if (!m) throw badRequest('Range 头格式错误');
+      const start = m[1] ? Number.parseInt(m[1], 10) : 0;
+      const end = m[2] ? Number.parseInt(m[2], 10) : stat.size - 1;
+      if (start >= stat.size || end >= stat.size || start > end) {
+        res.status(416).setHeader('Content-Range', `bytes */${stat.size}`).end();
+        return;
+      }
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+      res.setHeader('Content-Length', String(end - start + 1));
+      streamFileTo(res, j.playPath, { start, end });
+      return;
+    }
+    res.setHeader('Content-Length', String(stat.size));
+    streamFileTo(res, j.playPath);
+  }),
+);

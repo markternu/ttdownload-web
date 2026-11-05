@@ -6,6 +6,7 @@ import { bus } from '../core/events';
 import { filesRepo, tasksRepo } from '../core/db';
 import { logger, taskLog } from '../core/logger';
 import { archiveTaskFiles, moveWithDedup } from './archive';
+import { normalizeVideosForArchive } from './media';
 import { workDirs } from './usbMount';
 import { encryptFile, stripExtension } from './crypto';
 import { encryptPassword, getSettings } from './settings';
@@ -71,7 +72,17 @@ async function processArchiving(): Promise<void> {
     for (const u of units) {
       // 断点续跑：已经归档过的单元不重复做
       if (u.archivePath && fs.existsSync(u.archivePath)) continue;
-      const res = await archiveTaskFiles(u.files, {
+      // 归档前：非 mp4 / moov 不在前的视频先重封装成 mp4+faststart
+      //（失败不阻断归档，保留原文件继续走；这样成品天然能在线播放）
+      const norm = await normalizeVideosForArchive(u.files);
+      if (norm.converted > 0) {
+        u.files = norm.files;
+        tasksRepo.update(task.id, { payload: { ...payload, publishUnits: units } });
+        taskLog(task.id, 'pipeline').mark('ARCHIVE', `归档前转封装 ${norm.converted} 个视频为 mp4+faststart`, {
+          converted: norm.converted,
+        });
+      }
+      const res = await archiveTaskFiles(norm.files, {
         originalName: u.name,
         title: task.title,
         multiFileHint: u.files.length > 1,

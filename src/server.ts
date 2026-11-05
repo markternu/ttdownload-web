@@ -20,6 +20,7 @@ import {
 import { startOriginalDownloadWorker, stopOriginalDownloadWorker } from './services/originalDownload';
 import { startUpdateWorker, stopUpdateWorker } from './services/updater';
 import { startAria2HarvestWorker, stopAria2HarvestWorker } from './services/aria2Harvest';
+import { purgePlayTempOnBoot, startPlayWorker, stopPlayWorker } from './services/player';
 
 /**
  * 开机自检：用户上传的 cookies.txt 还能不能用（不联网，只看结构与关键字段/过期时间）。
@@ -90,6 +91,8 @@ async function main(): Promise<void> {
   startPipeline();
   startScheduler();
   startAria2HarvestWorker();
+  purgePlayTempOnBoot(); // 开机清掉上次没清干净的播放临时文件
+  startPlayWorker();
   startBtEvictWorker();
   startBtHarvestWorker();
   startUsbWorker();
@@ -116,6 +119,7 @@ async function main(): Promise<void> {
     stopScheduler();
     stopPipeline();
     stopAria2HarvestWorker();
+    stopPlayWorker();
     stopBtEvictWorker();
     stopBtHarvestWorker();
     stopUsbWorker();
