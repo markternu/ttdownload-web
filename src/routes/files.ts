@@ -63,8 +63,8 @@ filesRouter.get('/', (req, res) => {
     pendingOnly: status === 'pending',
     downloadedOnly: status === 'downloaded',
   });
-  // 隐私开关：隐藏时文件名统一显示 ****
-  res.json({ items: maskFields(rows.map(toApi) as unknown as Record<string, unknown>[], ['name', 'title']), total, totalBytes: sum, page, pageSize, status, counts: filesRepo.counts() });
+  // 隐私开关：只隐藏**原始下载名**（title）；加密归档名（name，如 wrh2）一直可见
+  res.json({ items: maskFields(rows.map(toApi) as unknown as Record<string, unknown>[], ['title']), total, totalBytes: sum, page, pageSize, status, counts: filesRepo.counts() });
 });
 
 /**
@@ -79,7 +79,8 @@ filesRouter.get('/pending', (req, res) => {
     page,
     pageSize,
   });
-  const items = maskFields(rows.map(toApi) as unknown as Record<string, unknown>[], ['name', 'title']);
+  // 同样只隐藏原始名，加密归档名不隐藏
+  const items = maskFields(rows.map(toApi) as unknown as Record<string, unknown>[], ['title']);
   const oldest = items.reduce<number>((acc, f) => Math.max(acc, Number(f.waitingSec ?? 0)), 0);
   res.json({
     items,

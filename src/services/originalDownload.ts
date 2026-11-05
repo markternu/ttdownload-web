@@ -8,6 +8,7 @@ import { freeBytes } from '../core/disk';
 import { logger } from '../core/logger';
 import { deriveKeyIv, hasVltMarker, passwordOf, readVltOriginalName } from './crypto';
 import { RESTORED_TTL_MS, cleanAllRestored, ensureRestoredDir, registerRestored, removeRestored, restoredDir } from './restored';
+import { maskName } from './mask';
 import { CODE_WINDOW_MS, originalDownloadEnabled, pruneUnlockState } from './originalCode';
 
 /**
@@ -98,7 +99,9 @@ export function publicJob(j: OriginalJob): Record<string, unknown> {
   return {
     id: j.id,
     fileId: j.fileId,
-    originalName: j.originalName,
+    // 隐私开关：界面上显示的原始名默认 ****；真正下载时的文件名由服务端
+    // Content-Disposition 用 job.originalName（真名）设置，不受影响。
+    originalName: maskName(j.originalName),
     contentBytes: j.contentBytes,
     expectedBytes: j.expectedBytes,
     state: j.state,

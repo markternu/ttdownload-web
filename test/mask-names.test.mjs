@@ -41,7 +41,7 @@ test.after(async () => {
   await new Promise((r) => server.close(r));
 });
 
-test('默认隐藏：任务/成品/统计 里的文件名都是 ****', async () => {
+test('默认隐藏：任务是 ****；成品只隐藏原始名，加密归档名始终可见', async () => {
   // 默认 false（不改设置）
   assert.equal(getSettings().showFileNames, false);
 
@@ -51,8 +51,8 @@ test('默认隐藏：任务/成品/统计 里的文件名都是 ****', async () 
 
   const files = await json('/api/files?pageSize=50');
   const f = files.items.find((x) => x.id === fileId);
-  assert.equal(f.name, '****', '成品文件名要隐藏');
-  assert.equal(f.title, '****', '成品标题要隐藏');
+  assert.equal(f.name, 'abc123', '加密归档名（随机前缀）一直可见，不能隐藏');
+  assert.equal(f.title, '****', '只有原始下载名要隐藏');
 
   const stats = await json('/api/stats');
   const rt = (stats.recentTasks ?? []).find((x) => x.id === task.id);
@@ -68,8 +68,8 @@ test('设置页打开「眼睛」后返回真实名字（且开关真的落盘�
 
   const files = await json('/api/files?pageSize=50');
   const f = files.items.find((x) => x.id === fileId);
-  assert.equal(f.name, 'abc123');
-  assert.equal(f.title, secretTitle);
+  assert.equal(f.name, 'abc123', '加密归档名永远可见');
+  assert.equal(f.title, secretTitle, '打开眼睛后原始名也可见');
 });
 
 test('再关掉「眼睛」→ 立刻回到 ****（接口出口遮蔽）', async () => {
@@ -143,4 +143,31 @@ test('SSE stats 里的 recentTasks 名字也要遮蔽', async () => {
       /* ignore */
     }
   }
+});
+
+
+test('「下载原始文件」面板里的原始名也遮蔽（真正下载的文件名仍用真名，由服务端 Content-Disposition 设置）', async () => {
+  const { updateSettings } = await import('../dist/services/settings.js');
+  const { publicJob } = await import('../dist/services/originalDownload.js');
+  const job = {
+    id: 'j1',
+    fileId: 1,
+    srcPath: '',
+    originalName: '真名视频.mp4',
+    tempPath: '',
+    contentBytes: 1,
+    expectedBytes: 1,
+    state: 'ready',
+    progress: 100,
+    error: null,
+    createdAt: Date.now(),
+    readyAt: Date.now(),
+    streaming: 0,
+    finished: false,
+    startedBy: 'k',
+  };
+  updateSettings({ showFileNames: false });
+  assert.equal(publicJob(job).originalName, '****', '面板里的原始名要隐藏');
+  updateSettings({ showFileNames: true });
+  assert.equal(publicJob(job).originalName, '真名视频.mp4', '打开眼睛后可见');
 });

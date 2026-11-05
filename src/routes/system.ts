@@ -480,7 +480,7 @@ systemRouter.get('/events', (req, res) => {
     if (!payload || typeof payload !== 'object') return payload;
     const out = { ...(payload as Record<string, unknown>) };
     if (out.file && typeof out.file === 'object') {
-      out.file = maskOne(out.file as Record<string, unknown>, ['name', 'title']);
+      out.file = maskOne(out.file as Record<string, unknown>, ['title']);
     }
     return out;
   };
