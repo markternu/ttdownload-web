@@ -527,6 +527,9 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
       '应有四块统计卡（文件总数 / 总占用空间 / 待下载 / 等待最久）',
     );
 
+    // 文件清单要标出封装格式（列头「格式」）
+    assert.ok((await page.locator('text=格式').count()) > 0, '文件清单要有「格式」列');
+
     // 「全部」视图里能看到待下载的那条
     assert.ok((await page.locator(`text=${pendingName}`).count()) > 0, '全部视图应列出成品文件名');
     assert.ok((await page.locator('text=待下载页测试文件.mp4').count()) > 0, '应显示原始标题');

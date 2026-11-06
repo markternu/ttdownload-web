@@ -68,6 +68,8 @@ export interface PublishedFile {
   name: string // 发布文件名（无后缀密文，如 oqq12）
   title: string // 人类可读标题
   module: ModuleId
+  /** 封装格式（ZIP / MP4 / MKV / AVI / RMVB / WMV…） */
+  container?: string | null
   sizeBytes: number
   createdAt: string
   downloadUrl: string // 管理端下载地址：/api/files/<id>/download（不鉴权）

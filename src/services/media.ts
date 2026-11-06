@@ -253,3 +253,72 @@ export function detectArchiveKind(file: string): 'zip' | 'rar' | '7z' | null {
   if (head[0] === 0x37 && head[1] === 0x7a && head[2] === 0xbc && head[3] === 0xaf && head[4] === 0x27 && head[5] === 0x1c) return '7z';
   return null;
 }
+
+/** 扩展名 -> 封装格式（用户要求：优先按**后缀**判断，简单又稳） */
+const EXT_CONTAINER: Record<string, string> = {
+  '.mp4': 'MP4', '.m4v': 'MP4', '.mov': 'MP4',
+  '.mkv': 'MKV', '.webm': 'WEBM',
+  '.avi': 'AVI', '.wmv': 'WMV', '.asf': 'WMV',
+  '.flv': 'FLV', '.ts': 'TS', '.m2ts': 'TS', '.mts': 'TS',
+  '.rmvb': 'RMVB', '.rm': 'RMVB',
+  '.mpg': 'MPG', '.mpeg': 'MPG', '.m1v': 'MPG', '.m2v': 'MPG',
+  '.3gp': '3GP', '.ogv': 'OGG', '.vob': 'VOB', '.mxf': 'MXF',
+  '.zip': 'ZIP', '.rar': 'RAR', '.7z': '7Z',
+};
+
+/** 按文件名后缀给封装格式（'x.mkv' -> 'MKV'；没有/不认识返回 null） */
+export function containerFromName(name?: string | null): string | null {
+  if (!name) return null;
+  const ext = path.extname(String(name)).toLowerCase();
+  return EXT_CONTAINER[ext] ?? null;
+}
+
+/**
+ * 探测视频/压缩包的**封装格式**。
+ * 优先按**后缀**（用户要求：获取后缀拿格式），后缀缺失/不认识时才用文件头/ffmpeg 兜底。
+ * 返回友好短名：MP4 / MKV / AVI / RMVB / WMV / FLV / TS / MPG / ZIP / RAR / 7Z …
+ */
+export async function probeContainer(file: string, nameHint?: string): Promise<string | null> {
+  // ① 后缀优先：原始名（加密归档里记的名字）→ 文件自己的名字
+  const byHint = containerFromName(nameHint);
+  if (byHint) return byHint;
+  const byFile = containerFromName(file);
+  if (byFile) return byFile;
+
+  // ② 压缩包看文件头（防止名字后缀不对）
+  const kind = detectArchiveKind(file);
+  if (kind === 'zip') return 'ZIP';
+  if (kind === 'rar') return 'RAR';
+  if (kind === '7z') return '7Z';
+
+  // ③ 没有后缀：ffmpeg 读文件头（很快）
+  const r = await runCommand(config.bins.ffmpeg, ['-hide_banner', '-i', file], undefined, {
+    label: '探测封装格式',
+    hideArgs: true,
+    hideOutput: true,
+  });
+  const m = /Input #0,\s*([^,]+),/i.exec(r.stderr || '');
+  if (m) {
+    const friendly = friendlyContainer(m[1]);
+    if (friendly) return friendly;
+  }
+  if (isMp4Faststart(file)) return 'MP4';
+  return null;
+}
+
+/** ffmpeg 的容器名 -> 友好短名 */
+function friendlyContainer(raw: string): string | null {
+  const s = raw.trim().toLowerCase();
+  if (!s) return null;
+  if (s.includes('mp4') || s.includes('mov') || s.includes('m4a') || s.includes('3gp')) return 'MP4';
+  if (s.includes('matroska') || s.includes('webm')) return 'MKV';
+  if (s.includes('avi')) return 'AVI';
+  if (s.includes('asf')) return 'WMV';
+  if (s.includes('flv')) return 'FLV';
+  if (s.includes('mpegts')) return 'TS';
+  if (s.includes('realmedia') || s === 'rm') return 'RMVB';
+  if (s.includes('mpeg')) return 'MPG';
+  if (s.includes('ogg')) return 'OGG';
+  if (s.includes('3gp')) return '3GP';
+  return raw.trim().toUpperCase().slice(0, 12) || null;
+}

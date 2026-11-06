@@ -6,6 +6,7 @@ import { config } from '../core/config';
 import { logger, taskLog } from '../core/logger';
 import { markVlt, nextPublishName, safeFileName } from './crypto';
 import { hideText } from './btAnon';
+import { containerFromName, probeContainer } from './media';
 
 /**
  * 执行外部命令（数组参数，无 shell 注入风险）。
@@ -70,6 +71,8 @@ export interface ArchiveResult {
   publishedName?: string;
   originalName?: string;
   sizeBytes?: number;
+  /** 归档产物的封装格式（ZIP / MP4 / MKV / AVI / RMVB / WMV…） */
+  container?: string;
   error?: string;
 }
 
@@ -154,6 +157,9 @@ export async function archiveTaskFiles(
   // 方便一眼认出"这是压缩包归档的（里面可能有多集视频）"。
   const zipResult = existing.length > 1 || (existing.length === 1 && isZipMagic(existing[0]));
   const publishedName = zipResult ? `${nextPublishName()}_z` : nextPublishName();
+  // 归档产物的封装格式：zip 就是 ZIP；单个视频用 ffmpeg 读文件头探测（很快）
+  // 先按后缀（用户要求），后缀拿不到再用文件头/ffmpeg 兜底
+  const container = zipResult ? 'ZIP' : (containerFromName(opts.originalName) ?? (await probeContainer(existing[0], opts.originalName)) ?? undefined);
   const target = path.join(wd.archiveReady, publishedName);
   const originalName = safeFileName(opts.originalName || path.basename(existing[0]));
 
@@ -203,7 +209,7 @@ export async function archiveTaskFiles(
       archivePath: target,
       publishedName,
     });
-    return { ok: true, archivePath: target, publishedName, originalName, sizeBytes };
+    return { ok: true, archivePath: target, publishedName, originalName, sizeBytes, container };
   } catch (e) {
     // fs 报错信息里会带上源文件路径（BT 内容名）→ 按需脱敏
     const msg = (e as Error).message;

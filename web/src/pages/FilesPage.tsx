@@ -397,6 +397,11 @@ export default function FilesPage() {
       render: (file) => <Badge tone="neutral">{MODULE_LABELS[file.module] ?? file.module}</Badge>,
     },
     {
+      key: 'container',
+      header: '格式',
+      render: (file) => <Badge tone="info">{file.container ?? '未知'}</Badge>,
+    },
+    {
       key: 'size',
       header: '大小',
       render: (file) => (
@@ -650,6 +655,7 @@ export default function FilesPage() {
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <Badge tone="neutral">{MODULE_LABELS[file.module] ?? file.module}</Badge>
+                    <Badge tone="info">{file.container ?? '未知'}</Badge>
                     {fileStatus(file)}
                   </div>
                   <div className="mt-3">{fileActions(file, 'start')}</div>

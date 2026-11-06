@@ -109,6 +109,8 @@ function ensureColumn(table: string, column: string, definition: string): void {
 ensureColumn('published_files', 'android_downloads', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('published_files', 'last_android_download_at', 'TEXT');
 ensureColumn('published_files', 'web_downloads', 'INTEGER NOT NULL DEFAULT 0');
+// 成品（加密归档产物）的封装格式：ZIP / MP4 / MKV / AVI / RMVB / WMV …（老库在这里补列）
+ensureColumn('published_files', 'container', 'TEXT');
 ensureColumn('published_files', 'last_web_download_at', 'TEXT');
 
 const nowIso = (): string => new Date().toISOString();
@@ -398,17 +400,31 @@ interface PublishedRow {
   last_android_download_at: string | null;
   web_downloads: number | null;
   last_web_download_at: string | null;
+  /** 封装格式（ZIP / MP4 / MKV / AVI / RMVB / WMV…），老数据可能为 null */
+  container: string | null;
 }
 
 export const filesRepo = {
-  add(input: { taskId?: number | null; name: string; title: string; module: ModuleId; sizeBytes: number; path: string }): number {
+  add(input: {
+    taskId?: number | null;
+    name: string;
+    title: string;
+    module: ModuleId;
+    sizeBytes: number;
+    path: string;
+    container?: string | null;
+  }): number {
     const info = db
       .prepare(
-        `INSERT INTO published_files (task_id,name,title,module,size_bytes,path,created_at,downloaded)
-         VALUES (?,?,?,?,?,?,?,0)`,
+        `INSERT INTO published_files (task_id,name,title,module,size_bytes,path,created_at,downloaded,container)
+         VALUES (?,?,?,?,?,?,?,0,?)`,
       )
-      .run(input.taskId ?? null, input.name, input.title, input.module, input.sizeBytes, input.path, nowIso());
+      .run(input.taskId ?? null, input.name, input.title, input.module, input.sizeBytes, input.path, nowIso(), input.container ?? null);
     return Number(info.lastInsertRowid);
+  },
+  /** 补写/更新封装格式（老成品：点播放/下载原始文件解密后探测出来再写回） */
+  setContainer(id: number, container: string): void {
+    db.prepare('UPDATE published_files SET container=? WHERE id=?').run(container, id);
   },
   get(id: number): PublishedRow | null {
     return (db.prepare('SELECT * FROM published_files WHERE id=?').get(id) as PublishedRow | undefined) ?? null;

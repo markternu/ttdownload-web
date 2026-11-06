@@ -87,6 +87,8 @@ export interface PublishedFile {
   name: string;
   title: string;
   module: ModuleId;
+  /** 封装格式（ZIP / MP4 / MKV / AVI / RMVB / WMV…；老数据可能为 null） */
+  container?: string | null;
   sizeBytes: number;
   createdAt: string;
   downloadUrl: string;

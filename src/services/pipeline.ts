@@ -39,6 +39,8 @@ interface PublishUnit {
   publishedName?: string;
   originalName?: string;
   archiveSize?: number;
+  /** 归档产物的封装格式（ZIP / MP4 / MKV …） */
+  container?: string;
   fileId?: number;
 }
 
@@ -97,6 +99,7 @@ async function processArchiving(): Promise<void> {
       }
       u.archivePath = res.archivePath;
       u.publishedName = res.publishedName;
+      u.container = res.container;
       u.originalName = res.originalName;
       u.archiveSize = res.sizeBytes;
       // 逐个落盘，服务重启后能接着做剩下的
@@ -190,6 +193,7 @@ async function processEncrypting(): Promise<void> {
         module: task.module,
         sizeBytes,
         path: finalPath,
+        container: u.container ?? null,
       });
       u.fileId = fileId;
       u.publishedName = path.basename(finalPath);

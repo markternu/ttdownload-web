@@ -31,6 +31,7 @@ function toApi(row: NonNullable<ReturnType<typeof filesRepo.get>>): PublishedFil
     name: row.name,
     title: row.title,
     module: row.module,
+    container: row.container ?? null,
     sizeBytes: row.size_bytes,
     createdAt: row.created_at,
     // 管理端下载（本页面按钮走这个，不鉴权、便于排障）

@@ -17,6 +17,7 @@ import { config } from '../core/config';
 import { filesRepo, restoredRepo } from '../core/db';
 import { logger } from '../core/logger';
 import { deriveKeyIv, passwordOf, readVltOriginalName } from './crypto';
+import { containerFromName, probeContainer } from './media';
 import { ensureRestoredDir, registerRestored, restoredDir } from './restored';
 
 const scoped = logger.child('decrypted');
@@ -91,6 +92,7 @@ export async function ensureDecrypted(fileId: number): Promise<{ ok: true; paylo
   const cached = findDecrypted(fileId);
   if (cached) {
     scoped.mark('DECRYPTED', `复用已解密的共享产物 #${fileId}（不再重复解密）`);
+    await backfillContainer(fileId, cached.path, cached.originalName);
     return { ok: true, payload: cached };
   }
 
@@ -126,5 +128,25 @@ export async function ensureDecrypted(fileId: number): Promise<{ ok: true; paylo
   fs.writeFileSync(metaPath(fileId), JSON.stringify({ originalName: name }));
   registerRestored({ path: out, kind: 'decrypted', sourceFileId: fileId, sizeBytes: contentLen, readyAt: Date.now() });
   scoped.mark('DECRYPTED', `解密完成（共享产物）#${fileId} → ${name}（${(contentLen / 1024 ** 2).toFixed(1)} MiB）`);
-  return { ok: true, payload: { path: out, originalName: name, sizeBytes: contentLen, reused: false } };
+  const payload = { path: out, originalName: name, sizeBytes: contentLen, reused: false };
+  await backfillContainer(fileId, out, name);
+  return { ok: true, payload };
+}
+
+/** 老成品还没记封装格式：解密/复用出原始文件后，探测一次并写回（文件清单显示用） */
+async function backfillContainer(fileId: number, file: string, nameHint: string): Promise<void> {
+  try {
+    const row = filesRepo.get(fileId);
+    if (!row || row.container) return;
+    // 明显不是视频/压缩包的（txt/srt/jpg/pdf…）不用白跑 ffmpeg 探测
+    const ext = nameHint.includes('.') ? `\u002e${nameHint.split('.').pop() ?? ''}`.toLowerCase() : '';
+    if (ext && /\.(txt|srt|ass|ssa|jpg|jpeg|png|gif|webp|pdf|docx?|epub|nfo|url|html?)$/.test(ext)) return;
+    const container = containerFromName(nameHint) ?? (await probeContainer(file, nameHint));
+    if (container) {
+      filesRepo.setContainer(fileId, container);
+      scoped.mark('DECRYPTED', `探测到封装格式 #${fileId}：${container}`);
+    }
+  } catch {
+    /* 探测失败不影响播放/下载 */
+  }
 }
