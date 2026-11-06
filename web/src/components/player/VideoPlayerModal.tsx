@@ -202,6 +202,10 @@ export function VideoPlayerModal({ file, onClose }: { file: PlayableFile | null;
               </div>
             )}
 
+            <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
+              网页只支持 mp4（H.264/AAC）；<b>avi / rmvb / wmv 等格式浏览器本身解不了</b>，
+              请点「用 VLC 播放」把地址复制到 VLC App（VLC 什么格式都能播，服务器零转码开销）。
+            </p>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 {job.items.length > 1 ? `共 ${job.items.length} 个视频` : '单个视频'}
@@ -219,10 +223,10 @@ export function VideoPlayerModal({ file, onClose }: { file: PlayableFile | null;
                   variant="ghost"
                   disabled={!selectedItem}
                   onClick={() => void copyVlc()}
-                  title="VLC 能播任何格式：复制原始流地址，打开 VLC → 网络 → 粘贴（服务器不做转封装）"
+                  title="网页只支持 mp4（H.264）；avi/rmvb/wmv 等格式请复制地址到 VLC App 播放（服务器不做转码，零 CPU 负担）"
                 >
                   <Copy className="h-3.5 w-3.5" />
-                  复制 VLC 地址
+                  用 VLC 播放
                 </Button>
               </div>
             </div>
