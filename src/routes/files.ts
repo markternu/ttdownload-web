@@ -352,3 +352,115 @@ async function streamPlay(req: import('express').Request, res: import('express')
 }
 filesRouter.get('/play/stream/:jobId', asyncHandler(streamPlay));
 filesRouter.get('/play/stream/:jobId/:index', asyncHandler(streamPlay));
+
+/* ------------------------------------------------------------------ */
+/*  VLC：原始流（不转封装）                                              */
+/* ------------------------------------------------------------------ */
+
+/** 常见容器的 Content-Type（VLC 主要靠内容嗅探，这里只是给浏览器/客户端一个提示） */
+const RAW_CONTENT_TYPES: Record<string, string> = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/x-m4v',
+  '.mkv': 'video/x-matroska',
+  '.webm': 'video/webm',
+  '.avi': 'video/x-msvideo',
+  '.flv': 'video/x-flv',
+  '.ts': 'video/mp2t',
+  '.m2ts': 'video/mp2t',
+  '.mov': 'video/quicktime',
+  '.wmv': 'video/x-ms-wmv',
+  '.rmvb': 'application/vnd.rn-realmedia-vbr',
+  '.rm': 'application/vnd.rn-realmedia',
+  '.3gp': 'video/3gpp',
+  '.mpg': 'video/mpeg',
+  '.mpeg': 'video/mpeg',
+  '.vob': 'video/dvd',
+  '.ogv': 'video/ogg',
+};
+
+/**
+ * VLC 用的**原始流**：直接发解密/解压出来的原文件（mkv/avi/hevc… 都行），
+ * 不做 ffmpeg 转封装 —— VLC 这些格式全都能播。
+ * `?token=` 用于让 VLC（没有登录 cookie）通过 /api 的鉴权。
+ */
+async function streamRaw(req: import('express').Request, res: import('express').Response): Promise<void> {
+  const jobId = String(req.params.jobId);
+  const index = Number.parseInt(String(req.params.index ?? '0'), 10) || 0;
+  const j = getPlayJob(jobId);
+  if (!j) throw notFound('播放任务不存在或已过期', 'PLAY_JOB_NOT_FOUND');
+  const item = getPlayItem(jobId, index);
+  if (!item) throw notFound('视频不在播放列表里', 'PLAY_ITEM_NOT_FOUND');
+  if (j.state !== 'ready') throw badRequest('还没准备好，请稍后再试', 'NOT_READY');
+  if (!fs.existsSync(item.srcPath)) throw notFound('原始文件不存在', 'FILE_MISSING');
+
+  j.touchedAt = Date.now();
+  const stat = fs.statSync(item.srcPath);
+  const ext = path.extname(item.name).toLowerCase();
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Type', RAW_CONTENT_TYPES[ext] ?? 'application/octet-stream');
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(item.name)}`);
+  res.setHeader('Cache-Control', 'no-store');
+
+  const range = req.header('range');
+  if (range) {
+    const m = /bytes=(\d*)-(\d*)/.exec(range);
+    if (!m) throw badRequest('Range 头格式错误');
+    const start = m[1] ? Number.parseInt(m[1], 10) : 0;
+    const end = m[2] ? Number.parseInt(m[2], 10) : stat.size - 1;
+    if (start >= stat.size || end >= stat.size || start > end) {
+      res.status(416).setHeader('Content-Range', `bytes */${stat.size}`).end();
+      return;
+    }
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+    res.setHeader('Content-Length', String(end - start + 1));
+    streamFileTo(res, item.srcPath, { start, end });
+    return;
+  }
+  res.setHeader('Content-Length', String(stat.size));
+  streamFileTo(res, item.srcPath);
+}
+filesRouter.get('/play/raw/:jobId', asyncHandler(streamRaw));
+filesRouter.get('/play/raw/:jobId/:index', asyncHandler(streamRaw));
+
+/** 给前端拿"用 VLC 播放"的地址（自动带上访问 token，VLC 免登录） */
+filesRouter.post(
+  '/play/vlc',
+  asyncHandler(async (req, res) => {
+    const jobId = String(req.body?.jobId ?? '');
+    const index = Number(req.body?.index ?? 0) || 0;
+    const j = getPlayJob(jobId);
+    if (!j) throw notFound('播放任务不存在或已过期', 'PLAY_JOB_NOT_FOUND');
+    const item = getPlayItem(jobId, index);
+    if (!item) throw notFound('视频不在播放列表里', 'PLAY_ITEM_NOT_FOUND');
+
+    const token = config.androidToken;
+    const origin = `${req.protocol}://${req.get('host')}`;
+    const q = token ? `?token=${encodeURIComponent(token)}` : '';
+    const url = `${origin}/api/files/play/raw/${encodeURIComponent(jobId)}/${index}${q}`;
+    const m3u = `${origin}/api/files/play/vlc.m3u?jobId=${encodeURIComponent(jobId)}&index=${index}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+    res.json({ url, m3u, name: item.name });
+  }),
+);
+
+/** .m3u 播放列表（手机上点一下交给 VLC / 其它播放器打开） */
+filesRouter.get(
+  '/play/vlc.m3u',
+  asyncHandler(async (req, res) => {
+    const jobId = String(req.query.jobId ?? '');
+    const index = Number.parseInt(String(req.query.index ?? '0'), 10) || 0;
+    const j = getPlayJob(jobId);
+    if (!j) throw notFound('播放任务不存在或已过期', 'PLAY_JOB_NOT_FOUND');
+    const item = getPlayItem(jobId, index);
+    if (!item) throw notFound('视频不在播放列表里', 'PLAY_ITEM_NOT_FOUND');
+
+    const token = String(req.query.token ?? '') || config.androidToken;
+    const origin = `${req.protocol}://${req.get('host')}`;
+    const q = token ? `?token=${encodeURIComponent(token)}` : '';
+    const url = `${origin}/api/files/play/raw/${encodeURIComponent(jobId)}/${index}${q}`;
+    res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="ttdownload-vlc.m3u"');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(`#EXTM3U\n#EXTINF:-1,${item.name.replace(/\r?\n/g, ' ')}\n${url}\n`);
+  }),
+);

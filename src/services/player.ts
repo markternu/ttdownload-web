@@ -347,9 +347,11 @@ async function runPrepare(job: PlayJob): Promise<void> {
     } catch {
       preOk = false;
     }
+    // 单文件（不是 zip 解出来的）→ 用**原始名**当显示名（带真实扩展名，VLC 也能据此识别）
+    const displayName = p === decPath ? originalName || path.basename(p) : path.basename(p);
     return {
       index: i,
-      name: path.basename(p),
+      name: displayName,
       sizeBytes: size,
       state: fast || preOk ? 'ready' : 'pending',
       playPath: fast ? p : preOk ? pre : null,
