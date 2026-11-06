@@ -77,6 +77,12 @@ export interface PublishedFile {
   lastWebDownloadAt?: string | null;
   /** 发布至今等待了多少秒 */
   waitingSec?: number;
+  /**
+   * 播放文件状态（给文件清单显示用）：
+   *   'decrypting' = 正在解密/解压；'ready' = 已有解密好的文件可直接播放；
+   *   null/缺省 = 没点过播放或还原文件已超过 4 小时 → 界面什么都不显示。
+   */
+  playStatus?: 'decrypting' | 'ready' | null;
   id: number;
   name: string;
   title: string;

@@ -79,6 +79,8 @@ export interface PublishedFile {
   webDownloads?: number // 网页端（本机）下载次数
   lastWebDownloadAt?: string | null // 网页端最后一次下载的时间
   waitingSec?: number // 发布至今等待秒数（待下载清单用）
+  /** 播放文件状态：正在解密 / 已有解密产物可直接播放；null = 不显示 */
+  playStatus?: 'decrypting' | 'ready' | null
 }
 
 export interface Settings {

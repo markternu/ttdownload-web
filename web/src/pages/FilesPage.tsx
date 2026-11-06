@@ -277,6 +277,16 @@ export default function FilesPage() {
           </p>
         ) : null}
         {file.downloadedAt ? <p className="text-[11px] text-slate-400">{formatDateTime(file.downloadedAt)}</p> : null}
+        {/* 播放文件状态：只在"正在解密"或"已有解密好的文件"时显示；没点过/超过 4 小时就不显示 */}
+        {file.playStatus === 'decrypting' ? (
+          <Badge tone="warning" dot>
+            播放文件：解密中…
+          </Badge>
+        ) : file.playStatus === 'ready' ? (
+          <Badge tone="success" dot>
+            已有解密好的文件，可直接播放
+          </Badge>
+        ) : null}
       </div>
     )
   }
@@ -755,7 +765,13 @@ export default function FilesPage() {
         onConfirm={() => void handleBulkDelete()}
       />
 
-      <VideoPlayerModal file={playing} onClose={() => setPlaying(null)} />
+      <VideoPlayerModal
+        file={playing}
+        onClose={() => {
+          setPlaying(null)
+          void refresh()
+        }}
+      />
     </div>
   )
 }

@@ -9,6 +9,7 @@ import { logger } from '../core/logger';
 import { deriveKeyIv, hasVltMarker, passwordOf, readVltOriginalName } from './crypto';
 import { RESTORED_TTL_MS, cleanAllRestored, ensureRestoredDir, registerRestored, removeRestored, restoredDir } from './restored';
 import { maskName } from './mask';
+import { ensureDecrypted, findDecrypted } from './decrypted';
 import { CODE_WINDOW_MS, originalDownloadEnabled, pruneUnlockState } from './originalCode';
 
 /**
@@ -80,6 +81,8 @@ export interface OriginalJob {
   streaming: number;
   /** 已经下完并清理掉的标记 */
   finished: boolean;
+  /** true = 用的是共享解密产物（播放/下载原始文件共用），下载完**不要删**这个文件 */
+  shared?: boolean;
   child?: ChildProcess;
   startedBy: string;
 }
@@ -116,7 +119,7 @@ export function publicJob(j: OriginalJob): Record<string, unknown> {
 export function dropJob(id: string, reason: string): void {
   const j = jobs.get(id);
   if (!j) return;
-  if (j.tempPath) removeRestored(j.tempPath);
+  if (j.tempPath && !j.shared) removeRestored(j.tempPath);
   j.finished = true;
   jobs.delete(id);
   scoped.mark('ORIGINAL_DL', `已清理临时文件（${reason}）：#${j.fileId} ${j.originalName}`);
@@ -161,9 +164,11 @@ export function startOriginalJob(fileId: number, sessionKey: string): { ok: true
   if (existing) return { ok: true, job: existing };
 
   const size = fs.statSync(row.path).size;
-  // 解密要在同分区再写一份，空间不够就别开始（这正是"预留周转空间"的用途）
+  // 解密要在同分区再写一份，空间不够就别开始（这正是"预留周转空间"的用途）；
+  // 如果已经有共享解密产物（播放或上次下载原始文件解过），就不用再写一份
+  const cached = findDecrypted(fileId);
   const free = freeBytes(config.dirs.state);
-  const need = size + 64 * 1024 * 1024;   // 留 64MB 余量
+  const need = (cached ? 0 : size) + 64 * 1024 * 1024;
   if (free < need) {
     return {
       ok: false,
@@ -198,74 +203,23 @@ export function startOriginalJob(fileId: number, sessionKey: string): { ok: true
 }
 
 async function runDecrypt(job: OriginalJob): Promise<void> {
-  const pwd = passwordOf();          // 与加密时同一个 ENCRYPT_PASSWORD
-  const { key, iv } = deriveKeyIv(pwd);
-  await new Promise<void>((resolve) => {
-    const child = spawn(config.bins.openssl, ['enc', '-d', '-aes-256-cbc', '-K', key, '-iv', iv, '-in', job.srcPath, '-out', job.tempPath], {
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
-    job.child = child;
-    let stderr = '';
-    child.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    child.on('error', (e) => {
-      job.state = 'failed';
-      job.error = `openssl 启动失败：${e.message}`;
-      dropJob(job.id, '启动失败');
-      resolve();
-    });
-    child.on('close', (code) => {
-      job.child = undefined;
-      if (job.state === 'cancelled') {
-        resolve();
-        return;
-      }
-      if (code !== 0) {
-        job.state = 'failed';
-        job.error = `解密失败（openssl 退出码 ${code}）：${stderr.trim().slice(-200) || '未知错误'}`;
-        scoped.error(`[MARK:ORIGINAL_DL] 临时解密失败 #${job.fileId}：${job.error}`);
-        dropJob(job.id, '解密失败');
-        resolve();
-        return;
-      }
-      try {
-        const name = readOriginalNameFromPlain(job.tempPath);
-        if (!name) {
-          job.state = 'failed';
-          job.error = '解密结果里没有 FKY996 标记（文件可能不是本工具加密的，或密码不对）';
-          scoped.error(`[MARK:ORIGINAL_DL] ${job.error} #${job.fileId}`);
-          dropJob(job.id, '标记校验失败');
-          resolve();
-          return;
-        }
-        // 砍掉尾部标记：内容长度 = 明文长度 − 104 − 文件名长度
-        const plainSize = fs.statSync(job.tempPath).size;
-        const nameLen = Buffer.byteLength(name, 'utf8');
-        const contentLen = plainSize - 104 - nameLen;
-        if (contentLen < 0) {
-          job.state = 'failed';
-          job.error = '解密结果长度异常，文件可能已损坏';
-          dropJob(job.id, '长度异常');
-          resolve();
-          return;
-        }
-        fs.truncateSync(job.tempPath, contentLen);
-        job.originalName = name;
-        job.contentBytes = contentLen;
-        job.progress = 100;
-        job.state = 'ready';
-        job.readyAt = Date.now();
-        registerRestored({ path: job.tempPath, kind: 'original', sourceFileId: job.fileId, sizeBytes: contentLen, readyAt: job.readyAt });
-        scoped.mark('ORIGINAL_DL', `临时解密完成 #${job.fileId} → ${name}（${(contentLen / 1024 ** 2).toFixed(1)} MiB，${Date.now() - job.createdAt}ms）`);
-      } catch (e) {
-        job.state = 'failed';
-        job.error = `处理解密结果失败：${(e as Error).message}`;
-        dropJob(job.id, '处理失败');
-      }
-      resolve();
-    });
-  });
+  // 解密交给共享产物：播放 / 下载原始文件 共用同一份，已有就直接复用（不再解密）
+  const r = await ensureDecrypted(job.fileId);
+  if (job.state === 'cancelled') return;
+  if (!r.ok) {
+    job.state = 'failed';
+    job.error = r.error;
+    scoped.error(`[MARK:ORIGINAL_DL] 解密失败 #${job.fileId}：${job.error}`);
+    return;
+  }
+  job.tempPath = r.payload.path;      // 共享产物路径
+  job.originalName = r.payload.originalName;
+  job.contentBytes = r.payload.sizeBytes;
+  job.shared = true;
+  job.progress = 100;
+  job.state = 'ready';
+  job.readyAt = Date.now();
+  scoped.mark('ORIGINAL_DL', `原始文件就绪 #${job.fileId} → ${path.basename(r.payload.path)}（${r.payload.reused ? '复用已解密产物' : '刚解密'}）`);
 }
 
 /* ------------------------------------------------------------------ */

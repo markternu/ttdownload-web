@@ -281,8 +281,8 @@ test('复用：同一文件再次点播放，不会再解密（同一 job）', a
   assert.equal(a.job.id, b.job.id, '同一个文件已有任务 → 直接复用，不能重复解密');
   const job = await waitReady(a.job.id);
   assert.equal(job.state, 'ready');
-  const metaPath = path.join(job.workDir, 'meta.json');
-  assert.ok(fs.existsSync(metaPath), '要写 meta.json（记录原始名，供下次复用）');
+  const { decryptedPath } = await import('../dist/services/decrypted.js');
+  assert.ok(fs.existsSync(decryptedPath(fileId)), '要有共享解密产物（播放/下载原始文件共用）');
 });
 
 test('复用：还原目录里已有解密好的文件 → 直接取用，不再跑 openssl', async () => {
@@ -395,6 +395,59 @@ test('VLC：原始流直接给原文件（不转码），地址带 token 供 VLC
     const m3uText = await m3u.text();
     assert.match(m3uText, /#EXTM3U/);
     assert.match(m3uText, /movie\.mkv|play\/raw/);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+/* ---------- 播放 / 下载原始文件 共用解密产物 ---------- */
+
+test('共享解密产物：ensureDecrypted 第二次直接复用，不重复解密', async () => {
+  const { ensureDecrypted, decryptedPath } = await import('../dist/services/decrypted.js');
+  const plain = tmpFile(root, 'p10/share.mp4', Buffer.concat([ftyp, moov, mdat]));
+  const fileId = await publishEncrypted(plain, '共享.mp4');
+
+  const a = await ensureDecrypted(fileId);
+  assert.equal(a.ok, true);
+  assert.equal(a.payload.reused, false, '第一次要真的解密');
+  const shared = decryptedPath(fileId);
+  assert.ok(fs.existsSync(shared), '要产出共享解密文件');
+  const mtime1 = fs.statSync(shared).mtimeMs;
+
+  const b = await ensureDecrypted(fileId);
+  assert.equal(b.ok, true);
+  assert.equal(b.payload.reused, true, '第二次必须复用，不能重复解密');
+  assert.equal(b.payload.path, a.payload.path);
+  assert.equal(fs.statSync(shared).mtimeMs, mtime1, '复用时文件不应被重写');
+
+  // 播放也走同一份共享产物
+  const prep = preparePlayable(fileId);
+  const job = await waitReady(prep.job.id);
+  assert.equal(job.state, 'ready');
+  assert.equal(fs.statSync(shared).mtimeMs, mtime1, '播放也不应重新解密');
+});
+
+test('文件清单显示播放状态：没点过 → 不显示；解密完成 → ready（可直接播放）', async () => {
+  const server = http.createServer(createApp());
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const plain = tmpFile(root, 'p11/status.mp4', Buffer.concat([ftyp, moov, mdat]));
+    const fileId = await publishEncrypted(plain, '状态.mp4');
+
+    // 没点过播放 → 列表里 playStatus 为 null（界面什么都不显示）
+    let list = await (await fetch(`${base}/api/files?pageSize=100`)).json();
+    assert.equal(list.items.find((f) => f.id === fileId)?.playStatus ?? null, null);
+
+    // 点播放并等解密完成 → playStatus = 'ready'
+    const start = await (await fetch(`${base}/api/files/${fileId}/play`, { method: 'POST' })).json();
+    for (let i = 0; i < 100; i += 1) {
+      const st = await (await fetch(`${base}/api/files/play/status/${start.id}`)).json();
+      if (st.state === 'ready' || st.state === 'failed') break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    list = await (await fetch(`${base}/api/files?pageSize=100`)).json();
+    assert.equal(list.items.find((f) => f.id === fileId)?.playStatus, 'ready', '解密完成后列表要显示"可直接播放"');
   } finally {
     await new Promise((r) => server.close(r));
   }

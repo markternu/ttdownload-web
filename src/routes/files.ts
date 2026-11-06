@@ -5,7 +5,7 @@ import { Router } from 'express';
 import { config } from '../core/config';
 import { filesRepo } from '../core/db';
 import { deletePublished } from '../services/cleanup';
-import { getPlayItem, getPlayJob, preparePlayItem, preparePlayable, publicPlayJob } from '../services/player';
+import { getPlayItem, getPlayJob, playStatusByFile, preparePlayItem, preparePlayable, publicPlayJob } from '../services/player';
 import { maskFields } from '../services/mask';
 import { logger } from '../core/logger';
 import { asyncHandler, badRequest, notFound, streamFileTo } from '../utils/http';
@@ -64,7 +64,9 @@ filesRouter.get('/', (req, res) => {
     downloadedOnly: status === 'downloaded',
   });
   // 隐私开关：只隐藏**原始下载名**（title）；加密归档名（name，如 wrh2）一直可见
-  res.json({ items: maskFields(rows.map(toApi) as unknown as Record<string, unknown>[], ['title']), total, totalBytes: sum, page, pageSize, status, counts: filesRepo.counts() });
+  const playMap = playStatusByFile();
+  const items = rows.map((r) => ({ ...toApi(r), playStatus: playMap.get(r.id) ?? null }));
+  res.json({ items: maskFields(items as unknown as Record<string, unknown>[], ['title']), total, totalBytes: sum, page, pageSize, status, counts: filesRepo.counts() });
 });
 
 /**
@@ -80,7 +82,11 @@ filesRouter.get('/pending', (req, res) => {
     pageSize,
   });
   // 同样只隐藏原始名，加密归档名不隐藏
-  const items = maskFields(rows.map(toApi) as unknown as Record<string, unknown>[], ['title']);
+  const playMap = playStatusByFile();
+  const items = maskFields(
+    rows.map((r) => ({ ...toApi(r), playStatus: playMap.get(r.id) ?? null })) as unknown as Record<string, unknown>[],
+    ['title'],
+  );
   const oldest = items.reduce<number>((acc, f) => Math.max(acc, Number(f.waitingSec ?? 0)), 0);
   res.json({
     items,

@@ -972,22 +972,26 @@ test('★下载原始文件：临时文件有两条兜底清理（4 小时超时
   }
   assert.equal(getJob(jobId)?.state, 'ready', '先要解出来');
   const t = tempDir();
-  assert.ok(fs.existsSync(path.join(t, `${jobId}.part`)), '临时文件应在');
+  const { decryptedPath } = await import('../dist/services/decrypted.js');
+  const shared = decryptedPath(a.id);
+  assert.ok(fs.existsSync(shared), '共享解密产物应在（播放/下载原始文件共用）');
 
-  // 模拟"没能确认下载完成、已经放了 4 小时以上" → 清理线程必须删掉它
+  // 模拟"任务放了 4 小时以上" → 任务记录清掉，但**共享产物不删**（由还原目录 4 小时规则管理）
   const live = getJob(jobId);
   live.readyAt = Date.now() - TEMP_MAX_AGE_MS - 1000;
+  live.createdAt = Date.now() - TEMP_MAX_AGE_MS - 1000;
   sweepOnce();
-  assert.equal(fs.existsSync(path.join(t, `${jobId}.part`)), false, '超过 4 小时的临时文件必须被清理');
-  assert.equal(getJob(jobId), undefined, '任务记录也要清掉');
+  assert.equal(getJob(jobId), undefined, '任务记录要清掉');
+  assert.ok(fs.existsSync(shared), '共享产物不能因为任务结束就被删（播放还要用）');
 
-  // 开机清空：往临时目录里丢文件，purgeTempOnBoot 应清干净
+  // 开机清空：往还原目录里丢文件，purgeTempOnBoot 应清干净
   const stray = path.join(t, 'stray-from-power-loss.part');
   fs.writeFileSync(stray, 'leftover');
   const { purgeTempOnBoot } = await import('../dist/services/originalDownload.js');
   const r = purgeTempOnBoot();
   assert.ok(r.removed >= 1, '开机应清掉遗留文件');
   assert.equal(fs.existsSync(stray), false, '断电遗留的临时文件必须被清掉');
+  assert.equal(fs.existsSync(shared), false, '开机也会清空还原文件目录');
 });
 
 test('★下载原始文件：6 位密码的窗口语义（当前窗口有效、上个窗口容忍、更早的作废）', async () => {

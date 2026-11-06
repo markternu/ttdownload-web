@@ -54,7 +54,7 @@ export function sizeOfPath(p: string): number {
  */
 export function registerRestored(input: {
   path: string;
-  kind: 'original' | 'player';
+  kind: 'original' | 'player' | 'decrypted';
   sourceFileId?: number | null;
   sizeBytes?: number;
   readyAt?: number;

@@ -303,10 +303,13 @@ originalRouter.get(
 function cancelAndDrop(id: string): void {
   const job = getJob(id);
   if (!job) return;
-  try {
-    fs.rmSync(job.tempPath, { force: true });
-  } catch {
-    /* ignore */
+  // 共享解密产物（播放/下载原始文件共用）不在这里删 —— 让它按【还原文件目录】的 4 小时规则过期
+  if (!job.shared) {
+    try {
+      fs.rmSync(job.tempPath, { force: true });
+    } catch {
+      /* ignore */
+    }
   }
   cancelJob(id);
 }
