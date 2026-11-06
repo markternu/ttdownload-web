@@ -251,6 +251,95 @@ export default function FilesPage() {
     ? Math.max(0, Math.round((Date.now() - Date.parse(counts.oldestPendingAt)) / 1000))
     : 0
 
+  /** 下载状态（表格与手机卡片共用） */
+  const fileStatus = (file: PublishedFile) => {
+    const times = (file.androidDownloads ?? 0) + (file.webDownloads ?? 0)
+    return (
+      <div className="space-y-1">
+        {!file.available ? (
+          <Badge tone="neutral" dot>
+            已下载 · 服务器已删除
+          </Badge>
+        ) : file.downloaded ? (
+          <Badge tone="success" dot>
+            已被下载
+          </Badge>
+        ) : (
+          <Badge tone="warning" dot>
+            待下载 · 已等待 {formatWaiting(file.waitingSec)}
+          </Badge>
+        )}
+        {times > 0 ? (
+          <p className="text-[11px] text-slate-400">
+            已下载 {times} 次
+            {file.androidDownloads ? ` · 安卓 ${file.androidDownloads}` : ''}
+            {file.webDownloads ? ` · 网页 ${file.webDownloads}` : ''}
+          </p>
+        ) : null}
+        {file.downloadedAt ? <p className="text-[11px] text-slate-400">{formatDateTime(file.downloadedAt)}</p> : null}
+      </div>
+    )
+  }
+
+  /** 文件操作按钮（表格右对齐 / 手机卡片左对齐） */
+  const fileActions = (file: PublishedFile, align: 'start' | 'end') => (
+    <div className={`flex flex-wrap items-center gap-1.5 ${align === 'end' ? 'justify-end' : 'justify-start'}`}>
+      {file.available ? (
+        <>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setPlaying({ id: file.id, name: file.name, title: file.title })}
+            title="在线播放（服务器先解密/解压/重封装成 mp4，moov 在文件头可边下边播）"
+          >
+            <PlayCircle className="h-3.5 w-3.5" />
+            播放
+          </Button>
+          <a
+            href={api.fileDownloadUrl(file.id, file.name)}
+            target="_blank"
+            rel="noreferrer"
+            title="下载服务器上的加密归档文件（列表里这个文件本身）"
+            className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-slate-200 px-3 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <Download className="h-3.5 w-3.5" />
+            下载
+          </a>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => original.downloadOriginal(file)}
+            title="在服务器上临时解密成原始文件再下载（需 6 位下载密码；下载完自动删除临时文件）"
+          >
+            <FileOutput className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">下载原始文件</span>
+            <span className="sm:hidden">原始</span>
+          </Button>
+        </>
+      ) : (
+        <span
+          title="安卓端已下载完成，服务器上的文件已被删除（数据库记录保留作为历史），无法再下载"
+          className="inline-flex h-8 cursor-not-allowed items-center gap-1.5 rounded-xl border border-dashed border-slate-200 px-3 text-xs font-medium text-slate-400 dark:border-slate-700 dark:text-slate-500"
+        >
+          <Download className="h-3.5 w-3.5" />
+          已下载，不可下载
+        </span>
+      )}
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => {
+          setTarget(file)
+          setWithFile(false)
+        }}
+        title="删除记录"
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+        <span className="hidden sm:inline">删除</span>
+      </Button>
+    </div>
+  )
+
   const columns: Column<PublishedFile>[] = [
     {
       key: 'select',
@@ -318,99 +407,14 @@ export default function FilesPage() {
     {
       key: 'downloaded',
       header: '下载状态',
-      render: (file) => {
-        const times = (file.androidDownloads ?? 0) + (file.webDownloads ?? 0)
-        return (
-          <div className="space-y-1">
-            {!file.available ? (
-              <Badge tone="neutral" dot>
-                已下载 · 服务器已删除
-              </Badge>
-            ) : file.downloaded ? (
-              <Badge tone="success" dot>
-                已被下载
-              </Badge>
-            ) : (
-              <Badge tone="warning" dot>
-                待下载 · 已等待 {formatWaiting(file.waitingSec)}
-              </Badge>
-            )}
-            {times > 0 ? (
-              <p className="text-[11px] text-slate-400">
-                已下载 {times} 次
-                {file.androidDownloads ? ` · 安卓 ${file.androidDownloads}` : ''}
-                {file.webDownloads ? ` · 网页 ${file.webDownloads}` : ''}
-              </p>
-            ) : null}
-            {file.downloadedAt ? (
-              <p className="text-[11px] text-slate-400">{formatDateTime(file.downloadedAt)}</p>
-            ) : null}
-          </div>
-        )
-      },
+      render: (file) => fileStatus(file),
     },
     {
       key: 'actions',
       header: '操作',
       headerClassName: 'text-right',
       className: 'text-right',
-      render: (file) => (
-        <div className="flex flex-wrap items-center justify-end gap-1.5">
-          {file.available ? (
-            <>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setPlaying({ id: file.id, name: file.name, title: file.title })}
-                title="在线播放（服务器先解密/解压/重封装成 mp4，moov 在文件头可边下边播）"
-              >
-                <PlayCircle className="h-3.5 w-3.5" />
-                播放
-              </Button>
-              <a
-                href={api.fileDownloadUrl(file.id, file.name)}
-                target="_blank"
-                rel="noreferrer"
-                title="下载服务器上的加密归档文件（列表里这个文件本身）"
-                className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-slate-200 px-3 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-              >
-                <Download className="h-3.5 w-3.5" />
-                下载
-              </a>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => original.downloadOriginal(file)}
-                title="在服务器上临时解密成原始文件再下载（需 6 位下载密码；下载完自动删除临时文件）"
-              >
-                <FileOutput className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">下载原始文件</span>
-                <span className="sm:hidden">原始</span>
-              </Button>
-            </>
-          ) : (
-            <span
-              title="安卓端已下载完成，服务器上的文件已被删除（数据库记录保留作为历史），无法再下载"
-              className="inline-flex h-8 cursor-not-allowed items-center gap-1.5 rounded-xl border border-dashed border-slate-200 px-3 text-xs font-medium text-slate-400 dark:border-slate-700 dark:text-slate-500"
-            >
-              <Download className="h-3.5 w-3.5" />
-              已下载，不可下载
-            </span>
-          )}
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => {
-              setTarget(file)
-              setWithFile(false)
-            }}
-            title="删除记录"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">删除</span>
-          </Button>
-        </div>
-      ),
+      render: (file) => fileActions(file, 'end'),
     },
   ]
 
@@ -608,7 +612,40 @@ export default function FilesPage() {
           />
         ) : (
           <>
-            <Table columns={columns} rows={items} rowKey={(file) => file.id} minWidthClass="min-w-[880px]" />
+            {/* 桌面/平板：表格 */}
+            <div className="hidden md:block">
+              <Table columns={columns} rows={items} rowKey={(file) => file.id} minWidthClass="min-w-[880px]" />
+            </div>
+            {/* 手机：卡片列表（操作按钮直接在卡片里，不用横向滑动） */}
+            <div className="space-y-2 md:hidden">
+              {items.map((file) => (
+                <div key={file.id} className="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
+                  <div className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      className={CHECKBOX_CLASS}
+                      aria-label={`选择 ${file.name}`}
+                      checked={selected.has(file.id)}
+                      onChange={() => toggleOne(file.id)}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-mono text-sm font-medium text-slate-800 dark:text-slate-100">{file.name}</p>
+                      <p className="mt-0.5 truncate text-[11px] text-slate-400" title={file.title}>
+                        {file.title}
+                      </p>
+                    </div>
+                    <span className="shrink-0 text-xs tabular-nums text-slate-500 dark:text-slate-400">
+                      {formatBytes(file.sizeBytes, '未知')}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <Badge tone="neutral">{MODULE_LABELS[file.module] ?? file.module}</Badge>
+                    {fileStatus(file)}
+                  </div>
+                  <div className="mt-3">{fileActions(file, 'start')}</div>
+                </div>
+              ))}
+            </div>
             <Pagination page={page} pageSize={PAGE_SIZE} total={total} onPageChange={setPage} />
           </>
         )}

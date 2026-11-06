@@ -555,6 +555,32 @@ DIR=$(dirname "$OUT"); [ -z "$OUT" ] && exit 0; mkdir -p "$DIR"; echo "video" > 
     await page.close();
   });
 
+  test('手机端文件页：卡片列表，播放/下载/删除按钮直接可见（不用横向滑动）', async (t) => {
+    if (!browser) return t.skip('无 Chrome');
+    const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    await loginContext(mobileContext);
+    const page = await mobileContext.newPage();
+    page.on('pageerror', (e) => pageErrors.push(String(e)));
+    await page.goto(`${base}/files`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(900);
+
+    // 手机端用卡片列表（不是需要横向滑动的表格）
+    const tableVisible = await page.locator('table').first().isVisible().catch(() => false);
+    assert.equal(tableVisible, false, '手机端应显示卡片列表而不是表格');
+
+    const playBtn = page.getByRole('button', { name: /播放/ }).first();
+    assert.ok(await playBtn.isVisible(), '手机端应直接看到「播放」按钮');
+    const box = await playBtn.boundingBox();
+    assert.ok(box && box.x >= 0 && box.x + box.width <= 391, `播放按钮必须在视口内（x=${box?.x}, w=${box?.width}）`);
+
+    const delBtn = page.getByRole('button', { name: /删除/ }).first();
+    const dbox = await delBtn.boundingBox();
+    assert.ok(dbox && dbox.x >= 0 && dbox.x + dbox.width <= 391, '删除按钮也必须在视口内');
+
+    await page.close();
+    await mobileContext.close();
+  });
+
   test('老书签：/pending 会重定向到 /files（而不是白屏或 404）', async (t) => {
     if (!browser) return t.skip('无 Chrome');
     const page = await newPage();
