@@ -9,7 +9,7 @@
  *        视频（按文件头识别 mp4/mkv/avi/flv/ts/…）→ 直接进列表
  *        其它（rar/7z 等）→ 明确提示，而不是含糊的"不是视频"
  *   ③ 每个视频单独准备：不是 mp4 + moov 在前的，用 ffmpeg 重封装（-c copy + faststart）
- *   ④ 每个视频提供支持 HTTP Range 的流（VLC 用原始流，不转封装）
+ *   ④ 每个视频提供支持 HTTP Range 的流，给 <video> 边下边播/拖进度条
  *
  * 解压/转封装产物放【还原文件目录】里本任务的 workDir，4 小时过期。
  * 所有路径都用 argv 数组传给子进程，**名字里有空格/中文/特殊字符都不受影响**。
@@ -42,7 +42,7 @@ export interface PlayItem {
   /** 可播放的 mp4 路径（ready 之后才有；内部字段，不下发前端） */
   playPath: string | null;
   error: string | null;
-  /** 源文件绝对路径（原始文件；VLC 直接用它，内部不下发） */
+  /** 源文件绝对路径（重封装用；内部不下发） */
   srcPath: string;
 }
 
@@ -282,7 +282,7 @@ async function runPrepare(job: PlayJob): Promise<void> {
     } catch {
       preOk = false;
     }
-    // 单文件（不是 zip 解出来的）→ 用原始名当显示名（带真实扩展名，VLC 也能据此识别）
+    // 单文件（不是 zip 解出来的）→ 用原始名当显示名（带真实扩展名）
     const displayName = p === decPath ? originalName || path.basename(p) : path.basename(p);
     return {
       index: i,

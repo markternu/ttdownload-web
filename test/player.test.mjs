@@ -351,54 +351,6 @@ test('rar/7z 压缩包 → 明确提示不支持，而不是含糊的"不是视�
   assert.match(String(job.error), /rar|7z|压缩包/i);
 });
 
-/* ---------- VLC：原始流（不转封装） ---------- */
-
-test('VLC：原始流直接给原文件（不转码），地址带 token 供 VLC 免登录', async () => {
-  const server = http.createServer(createApp());
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  try {
-    const rawBytes = Buffer.from('fake-mkv-bytes-for-vlc');
-    const plain = tmpFile(root, 'p9/movie.mkv', rawBytes);
-    const fileId = await publishEncrypted(plain, '原始视频.mkv');
-
-    const start = await (await fetch(`${base}/api/files/${fileId}/play`, { method: 'POST' })).json();
-    let st;
-    for (let i = 0; i < 100; i += 1) {
-      st = await (await fetch(`${base}/api/files/play/status/${start.id}`)).json();
-      if (st.state === 'ready' || st.state === 'failed') break;
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.equal(st.state, 'ready', st.error ?? '');
-    assert.equal(st.items[0].name, '原始视频.mkv', '单文件用原始名（带真实扩展名）');
-    assert.equal(st.items[0].state, 'pending', 'mkv 不自动转封装，等 VLC 直接播');
-
-    const vlc = await (await fetch(`${base}/api/files/play/vlc`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId: start.id, index: 0 }),
-    })).json();
-    assert.ok(vlc.url.includes('token='), 'VLC 地址要带 token（VLC 没有登录 cookie）');
-    assert.equal(vlc.name, '原始视频.mkv');
-
-    const raw = await fetch(vlc.url);
-    assert.equal(raw.status, 200);
-    const body = Buffer.from(await raw.arrayBuffer());
-    assert.deepEqual(body, rawBytes, '原始流必须是原文件字节，不是转封装后的 mp4');
-
-    const ranged = await fetch(vlc.url, { headers: { Range: 'bytes=0-3' } });
-    assert.equal(ranged.status, 206);
-    assert.equal(ranged.headers.get('content-type'), 'video/x-matroska');
-
-    const m3u = await fetch(vlc.m3u);
-    assert.equal(m3u.status, 200);
-    const m3uText = await m3u.text();
-    assert.match(m3uText, /#EXTM3U/);
-    assert.match(m3uText, /movie\.mkv|play\/raw/);
-  } finally {
-    await new Promise((r) => server.close(r));
-  }
-});
 
 /* ---------- 播放 / 下载原始文件 共用解密产物 ---------- */
 

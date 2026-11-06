@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Copy, ListVideo, Loader2, Play, SkipForward } from 'lucide-react'
+import { ListVideo, Loader2, Play, SkipForward } from 'lucide-react'
 import { Badge, Button, Modal, Spinner } from '../ui'
 import { api } from '../../lib/api'
-import { useToast } from '../../context/ToastContext'
 import { formatBytes } from '../../lib/format'
 import type { PlayItemInfo, PlayJobInfo } from '../../types'
 
@@ -34,7 +33,6 @@ export interface PlayableFile {
 }
 
 export function VideoPlayerModal({ file, onClose }: { file: PlayableFile | null; onClose: () => void }) {
-  const toast = useToast()
   const [job, setJob] = useState<PlayJobInfo | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -122,18 +120,6 @@ export function VideoPlayerModal({ file, onClose }: { file: PlayableFile | null;
   const currentIdx = job && selected !== null ? job.items.findIndex((it) => it.index === selected) : -1
   const hasNext = !!job && currentIdx >= 0 && currentIdx + 1 < job.items.length
 
-  /** 用 VLC 播放：复制原始流地址（不转封装，任何格式 VLC 都能播） */
-  const copyVlc = async () => {
-    if (!job || !selectedItem) return
-    try {
-      const r = await api.filePlayVlc(job.id, selectedItem.index)
-      await navigator.clipboard.writeText(r.url)
-      toast.success('已复制 VLC 地址', '打开 VLC → 网络 → 打开网络串流 → 粘贴这个地址即可播放（不转码，什么格式都行）')
-    } catch (e) {
-      toast.error('获取 VLC 地址失败', (e as Error).message)
-    }
-  }
-
   const playNext = () => {
     if (!job || currentIdx < 0) return
     const next = job.items[currentIdx + 1]
@@ -198,14 +184,10 @@ export function VideoPlayerModal({ file, onClose }: { file: PlayableFile | null;
                 <p className="text-sm">
                   {selectedItem ? (selectedItem.state === 'remuxing' ? '正在转换成 mp4（不重新编码，仅换封装）…' : '排队准备中…') : '选一个视频开始播放'}
                 </p>
-                <p className="text-xs text-slate-400">大文件转换要等一会儿，转好会自动播放；不想等可以点下面「复制 VLC 地址」用 VLC 直接播原始文件</p>
+                <p className="text-xs text-slate-400">大文件转换要等一会儿，转好会自动播放</p>
               </div>
             )}
 
-            <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
-              网页只支持 mp4（H.264/AAC）；<b>avi / rmvb / wmv 等格式浏览器本身解不了</b>，
-              请点「用 VLC 播放」把地址复制到 VLC App（VLC 什么格式都能播，服务器零转码开销）。
-            </p>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 {job.items.length > 1 ? `共 ${job.items.length} 个视频` : '单个视频'}
@@ -217,16 +199,6 @@ export function VideoPlayerModal({ file, onClose }: { file: PlayableFile | null;
                 <Button size="sm" variant="outline" disabled={!hasNext} onClick={playNext}>
                   <SkipForward className="h-3.5 w-3.5" />
                   下一个
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={!selectedItem}
-                  onClick={() => void copyVlc()}
-                  title="网页只支持 mp4（H.264）；avi/rmvb/wmv 等格式请复制地址到 VLC App 播放（服务器不做转码，零 CPU 负担）"
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                  用 VLC 播放
                 </Button>
               </div>
             </div>

@@ -534,9 +534,6 @@ export const api = {
     request<PlayItemInfo>('/api/files/play/prepare-item', jsonBody({ jobId, index })),
   filePlayStreamUrl: (jobId: string, index: number): string =>
     `${API_BASE}/api/files/play/stream/${encodeURIComponent(jobId)}/${index}.mp4`,
-  /** 用 VLC 播放原始文件（不转封装）：返回带 token 的地址 + .m3u */
-  filePlayVlc: (jobId: string, index: number) =>
-    request<{ url: string; m3u: string; name: string }>('/api/files/play/vlc', jsonBody({ jobId, index })),
 
   /* ------------------------------ 设置 ------------------------------ */
 
