@@ -229,7 +229,8 @@ export function getUsbState(): UsbState {
       label: p.model ?? p.fstype ?? undefined,
       sizeBytes: parseSize(p.size),
       freeBytes: freeOf(pick.target),
-      needsReset: pick.duplicates || pick.stale,
+      // 统一到固定挂载点 /mnt/usb：udisks 挂到 /media/mypi/upo 那种路径权限不可控
+      needsReset: pick.duplicates || pick.stale || pick.target !== MOUNT_DIR,
       mounts: all,
     };
   }
@@ -615,6 +616,7 @@ export async function offloadArchivedToUsb(): Promise<{ moved: number; bytes: nu
   return offloadToDir(wd.consumer);
 }
 
+let lastResetAt = 0;
 let cached: UsbState = getUsbState();
 let timer: NodeJS.Timeout | null = null;
 
@@ -648,8 +650,9 @@ export function startUsbWorker(): void {
       } else {
         cached = autoMount();
       }
-      // 重复挂载 / 失效挂载（upo 与 upo1 同时存在）→ 全部推出后重新挂到 /mnt/usb
-      if (cached.needsReset) {
+      // 重复挂载 / 失效挂载 / 挂在 /media 下（权限不可控）→ 全部推出后重新挂到 /mnt/usb
+      if (cached.needsReset && Date.now() - lastResetAt > 30_000) {
+        lastResetAt = Date.now();
         logger.child('usb').mark('USB', `检测到 U 盘挂载异常（挂载点：${(cached.mounts ?? []).join('、') || '?'}），全部推出后重新挂载`);
         cached = resetUsbMount();
       }
