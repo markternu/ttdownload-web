@@ -20,6 +20,8 @@ import { getSettings } from './settings';
 import { filesRepo } from '../core/db';
 
 const MOUNT_DIR = '/mnt/usb';
+/** 本次进程启动的随机标识：只有同一进程里的失败重试才允许续传 .part（断电重启后不续） */
+export const USB_COPY_BOOT = Math.random().toString(36).slice(2, 10);
 const TARGET_DIR = 'ttdownload';
 
 /** 归档/加密/成品三个"文件操作"目录：U 盘在时切到 U 盘，否则用 SD 默认目录 */
@@ -342,10 +344,39 @@ class ThrottleStream extends Transform {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+
+/** 续传前校验：.part 末尾 64KB 必须和源文件同偏移内容一致，否则丢弃重拷（防半截脏数据） */
+function partTailMatches(from: string, tmp: string, start: number): boolean {
+  if (start <= 0) return true;
+  try {
+    const CHUNK = 64 * 1024;
+    const offset = Math.max(0, start - CHUNK);
+    const len = start - offset;
+    if (len <= 0) return true;
+    const a = Buffer.alloc(len);
+    const b = Buffer.alloc(len);
+    const fa = fs.openSync(from, 'r');
+    const fb = fs.openSync(tmp, 'r');
+    try {
+      fs.readSync(fa, a, 0, len, offset);
+      fs.readSync(fb, b, 0, len, offset);
+    } finally {
+      fs.closeSync(fa);
+      fs.closeSync(fb);
+    }
+    return a.equals(b);
+  } catch {
+    return false;
+  }
+}
+
 /**
- * 原子拷贝（**异步、全速**，不阻塞事件循环）：
- * `.part` → fsync → rename。带**卡死看门狗**：如果长时间没有任何进度
- *（U 盘拔松/失效挂载导致写阻塞），直接中止并抛错，交给上层重置挂载。
+ * 原子拷贝（**异步、全速**、支持**断点续传**）：
+ *   `.part` → fsync → rename。
+ * 失败时**保留** `.part` 和 `.part.meta`（记录源文件 size/mtime），下次从断点继续，
+ * 不再每次都从 0 重拷（用户实测 1.4G 文件到 80% 失败后要能接着拷）。
+ * `.part.meta` 里记着源文件指纹：源变了就丢掉旧 `.part` 从头来，避免拼错内容。
+ * 带**卡死看门狗**：长时间没有进度才中止（默认 300 秒，可由 USB_COPY_STALL_SEC 调整）。
  */
 async function copyFileAtomic(
   from: string,
@@ -355,10 +386,42 @@ async function copyFileAtomic(
 ): Promise<void> {
   fs.mkdirSync(path.dirname(to), { recursive: true });
   const tmp = `${to}.part`;
+  const metaFile = `${tmp}.meta`;
+  const srcStat = fs.statSync(from);
+  const total = totalBytes || srcStat.size;
+
+  // 断点续传：只有"同一个源文件（size + mtime 一致）+ .part 还在"才续
+  let start = 0;
+  try {
+    const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { src?: string; size?: number; mtimeMs?: number; boot?: string };
+    if (
+      meta.boot === USB_COPY_BOOT &&
+      meta.src === from &&
+      meta.size === srcStat.size &&
+      meta.mtimeMs === srcStat.mtimeMs &&
+      fs.existsSync(tmp)
+    ) {
+      const partSize = Math.min(fs.statSync(tmp).size, total);
+      if (partTailMatches(from, tmp, partSize)) start = partSize;
+    }
+  } catch {
+    start = 0;
+  }
+  if (start <= 0) {
+    start = 0;
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+  fs.writeFileSync(metaFile, JSON.stringify({ src: from, size: srcStat.size, mtimeMs: srcStat.mtimeMs, total, boot: USB_COPY_BOOT }));
+
   const rate = Math.max(0, Number(config.usbCopyRateMbps) || 0) * 1024 * 1024;
-  const stallMs = Math.max(10_000, Number(process.env.USB_COPY_STALL_SEC ?? 90) * 1000);
+  const stallMs = Math.max(30_000, Number(process.env.USB_COPY_STALL_SEC ?? 300) * 1000);
   let lastProgressAt = Date.now();
-  let copied = 0;
+  let copied = start;
+  onProgress?.(copied);
   const progress = new Transform({
     transform(chunk: Buffer, _enc, cb) {
       copied += chunk.length;
@@ -368,9 +431,8 @@ async function copyFileAtomic(
       cb();
     },
   });
-  const rs = fs.createReadStream(from, { highWaterMark: 256 * 1024 });
-  const ws = fs.createWriteStream(tmp);
-  // 看门狗：长时间没进度 → 中止（防止"一直拷贝中"卡死）
+  const rs = fs.createReadStream(from, { highWaterMark: 256 * 1024, ...(start > 0 ? { start } : {}) });
+  const ws = fs.createWriteStream(tmp, { flags: start > 0 ? 'a' : 'w' });
   const watchdog = setInterval(() => {
     if (Date.now() - lastProgressAt > stallMs) {
       rs.destroy(new Error(`拷贝卡住超过 ${Math.round(stallMs / 1000)} 秒（U 盘可能拔松/失效挂载）`));
@@ -386,16 +448,21 @@ async function copyFileAtomic(
       await fh.close();
     }
     fs.renameSync(tmp, to); // 原子改名：要么没有，要么完整
-  } catch (e) {
     try {
-      fs.unlinkSync(tmp);
+      fs.rmSync(metaFile, { force: true });
+    } catch {
+      /* ignore */
+    }
+  } catch (e) {
+    // ⚠️ 失败时**保留** .part（下次续传），只清掉 0 字节的残渣
+    try {
+      if (fs.existsSync(tmp) && fs.statSync(tmp).size === 0) fs.rmSync(tmp, { force: true });
     } catch {
       /* 设备可能已拔 */
     }
     throw e;
   } finally {
     clearInterval(watchdog);
-    void totalBytes;
   }
 }
 
@@ -648,8 +715,24 @@ export function cleanupPartials(destDir: string): number {
   try {
     for (const name of fs.readdirSync(destDir)) {
       if (!name.endsWith('.part')) continue;
+      const partPath = path.join(destDir, name);
+      const metaFile = `${partPath}.meta`;
+      // 有 meta 且源文件还在 → 是断点续传的"半成品"，保留
       try {
-        fs.unlinkSync(path.join(destDir, name));
+        const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { src?: string; boot?: string };
+        // 只保留"本次进程启动后产生、且源文件还在"的半成品（可安全续传）；
+        // 断电/重启留下的 .part 一律清掉，避免把没刷盘的半截数据拼进成品。
+        if (meta.boot === USB_COPY_BOOT && meta.src && fs.existsSync(meta.src)) continue;
+      } catch {
+        /* 没 meta：不认识，按垃圾清掉 */
+      }
+      try {
+        fs.unlinkSync(partPath);
+        try {
+          fs.rmSync(metaFile, { force: true });
+        } catch {
+          /* ignore */
+        }
         removed += 1;
       } catch {
         /* ignore */

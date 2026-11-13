@@ -13,7 +13,7 @@ import { setupRuntime } from './helpers.mjs';
 const root = setupRuntime({ env: { USB_COPY_RATE_MBPS: '2', USB_COPY_PAUSE_MS: '0' } });
 const { filesRepo } = await import('../dist/core/db.js');
 const { config } = await import('../dist/core/config.js');
-const { offloadToDir, reconcileUsbCopies, cleanupPartials, usbCopyStatus } = await import('../dist/services/usbMount.js');
+const { offloadToDir, reconcileUsbCopies, cleanupPartials, usbCopyStatus, USB_COPY_BOOT } = await import('../dist/services/usbMount.js');
 
 const usbDir = path.join(root, 'fake-usb', 'ttdownload', 'xiaofeizhe_downd');
 const sdDir = config.dirs.consumer;
@@ -135,4 +135,59 @@ test('U盘已有同名同大小文件：不重复拷，直接改记录并删SD�
   assert.equal(row.on_usb, 1);
   assert.equal(row.path, path.join(usbDir, 'already-there.bin'));
   assert.equal(fs.existsSync(p), false, 'SD 源可以安全删除（U 盘已有完整同名文件）');
+});
+
+test('断点续传：同一进程的 .part 从断点继续，最终内容和源一致', async () => {
+  const content = 'A'.repeat(1024 * 1024);
+  const p = path.join(sdDir, 'resume.bin');
+  fs.writeFileSync(p, content);
+  const id = filesRepo.add({ taskId: null, name: 'resume.bin', title: 'resume', module: 'aria2', sizeBytes: content.length, path: p });
+
+  fs.mkdirSync(usbDir, { recursive: true });
+  const part = path.join(usbDir, 'resume.bin.part');
+  fs.writeFileSync(part, content.slice(0, 512 * 1024));
+  const st = fs.statSync(p);
+  fs.writeFileSync(`${part}.meta`, JSON.stringify({ src: p, size: st.size, mtimeMs: st.mtimeMs, boot: USB_COPY_BOOT }));
+
+  const r = await offloadToDir(usbDir);
+  assert.ok(r.moved >= 1);
+  assert.equal(fs.readFileSync(path.join(usbDir, 'resume.bin'), 'utf8'), content, '续传后内容必须完整');
+  assert.equal(filesRepo.get(id).on_usb, 1);
+});
+
+test('断电重启后的 .part 不续传（防止把没刷盘的半截数据拼进去）', async () => {
+  const content = 'B'.repeat(1024 * 1024);
+  const p = path.join(sdDir, 'stale-part.bin');
+  fs.writeFileSync(p, content);
+  filesRepo.add({ taskId: null, name: 'stale-part.bin', title: 'sp', module: 'aria2', sizeBytes: content.length, path: p });
+
+  fs.mkdirSync(usbDir, { recursive: true });
+  const part = path.join(usbDir, 'stale-part.bin.part');
+  fs.writeFileSync(part, 'X'.repeat(512 * 1024));
+  const st = fs.statSync(p);
+  fs.writeFileSync(`${part}.meta`, JSON.stringify({ src: p, size: st.size, mtimeMs: st.mtimeMs, boot: 'old-boot' }));
+
+  const r = await offloadToDir(usbDir);
+  assert.ok(r.moved >= 1);
+  assert.equal(fs.readFileSync(path.join(usbDir, 'stale-part.bin'), 'utf8'), content, '旧 .part 必须丢弃、从头拷');
+});
+
+test('半截脏数据（尾部对不上）→ 丢弃 .part 从头拷', async () => {
+  const content = 'C'.repeat(1024 * 1024);
+  const p = path.join(sdDir, 'dirty-part.bin');
+  fs.writeFileSync(p, content);
+  filesRepo.add({ taskId: null, name: 'dirty-part.bin', title: 'dp', module: 'aria2', sizeBytes: content.length, path: p });
+
+  fs.mkdirSync(usbDir, { recursive: true });
+  const part = path.join(usbDir, 'dirty-part.bin.part');
+  // 前半段是对的，但尾部内容被写坏（模拟没刷盘/写错误）
+  const broken = Buffer.from(content.slice(0, 600 * 1024));
+  broken.fill(0x00, 500 * 1024);
+  fs.writeFileSync(part, broken);
+  const st = fs.statSync(p);
+  fs.writeFileSync(`${part}.meta`, JSON.stringify({ src: p, size: st.size, mtimeMs: st.mtimeMs, boot: USB_COPY_BOOT }));
+
+  const r = await offloadToDir(usbDir);
+  assert.ok(r.moved >= 1);
+  assert.equal(fs.readFileSync(path.join(usbDir, 'dirty-part.bin'), 'utf8'), content, '必须丢弃脏 .part、从头拷');
 });
