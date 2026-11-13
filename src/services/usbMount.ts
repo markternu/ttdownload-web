@@ -401,6 +401,12 @@ async function copyFileAtomic(
 
 /** 目标目录到底能不能写：写一个 4KB 探针（带超时）。失效挂载/只读盘会在这里暴露。 */
 async function probeWritable(dir: string, timeoutMs = 8000): Promise<boolean> {
+  // 生产路径（/mnt/usb/...）必须先确认 /mnt/usb 真的是个挂载点，
+  // 否则 mkdir/write 会在 SD 卡上重建目录、把成品悄悄写到 SD 里去。
+  if (path.resolve(dir).startsWith(`${path.resolve(MOUNT_DIR)}${path.sep}`)) {
+    const mounted = listMounts().some((m) => m.target === MOUNT_DIR);
+    if (!mounted) return false;
+  }
   const probe = path.join(dir, '.ttdl-probe');
   const write = (async () => {
     await fs.promises.mkdir(dir, { recursive: true });
@@ -563,11 +569,19 @@ async function offloadLoop(destDir: string): Promise<{ moved: number; bytes: num
     } catch (e) {
       const msg = (e as Error).message;
       copyJobs.set(row.id, { state: 'failed', error: msg, copiedBytes: 0, totalBytes });
-      logger.child('usb').warn(`拷贝到 U 盘失败（源文件保留）：${path.basename(row.path)}：${msg}`);
-      // 失败 → 把 U 盘全部推出再重新挂载（用户要求），并冷却 60 秒，别死循环
-      resetUsbMount();
+      const hint = /ENOENT|ENOTCONN|EIO|ETIMEDOUT/.test(msg) ? '（U 盘可能没挂上/被拔了一下）' : '';
+      logger.child('usb').warn(`拷贝到 U 盘失败（源文件保留）：${path.basename(row.path)}：${msg}${hint}`);
+      // 先看目标是否还能写：
+      //   · 能写 → 多半是瞬时错误（拔松一下又接上/路径刚重建），不折腾挂载，10 秒后重试；
+      //   · 不能写 → 把 U 盘全部推出再重新挂载，冷却 30 秒，别死循环。
+      const stillOk = await probeWritable(destDir);
       lastProbeAt = 0;
-      nextRetryAt = Date.now() + 60_000;
+      if (stillOk) {
+        nextRetryAt = Date.now() + 10_000;
+      } else {
+        resetUsbMount();
+        nextRetryAt = Date.now() + 30_000;
+      }
       return { moved, bytes };
     }
   }
@@ -691,7 +705,7 @@ export function startUsbWorker(): void {
         cached = autoMount();
       }
       // 重复挂载 / 失效挂载 / 挂在 /media 下（权限不可控）→ 全部推出后重新挂到 /mnt/usb
-      if (cached.needsReset && Date.now() - lastResetAt > 30_000) {
+      if (cached.needsReset && !copyRunning && Date.now() - lastResetAt > 30_000) {
         lastResetAt = Date.now();
         logger.child('usb').mark('USB', `检测到 U 盘挂载异常（挂载点：${(cached.mounts ?? []).join('、') || '?'}），全部推出后重新挂载`);
         cached = resetUsbMount();
