@@ -9,7 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setupRuntime } from './helpers.mjs';
 
-const root = setupRuntime();
+// 限速 2MB/s、文件间不等待：既验证限速，又不让用例太慢
+const root = setupRuntime({ env: { USB_COPY_RATE_MBPS: '2', USB_COPY_PAUSE_MS: '0' } });
 const { filesRepo } = await import('../dist/core/db.js');
 const { config } = await import('../dist/core/config.js');
 const { offloadToDir, reconcileUsbCopies, cleanupPartials, usbCopyStatus } = await import('../dist/services/usbMount.js');
@@ -82,4 +83,19 @@ test('断电恢复③：写库了但源没删掉 → 不重复搬（两边都在
   const r = await offloadToDir(usbDir);
   assert.equal(r.moved, 0, 'on_usb=1 的文件不能重复搬');
   assert.equal(fs.existsSync(p), true, '残留源文件不归这里处理（由垃圾扫描报告）');
+});
+
+test('拷贝限速：几十 GB 全速会打满 I/O，限速后按速率慢慢搬（不卡系统）', async () => {
+  // 1 MiB @ 2MB/s ≈ 0.5s
+  const big = addFile('usb-big.bin', 'x'.repeat(1024 * 1024));
+  fs.mkdirSync(usbDir, { recursive: true });
+  const t0 = Date.now();
+  const r = await offloadToDir(usbDir);
+  const ms = Date.now() - t0;
+  assert.ok(r.moved >= 1, '要搬过去');
+  assert.ok(ms >= 300, `限速应该让 1MiB@2MB/s 至少花几百毫秒，实际 ${ms}ms`);
+  assert.ok(ms < 5000, `也不能慢到离谱，实际 ${ms}ms`);
+  const row = filesRepo.get(big.id);
+  assert.equal(row.on_usb, 1);
+  assert.equal(fs.existsSync(row.path), true);
 });

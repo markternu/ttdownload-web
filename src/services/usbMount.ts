@@ -11,6 +11,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../core/config';
@@ -214,6 +215,31 @@ export function ejectUsb(): UsbState {
   return getUsbState();
 }
 
+
+/**
+ * 限速用的 Transform：每块数据按"传输耗时"延迟一下，
+ * 把整体速度压到 rateBytesPerSec（0=不限速），别把 SD/USB 总线打满。
+ */
+class ThrottleStream extends Transform {
+  constructor(private readonly rateBytesPerSec: number) {
+    super();
+  }
+  override _transform(chunk: Buffer, _enc: BufferEncoding, cb: (err?: Error | null) => void): void {
+    if (this.rateBytesPerSec <= 0) {
+      this.push(chunk);
+      cb();
+      return;
+    }
+    const delayMs = Math.max(0, (chunk.length / this.rateBytesPerSec) * 1000);
+    setTimeout(() => {
+      this.push(chunk);
+      cb();
+    }, delayMs);
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 /**
  * 原子拷贝（**异步**，不阻塞事件循环 —— 拷几 GB 时网页照样能用）：
  * 先写 `.part` → fsync 落盘 → rename 成最终名。中途拔盘/停电最多留一个 `.part`，
@@ -223,7 +249,13 @@ async function copyFileAtomic(from: string, to: string): Promise<void> {
   fs.mkdirSync(path.dirname(to), { recursive: true });
   const tmp = `${to}.part`;
   try {
-    await pipeline(fs.createReadStream(from, { highWaterMark: 1 << 20 }), fs.createWriteStream(tmp));
+    // ⚠️ 限速：默认 10MB/s（config.usbCopyRateMbps），0=不限。几十 GB 全速会卡死系统。
+    const rate = Math.max(0, Number(config.usbCopyRateMbps) || 0) * 1024 * 1024;
+    await pipeline(
+      fs.createReadStream(from, { highWaterMark: 256 * 1024 }),
+      new ThrottleStream(rate),
+      fs.createWriteStream(tmp),
+    );
     const fh = await fs.promises.open(tmp, 'r+');
     try {
       await fh.sync(); // 数据真正落盘（U 盘缓存冲进设备），否则拔盘会丢尾巴
@@ -310,6 +342,8 @@ async function offloadLoop(destDir: string): Promise<{ moved: number; bytes: num
       }
       moved += 1;
       bytes += st.size;
+      // 拷完一个喘口气，避免连续 fsync/IO 把总线打满
+      await sleep(Math.max(0, Number(config.usbCopyPauseMs) || 0));
     } catch (e) {
       copyJobs.set(row.id, { state: 'failed', error: (e as Error).message });
       logger.child('usb').warn(`拷贝到 U 盘失败（源文件保留，下次重试）：${path.basename(row.path)}：${(e as Error).message}`);

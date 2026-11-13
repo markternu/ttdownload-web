@@ -152,6 +152,15 @@ export const config = {
     user: str(process.env.TRANSMISSION_RPC_USER, ''),
     password: str(process.env.TRANSMISSION_RPC_PASSWORD, ''),
   },
+  /**
+   * 成品拷贝到 U 盘的**限速**（MB/s，0=不限速）。
+   * ⚠️ 真机事故：树莓派 SD/USB 共用总线，几十 GB 全速拷贝会把 I/O 打满 →
+   *    网页打不开、SSH 卡得登不上。默认 10MB/s，留出余量给系统。
+   */
+  usbCopyRateMbps: num(process.env.USB_COPY_RATE_MBPS, 10),
+  /** 每拷完一个文件歇一下（毫秒），避免 fsync/IO 连打 */
+  usbCopyPauseMs: num(process.env.USB_COPY_PAUSE_MS, 150),
+
   /** transmission 的 incomplete 目录（出清时需要一并删除里面的任务文件夹） */
   transmissionIncompleteDir: str(process.env.TRANSMISSION_INCOMPLETE_DIR, '/var/lib/transmission/incomplete'),
 
