@@ -97,3 +97,9 @@ test('老文件：点播放/下载原始文件解密后，按原始名后缀补�
   assert.equal(dec.ok, true);
   assert.equal(filesRepo.get(fileId).container, 'WMV', '解密后要按后缀补上 WMV');
 });
+
+test('U 盘拷贝默认**全速**（不限速、不额外等待）', async () => {
+  const { config } = await import('../dist/core/config.js');
+  assert.equal(config.usbCopyRateMbps, 0, '默认必须全速（用户要求尽快搬完）');
+  assert.equal(config.usbCopyPauseMs, 0, '默认不额外等待');
+});

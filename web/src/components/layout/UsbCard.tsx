@@ -53,8 +53,8 @@ export function UsbCard() {
             {usb.fstype ? `${usb.fstype} · ` : ''}
             剩余 {usb.freeBytes != null ? formatBytes(usb.freeBytes, '—') : '—'}
             <br />
-            归档成品会自动拷贝到 {usb.mountpoint}/ttdownload/（限速 10MB/s，避免卡住系统；
-            <code className="rounded bg-slate-200 px-1 dark:bg-slate-700">USB_COPY_RATE_MBPS</code> 可调）
+            归档成品会自动拷贝到 {usb.mountpoint}/ttdownload/（默认<b>全速</b>拷贝；需要限速可设
+            <code className="rounded bg-slate-200 px-1 dark:bg-slate-700">USB_COPY_RATE_MBPS</code>）
           </p>
           {usb.lastError ? (
             <p className="mt-1 text-[11px] leading-4 text-red-500 dark:text-red-400">{usb.lastError}</p>

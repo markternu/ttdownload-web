@@ -249,7 +249,7 @@ async function copyFileAtomic(from: string, to: string): Promise<void> {
   fs.mkdirSync(path.dirname(to), { recursive: true });
   const tmp = `${to}.part`;
   try {
-    // ⚠️ 限速：默认 10MB/s（config.usbCopyRateMbps），0=不限。几十 GB 全速会卡死系统。
+    // 限速可配：默认 0 = 全速（用户要求尽快搬完；短暂卡顿可接受）。想留余量可设 USB_COPY_RATE_MBPS。
     const rate = Math.max(0, Number(config.usbCopyRateMbps) || 0) * 1024 * 1024;
     await pipeline(
       fs.createReadStream(from, { highWaterMark: 256 * 1024 }),
