@@ -282,6 +282,9 @@ export default function FilesPage() {
         {file.usbStatus === 'copying' ? (
           <Badge tone="warning" dot>
             正在拷贝到 U 盘…
+            {file.usbProgress && file.usbProgress.totalBytes > 0
+              ? ` ${Math.min(100, Math.round((file.usbProgress.copiedBytes / file.usbProgress.totalBytes) * 100))}%（${formatBytes(file.usbProgress.copiedBytes)} / ${formatBytes(file.usbProgress.totalBytes)}）`
+              : ''}
           </Badge>
         ) : file.usbStatus === 'on_usb' ? (
           <Badge tone="info" dot>

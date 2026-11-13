@@ -91,6 +91,8 @@ export interface PublishedFile {
   container?: string | null;
   /** U 盘状态：'on_usb' 已在 U 盘 / 'copying' 正在拷贝 / 'error' 拷贝失败；null = 没涉及 U 盘 */
   usbStatus?: 'on_usb' | 'copying' | 'error' | null;
+  /** 拷贝进度（copying 时有效） */
+  usbProgress?: { copiedBytes: number; totalBytes: number } | null;
   sizeBytes: number;
   createdAt: string;
   downloadUrl: string;

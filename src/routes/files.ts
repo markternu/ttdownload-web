@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { usbCopyStatus, workDirs } from '../services/usbMount';
+import { usbCopyProgress, usbCopyStatus, workDirs } from '../services/usbMount';
 import path from 'node:path';
 import { Router } from 'express';
 import { config } from '../core/config';
@@ -40,6 +40,8 @@ function toApi(row: NonNullable<ReturnType<typeof filesRepo.get>>): PublishedFil
         : usbCopyStatus(row.id) === 'failed'
           ? 'error'
           : null,
+    // 拷贝进度（只在 copying 时有意义）
+    usbProgress: usbCopyProgress(row.id),
     sizeBytes: row.size_bytes,
     createdAt: row.created_at,
     // 管理端下载（本页面按钮走这个，不鉴权、便于排障）

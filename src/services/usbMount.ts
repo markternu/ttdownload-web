@@ -66,6 +66,10 @@ export interface UsbState {
   label?: string;
   sizeBytes?: number;
   freeBytes?: number;
+  /** 检测到重复挂载/失效挂载，需要"全部卸载后重新挂载" */
+  needsReset?: boolean;
+  /** 该分区当前的全部挂载点（诊断用） */
+  mounts?: string[];
   lastError?: string;
 }
 
@@ -176,41 +180,14 @@ function isLiveMount(target: string): boolean {
   }
 }
 
-/**
- * 同一个分区被挂到多个地方时（典型：udisks 自动挂到 /media/mypi/upo，
- * 我们/用户又挂了 /mnt/usb，或者拔插后多出 upo1），只留一个：
- *   · 优先留我们的固定挂载点 /mnt/usb（路径稳定，web 项目不迷路）；
- *   · 其它**能活得**的重复挂载和**失效**的旧挂载点一并 umount -l 掉。
- * 返回保留下来的那个挂载点。
- */
-function pickAndCleanMounts(mounts: { target: string; source: string }[], prefer = MOUNT_DIR): string | null {
-  if (!mounts.length) return null;
+/** 同一个分区可能有多个挂载点：只挑一个"活的"用（优先固定点 /mnt/usb）；清理交给 resetUsbMount */
+function pickMountTarget(mounts: { target: string; source: string }[], prefer = MOUNT_DIR): { target: string | null; duplicates: boolean; stale: boolean } {
+  if (!mounts.length) return { target: null, duplicates: false, stale: false };
   const live = mounts.filter((m) => isLiveMount(m.target));
-  const stale = mounts.filter((m) => !isLiveMount(m.target));
-  for (const m of stale) {
-    try {
-      execFileSync('umount', ['-l', m.target], { timeout: 5000 });
-      logger.child('usb').mark('USB', `清理失效挂载点（拔盘/断电残留）：${m.target}`, { target: m.target });
-    } catch {
-      /* 清不掉就算了，下面不用它 */
-    }
-  }
-  if (!live.length) return null;
-  // 优先固定挂载点
+  const stale = mounts.length - live.length;
+  if (!live.length) return { target: null, duplicates: false, stale: stale > 0 };
   const preferred = live.find((m) => m.target === prefer) ?? live[0];
-  for (const m of live) {
-    if (m.target === preferred.target) continue;
-    try {
-      execFileSync('umount', ['-l', m.target], { timeout: 5000 });
-      logger.child('usb').mark('USB', `同一个 U 盘被重复挂载，已保留 ${preferred.target}、卸载 ${m.target}`, {
-        kept: preferred.target,
-        removed: m.target,
-      });
-    } catch {
-      /* ignore */
-    }
-  }
-  return preferred.target;
+  return { target: preferred.target, duplicates: live.length > 1, stale: stale > 0 };
 }
 
 export function getUsbState(): UsbState {
@@ -227,17 +204,33 @@ export function getUsbState(): UsbState {
     const src = `/dev/${p.name}`;
     const mine = mounts.filter((m) => m.source === src || m.source.endsWith(`/${p.name}`));
     if (!mine.length) continue;
-    const chosen = pickAndCleanMounts(mine);
-    if (!chosen) continue;
+    const all = mine.map((m) => m.target);
+    const pick = pickMountTarget(mine);
+    if (!pick.target) {
+      // 全是失效挂载（拔盘残留）→ 让巡检"全部推出后重新挂载"
+      return {
+        present: true,
+        mounted: false,
+        device: src,
+        fstype: p.fstype ?? undefined,
+        label: p.model ?? undefined,
+        sizeBytes: parseSize(p.size),
+        needsReset: true,
+        mounts: all,
+        lastError: 'U 盘挂载点已失效（可能拔松了），正在全部卸载后重新挂载…',
+      };
+    }
     return {
       present: true,
       mounted: true,
       device: src,
-      mountpoint: chosen,
+      mountpoint: pick.target,
       fstype: p.fstype ?? undefined,
       label: p.model ?? p.fstype ?? undefined,
       sizeBytes: parseSize(p.size),
-      freeBytes: freeOf(chosen),
+      freeBytes: freeOf(pick.target),
+      needsReset: pick.duplicates || pick.stale,
+      mounts: all,
     };
   }
 
@@ -266,6 +259,43 @@ export function autoMount(): UsbState {
     const msg = (e as Error).message;
     return { ...s, lastError: `自动挂载失败：${msg}` };
   }
+}
+
+/**
+ * 把 U 盘的**所有挂载点**（upo、upo1、/mnt/usb…）全部卸载，再干净地重新挂到固定点 /mnt/usb。
+ * 用户要求：出现 upo/upo1 同时存在时，先都"推出"，再重新挂载。
+ */
+export function resetUsbMount(): UsbState {
+  const blocks = lsblk();
+  const disks = blocks.filter(isExternalDisk);
+  const names = new Set(disks.map((d) => d.name));
+  const parts = blocks.filter((b) => b.type === 'part' && [...names].some((n) => b.name.startsWith(n)));
+  const mounts = listMounts();
+  const targets = new Set<string>();
+  for (const p of parts) {
+    const src = `/dev/${p.name}`;
+    for (const m of mounts) if (m.source === src || m.source.endsWith(`/${p.name}`)) targets.add(m.target);
+  }
+  if (targets.size > 0) {
+    for (const t of targets) {
+      try {
+        execFileSync('umount', ['-l', t], { timeout: 10000 });
+      } catch {
+        /* 忙/已卸载都继续 */
+      }
+    }
+    logger.child('usb').mark('USB', `已把 U 盘的全部挂载点推出：${[...targets].join('、')}（准备重新挂载）`);
+  }
+  const part = parts.find((p) => p.fstype);
+  if (!part) return getUsbState();
+  try {
+    fs.mkdirSync(MOUNT_DIR, { recursive: true });
+    execFileSync('mount', [`/dev/${part.name}`, MOUNT_DIR], { timeout: 20000 });
+    logger.child('usb').mark('USB', `已重新挂载 /dev/${part.name} → ${MOUNT_DIR}`);
+  } catch (e) {
+    logger.child('usb').warn(`重新挂载失败：${(e as Error).message}`);
+  }
+  return getUsbState();
 }
 
 let lastEjectedDevice: string | null = null;
@@ -312,35 +342,79 @@ class ThrottleStream extends Transform {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
- * 原子拷贝（**异步**，不阻塞事件循环 —— 拷几 GB 时网页照样能用）：
- * 先写 `.part` → fsync 落盘 → rename 成最终名。中途拔盘/停电最多留一个 `.part`，
- * 绝不会出现"名字正常、内容写了一半"的坏成品。
+ * 原子拷贝（**异步、全速**，不阻塞事件循环）：
+ * `.part` → fsync → rename。带**卡死看门狗**：如果长时间没有任何进度
+ *（U 盘拔松/失效挂载导致写阻塞），直接中止并抛错，交给上层重置挂载。
  */
-async function copyFileAtomic(from: string, to: string): Promise<void> {
+async function copyFileAtomic(
+  from: string,
+  to: string,
+  onProgress?: (copiedTotal: number) => void,
+  totalBytes = 0,
+): Promise<void> {
   fs.mkdirSync(path.dirname(to), { recursive: true });
   const tmp = `${to}.part`;
+  const rate = Math.max(0, Number(config.usbCopyRateMbps) || 0) * 1024 * 1024;
+  const stallMs = Math.max(10_000, Number(process.env.USB_COPY_STALL_SEC ?? 90) * 1000);
+  let lastProgressAt = Date.now();
+  let copied = 0;
+  const progress = new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      copied += chunk.length;
+      lastProgressAt = Date.now();
+      onProgress?.(copied);
+      this.push(chunk);
+      cb();
+    },
+  });
+  const rs = fs.createReadStream(from, { highWaterMark: 256 * 1024 });
+  const ws = fs.createWriteStream(tmp);
+  // 看门狗：长时间没进度 → 中止（防止"一直拷贝中"卡死）
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastProgressAt > stallMs) {
+      rs.destroy(new Error(`拷贝卡住超过 ${Math.round(stallMs / 1000)} 秒（U 盘可能拔松/失效挂载）`));
+      ws.destroy(new Error('拷贝卡住'));
+    }
+  }, 5000);
   try {
-    // 限速可配：默认 0 = 全速（用户要求尽快搬完；短暂卡顿可接受）。想留余量可设 USB_COPY_RATE_MBPS。
-    const rate = Math.max(0, Number(config.usbCopyRateMbps) || 0) * 1024 * 1024;
-    await pipeline(
-      fs.createReadStream(from, { highWaterMark: 256 * 1024 }),
-      new ThrottleStream(rate),
-      fs.createWriteStream(tmp),
-    );
+    await pipeline(rs, new ThrottleStream(rate), progress, ws);
     const fh = await fs.promises.open(tmp, 'r+');
     try {
-      await fh.sync(); // 数据真正落盘（U 盘缓存冲进设备），否则拔盘会丢尾巴
+      await fh.sync(); // 数据真正落盘，否则拔盘会丢尾巴
     } finally {
       await fh.close();
     }
-    fs.renameSync(tmp, to); // 同一文件系统内原子改名：要么没有，要么完整
+    fs.renameSync(tmp, to); // 原子改名：要么没有，要么完整
   } catch (e) {
     try {
       fs.unlinkSync(tmp);
     } catch {
-      /* 设备可能已拔，删不掉就算了 */
+      /* 设备可能已拔 */
     }
     throw e;
+  } finally {
+    clearInterval(watchdog);
+    void totalBytes;
+  }
+}
+
+/** 目标目录到底能不能写：写一个 4KB 探针（带超时）。失效挂载/只读盘会在这里暴露。 */
+async function probeWritable(dir: string, timeoutMs = 8000): Promise<boolean> {
+  const probe = path.join(dir, '.ttdl-probe');
+  const write = (async () => {
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(probe, 'ok');
+    await fs.promises.unlink(probe).catch(() => undefined);
+  })();
+  let timer: NodeJS.Timeout | null = null;
+  const timeout = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    const ok = await Promise.race([write.then(() => true).catch(() => false), timeout]);
+    return ok;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -350,8 +424,8 @@ async function copyFileAtomic(from: string, to: string): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 export type UsbCopyState = 'copying' | 'failed';
-/** 正在/刚刚拷贝的文件状态：fileId → copying / failed（成功就删掉，靠 DB 的 on_usb 表示"已在 U 盘"） */
-const copyJobs = new Map<number, { state: UsbCopyState; error?: string }>();
+/** 正在/刚刚拷贝的文件状态（含进度）：fileId → copying / failed */
+const copyJobs = new Map<number, { state: UsbCopyState; error?: string; copiedBytes: number; totalBytes: number }>();
 
 /** 单个文件当前的拷贝状态（给文件清单显示） */
 export function usbCopyStatus(fileId: number): UsbCopyState | null {
@@ -361,6 +435,12 @@ export function usbCopyStatus(fileId: number): UsbCopyState | null {
 /** 拷贝失败的详情（诊断用） */
 export function usbCopyError(fileId: number): string | null {
   return copyJobs.get(fileId)?.error ?? null;
+}
+
+/** 拷贝进度（给文件清单显示"3.5G 里拷了多少"） */
+export function usbCopyProgress(fileId: number): { copiedBytes: number; totalBytes: number } | null {
+  const j = copyJobs.get(fileId);
+  return j ? { copiedBytes: j.copiedBytes, totalBytes: j.totalBytes } : null;
 }
 
 /**
@@ -386,8 +466,25 @@ export async function offloadToDir(destDir: string, srcDir = config.dirs.consume
   }
 }
 
+let nextRetryAt = 0;
+let lastProbeAt = 0;
+let probeOk = false;
+
 async function offloadLoop(destDir: string): Promise<{ moved: number; bytes: number }> {
-  fs.mkdirSync(destDir, { recursive: true });
+  // 失败后冷却一会儿再试，避免"失败→立刻重拷→又失败"的死循环刷屏
+  if (Date.now() < nextRetryAt) return { moved: 0, bytes: 0 };
+  // 拷贝前先探一下目标目录可不可写（失效挂载/只读盘/空间不足会在这里暴露）
+  if (Date.now() - lastProbeAt > 30_000) {
+    lastProbeAt = Date.now();
+    probeOk = await probeWritable(destDir);
+    if (!probeOk) {
+      logger.child('usb').warn(`目标目录不可写（${destDir}），先重置挂载再试`);
+      resetUsbMount();
+      lastProbeAt = 0;
+      nextRetryAt = Date.now() + 30_000;
+      return { moved: 0, bytes: 0 };
+    }
+  }
   let moved = 0;
   let bytes = 0;
   let rows: ReturnType<typeof filesRepo.list>['rows'];
@@ -400,9 +497,40 @@ async function offloadLoop(destDir: string): Promise<{ moved: number; bytes: num
     if (row.on_usb) continue;
     if (!fs.existsSync(row.path)) continue; // 源不在 → 可能已搬到 U 盘，交给 reconcile 认领
     const to = path.join(destDir, path.basename(row.path));
-    copyJobs.set(row.id, { state: 'copying' });
+    let totalBytes = 0;
     try {
-      await copyFileAtomic(row.path, to);    // 原子落盘：要么没有，要么完整（异步，不卡界面）
+      totalBytes = fs.statSync(row.path).size;
+    } catch {
+      totalBytes = 0;
+    }
+    // 空间不够就别硬拷（会写坏 .part 或失败重试）
+    try {
+      const free = freeOf(destDir);
+      if (totalBytes > 0 && free > 0 && free < totalBytes + 64 * 1024 * 1024) {
+        copyJobs.set(row.id, {
+          state: 'failed',
+          error: `U 盘空间不足：需要 ${(totalBytes / 1024 ** 3).toFixed(2)} GiB，剩余 ${(free / 1024 ** 3).toFixed(2)} GiB`,
+          copiedBytes: 0,
+          totalBytes,
+        });
+        nextRetryAt = Date.now() + 60_000;
+        logger.child('usb').warn(`U 盘空间不足，暂停拷贝（源文件保留）：需要 ${(totalBytes / 1024 ** 3).toFixed(2)} GiB`);
+        return { moved, bytes };
+      }
+    } catch {
+      /* df 失败就继续试 */
+    }
+    copyJobs.set(row.id, { state: 'copying', copiedBytes: 0, totalBytes });
+    try {
+      await copyFileAtomic(
+        row.path,
+        to,
+        (copied) => {
+          const j = copyJobs.get(row.id);
+          if (j) j.copiedBytes = copied;
+        },
+        totalBytes,
+      );
       const st = fs.statSync(row.path);
       filesRepo.markOnUsb(row.id, to);       // ⚠️ 先写库（指向 U 盘），再删源
       copyJobs.delete(row.id);
@@ -413,11 +541,16 @@ async function offloadLoop(destDir: string): Promise<{ moved: number; bytes: num
       }
       moved += 1;
       bytes += st.size;
-      // 拷完一个喘口气，避免连续 fsync/IO 把总线打满
       await sleep(Math.max(0, Number(config.usbCopyPauseMs) || 0));
     } catch (e) {
-      copyJobs.set(row.id, { state: 'failed', error: (e as Error).message });
-      logger.child('usb').warn(`拷贝到 U 盘失败（源文件保留，下次重试）：${path.basename(row.path)}：${(e as Error).message}`);
+      const msg = (e as Error).message;
+      copyJobs.set(row.id, { state: 'failed', error: msg, copiedBytes: 0, totalBytes });
+      logger.child('usb').warn(`拷贝到 U 盘失败（源文件保留）：${path.basename(row.path)}：${msg}`);
+      // 失败 → 把 U 盘全部推出再重新挂载（用户要求），并冷却 60 秒，别死循环
+      resetUsbMount();
+      lastProbeAt = 0;
+      nextRetryAt = Date.now() + 60_000;
+      return { moved, bytes };
     }
   }
   if (moved > 0) {
@@ -514,6 +647,11 @@ export function startUsbWorker(): void {
         cached = s;
       } else {
         cached = autoMount();
+      }
+      // 重复挂载 / 失效挂载（upo 与 upo1 同时存在）→ 全部推出后重新挂到 /mnt/usb
+      if (cached.needsReset) {
+        logger.child('usb').mark('USB', `检测到 U 盘挂载异常（挂载点：${(cached.mounts ?? []).join('、') || '?'}），全部推出后重新挂载`);
+        cached = resetUsbMount();
       }
       if (cached.mounted) {
         if (!prevMounted) logger.child('usb').mark('USB', `检测到外部盘并挂载：${cached.device}（${cached.label ?? ''}）`);
