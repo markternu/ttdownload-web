@@ -564,7 +564,7 @@ async function offloadLoop(destDir: string): Promise<{ moved: number; bytes: num
  * 断电恢复：文件已经完整落在 U 盘、但数据库还指着 SD（源被删掉了）→ 认领 U 盘上那个文件。
  * 返回认领的数量。
  */
-export function reconcileUsbCopies(destDir: string): number {
+export function reconcileUsbCopies(destDir: string, sdConsumerDir = config.dirs.consumer): number {
   let fixed = 0;
   let rows: ReturnType<typeof filesRepo.list>['rows'];
   try {
@@ -573,18 +573,33 @@ export function reconcileUsbCopies(destDir: string): number {
     return 0;
   }
   for (const row of rows) {
-    if (row.on_usb) continue;
-    if (fs.existsSync(row.path)) continue; // 源还在 → 正常流程会搬
-    const candidate = path.join(destDir, path.basename(row.path));
-    try {
-      if (!fs.statSync(candidate).isFile() || fs.statSync(candidate).size <= 0) continue;
-    } catch {
-      continue;
+    const base = path.basename(row.path);
+    const onUsb = path.join(destDir, base);
+    const onSd = path.join(sdConsumerDir, base);
+    // ① U 盘上有同名文件 → 记录指向它（修复"记录指向旧挂载点 /media/... "的情况）
+    if (fs.existsSync(onUsb)) {
+      const stat = (() => {
+        try {
+          return fs.statSync(onUsb);
+        } catch {
+          return null;
+        }
+      })();
+      if (stat && stat.isFile() && stat.size > 0) {
+        if (!fs.existsSync(row.path) || path.resolve(row.path) !== path.resolve(onUsb)) {
+          filesRepo.markOnUsb(row.id, onUsb);
+          fixed += 1;
+        }
+        continue;
+      }
     }
-    filesRepo.markOnUsb(row.id, candidate);
-    fixed += 1;
+    // ② 记录说在 U 盘、但文件不在了（旧挂载点被清理/拔盘）→ 若 SD 源还在，改回"待拷贝"重新搬
+    if (row.on_usb && !fs.existsSync(row.path) && fs.existsSync(onSd)) {
+      filesRepo.resetUsb(row.id, onSd);
+      fixed += 1;
+    }
   }
-  if (fixed > 0) logger.child('usb').mark('USB', `断电恢复：认领 U 盘上已完整的成品 ${fixed} 个`);
+  if (fixed > 0) logger.child('usb').mark('USB', `U 盘记录自愈：修正/重置 ${fixed} 条（旧挂载点或路径失效）`);
   return fixed;
 }
 
@@ -662,7 +677,7 @@ export function startUsbWorker(): void {
         if (wd.onUsb) {
           // 断电恢复顺序：先清没写完的 .part → 认领"已完整但没写库"的 → 再补搬剩下的
           cleanupPartials(wd.consumer);
-          reconcileUsbCopies(wd.consumer);
+          reconcileUsbCopies(wd.consumer, config.dirs.consumer);
         }
         void offloadArchivedToUsb().catch((e) => logger.child('usb').warn(`补搬成品到 U 盘失败：${(e as Error).message}`));
       }

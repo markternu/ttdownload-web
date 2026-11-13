@@ -445,6 +445,10 @@ export const filesRepo = {
   markOnUsb(id: number, newPath: string): void {
     db.prepare('UPDATE published_files SET path=?, on_usb=1, usb_copied_at=? WHERE id=?').run(newPath, nowIso(), id);
   },
+  /** 记录说"在 U 盘"但文件其实不在了：把路径改回 SD 源、并标回"待拷贝"，让它重新走一遍拷贝 */
+  resetUsb(id: number, sdPath: string): void {
+    db.prepare('UPDATE published_files SET path=?, on_usb=0, usb_copied_at=NULL WHERE id=?').run(sdPath, id);
+  },
   /** 补写/更新封装格式（老成品：点播放/下载原始文件解密后探测出来再写回） */
   setContainer(id: number, container: string): void {
     db.prepare('UPDATE published_files SET container=? WHERE id=?').run(container, id);
