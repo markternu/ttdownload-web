@@ -16,6 +16,7 @@
 #      sudo ./deploy.sh --root /ttdownload
 #      sudo ./deploy.sh --check-deps # 只检查依赖（aria2/transmission/node/yt-dlp 等）是否已安装，不做任何改动
 #      sudo ./deploy.sh --orig-code  # 打印「下载原始文件」当前有效的 6 位密码（每 15 分钟换一次）
+#      sudo ./deploy.sh --set-tr-pass '新密码'  # 单独设置 transmission RPC 密码（同时改 .env 和 transmission，重启生效）
 #      sudo ./deploy.sh --update     # 【已部署过】拉取最新代码 + 重新构建 + 重启（最常用）
 #      sudo ./deploy.sh --status     # 查看服务状态
 #      sudo ./deploy.sh --restart    # 重启服务
@@ -146,6 +147,12 @@ while [[ $# -gt 0 ]]; do
     --root) DOWNLOAD_ROOT="$2"; shift 2 ;;
     --check-deps) ACTION="check-deps"; shift ;;
     --orig-code) ACTION="orig-code"; shift ;;
+    --set-tr-pass)
+      ACTION="set-tr-pass"
+      shift
+      TR_PASS_ARG="${1:-}"
+      [[ $# -gt 0 ]] && shift
+      ;;
     --update) ACTION="update"; shift ;;
     --status) ACTION="status"; shift ;;
     --restart) ACTION="restart"; shift ;;
@@ -506,20 +513,9 @@ configure_transmission_env() {
   # 提示"已在 .env 中配置"然后跳过，于是错的密码一直留着、用户以为"改不了"）。
   # 交互式下回车 = 保持原值；非交互（如 --update/定时脚本）永远不问，避免卡住。
   if [[ -n "$password" ]]; then
-    if ! prompt_ok; then
-      log "transmission RPC 凭据已在 .env 中配置（用户 ${user}）；如需修改请在网页「设置 → 网络设置 → transmission RPC」里改（改完立即生效）"
-      return 0
-    fi
-    local fix=""
-    echo
-    read_prompt fix "transmission RPC 密码（用户 ${user}，回车=保持 .env 里现有的不改，输入新值=覆盖）: "
-    if [[ -n "$fix" ]]; then
-      sed -i "s#^TRANSMISSION_RPC_PASSWORD=.*#TRANSMISSION_RPC_PASSWORD=${fix}#" .env
-      chmod 600 .env
-      log "transmission RPC 密码已更新（用户 ${user}）"
-    else
-      log "保持 .env 里现有的 transmission RPC 密码不变"
-    fi
+    # ⚠️ 用户明确要求：升级时**不要再问密码**，一直用 .env 里的原值。
+    #    要改密码请单独执行：sudo ./deploy.sh --set-tr-pass '新密码'
+    log "transmission RPC 凭据已在 .env 中配置（用户 ${user}），保持原值（改密码：sudo ./deploy.sh --set-tr-pass '新密码'）"
     return 0
   fi
   if prompt_ok; then
@@ -793,6 +789,58 @@ case "$ACTION" in
     [[ -f "${PROJECT_DIR}/dist/tools/originalCode.js" ]] || die "还没构建过（缺 dist/tools/originalCode.js）。先跑一次：sudo ./deploy.sh --update"
     cd "$PROJECT_DIR"
     exec node dist/tools/originalCode.js ;;
+  set-tr-pass)
+    # 单独设置 transmission RPC 密码：同时改 transmission 的 settings.json 和 .env，重启生效
+    [[ -f "$PROJECT_DIR/.env" ]] || die "缺少 $PROJECT_DIR/.env（先完整部署一次）"
+    settings=""
+    for f in /var/lib/transmission/.config/transmission-daemon/settings.json              /etc/transmission-daemon/settings.json              /var/lib/transmission-daemon/.config/transmission-daemon/settings.json; do
+      [[ -f "$f" ]] && settings="$f" && break
+    done
+    [[ -n "$settings" ]] || die "找不到 transmission 的 settings.json（transmission 可能没装）"
+    user="$(grep -E '^TRANSMISSION_RPC_USER=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+    [[ -n "$user" ]] || user="opengl"
+    pass="${TR_PASS_ARG:-}"
+    if [[ -z "$pass" ]]; then
+      if ! prompt_ok; then die "非交互环境请直接给密码：sudo ./deploy.sh --set-tr-pass '新密码'"; fi
+      read -rsp "新的 transmission RPC 密码（用户 ${user}）: " pass || true
+      echo
+      read -rsp "再输一次确认: " pass2 || true
+      echo
+      [[ "$pass" == "$pass2" ]] || die "两次输入不一致，未修改"
+    fi
+    [[ -n "$pass" ]] || die "密码不能为空"
+    [[ "$pass" =~ ^[^[:space:]#]+$ ]] || die "密码不能包含空格或 #"
+    # 1) transmission settings.json（rpc-password 写明文，启动时它自己会哈希）
+    if command -v jq >/dev/null 2>&1; then
+      jq --arg p "$pass" --arg u "$user" '.["rpc-password"]=$p | .["rpc-username"]=$u' "$settings" > "$settings.tmp" \
+        && chmod 600 "$settings.tmp" && mv "$settings.tmp" "$settings"
+    else
+      python3 - "$settings" "$pass" "$user" <<'PYEOF'
+import json,sys
+p,u,passwd = sys.argv[1], sys.argv[3], sys.argv[2]
+with open(p, encoding='utf-8') as f: d=json.load(f)
+d['rpc-password']=passwd; d['rpc-username']=u
+with open(p,'w',encoding='utf-8') as f: json.dump(d,f,indent=4,ensure_ascii=False)
+PYEOF
+    fi
+    # 2) .env
+    if grep -q '^TRANSMISSION_RPC_PASSWORD=' "$PROJECT_DIR/.env"; then
+      sed -i "s#^TRANSMISSION_RPC_PASSWORD=.*#TRANSMISSION_RPC_PASSWORD=${pass}#" "$PROJECT_DIR/.env"
+    else
+      echo "TRANSMISSION_RPC_PASSWORD=${pass}" >> "$PROJECT_DIR/.env"
+    fi
+    if grep -q '^TRANSMISSION_RPC_USER=' "$PROJECT_DIR/.env"; then
+      sed -i "s#^TRANSMISSION_RPC_USER=.*#TRANSMISSION_RPC_USER=${user}#" "$PROJECT_DIR/.env"
+    else
+      echo "TRANSMISSION_RPC_USER=${user}" >> "$PROJECT_DIR/.env"
+    fi
+    chmod 600 "$PROJECT_DIR/.env"
+    # 3) 重启
+    systemctl restart transmission-daemon 2>/dev/null || true
+    sleep 2
+    systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+    log "transmission RPC 密码已更新（用户 ${user}）；transmission 与 ${SERVICE_NAME} 已重启"
+    exit 0 ;;
   stop)
     log "停止服务 ${SERVICE_NAME} ..."
     systemctl stop "$SERVICE_NAME" || true
