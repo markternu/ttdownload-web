@@ -99,3 +99,40 @@ test('拷贝限速：几十 GB 全速会打满 I/O，限速后按速率慢慢搬
   assert.equal(row.on_usb, 1);
   assert.equal(fs.existsSync(row.path), true);
 });
+
+test('旧 /media 残留：记录说"在U盘"但路径不在当前U盘目录 → 自动搬到真U盘，拷完才删SD那份', async () => {
+  // 模拟 /media/mypi/upo 残留：文件在 SD 上，不在消费者目录，也不在当前 U 盘目录
+  const leftoverDir = path.join(root, 'media-leftover', 'ttdownload', 'xiaofeizhe_downd');
+  fs.mkdirSync(leftoverDir, { recursive: true });
+  const leftover = path.join(leftoverDir, 'stale-file.bin');
+  fs.writeFileSync(leftover, 'stale-bytes');
+  const id = filesRepo.add({ taskId: null, name: 'stale-file.bin', title: 'stale', module: 'aria2', sizeBytes: 11, path: leftover });
+  filesRepo.markOnUsb(id, leftover); // 记录错误地标成"已在U盘"
+
+  const fixed = reconcileUsbCopies(usbDir);
+  assert.ok(fixed >= 1, '要识别出路径不在当前 U 盘目录');
+  assert.equal(filesRepo.get(id).on_usb, 0, '要标回待拷贝');
+
+  const r = await offloadToDir(usbDir);
+  assert.ok(r.moved >= 1);
+  const row = filesRepo.get(id);
+  assert.equal(row.on_usb, 1);
+  assert.ok(row.path.startsWith(usbDir), '记录要指向真 U 盘');
+  assert.equal(fs.existsSync(row.path), true, '文件要真的在 U 盘');
+  assert.equal(fs.existsSync(leftover), false, '拷完才删 SD 上的残留');
+});
+
+test('U盘已有同名同大小文件：不重复拷，直接改记录并删SD源', async () => {
+  const p = path.join(sdDir, 'already-there.bin');
+  fs.writeFileSync(p, 'same-content');
+  const id = filesRepo.add({ taskId: null, name: 'already-there.bin', title: 'at', module: 'aria2', sizeBytes: 12, path: p });
+  fs.mkdirSync(usbDir, { recursive: true });
+  fs.writeFileSync(path.join(usbDir, 'already-there.bin'), 'same-content');
+
+  const r = await offloadToDir(usbDir);
+  assert.ok(r.moved >= 1);
+  const row = filesRepo.get(id);
+  assert.equal(row.on_usb, 1);
+  assert.equal(row.path, path.join(usbDir, 'already-there.bin'));
+  assert.equal(fs.existsSync(p), false, 'SD 源可以安全删除（U 盘已有完整同名文件）');
+});

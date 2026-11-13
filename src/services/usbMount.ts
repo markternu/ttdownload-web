@@ -504,6 +504,23 @@ async function offloadLoop(destDir: string): Promise<{ moved: number; bytes: num
     } catch {
       totalBytes = 0;
     }
+    // U 盘上已经有同名且大小一致的完整文件 → 不重复拷，直接改记录、删 SD 上的源
+    try {
+      if (totalBytes > 0 && fs.existsSync(to) && fs.statSync(to).isFile() && fs.statSync(to).size === totalBytes) {
+        filesRepo.markOnUsb(row.id, to);
+        copyJobs.delete(row.id);
+        try {
+          fs.unlinkSync(row.path);
+        } catch {
+          /* ignore */
+        }
+        moved += 1;
+        bytes += totalBytes;
+        continue;
+      }
+    } catch {
+      /* 继续正常拷贝 */
+    }
     // 空间不够就别硬拷（会写坏 .part 或失败重试）
     try {
       const free = freeOf(destDir);
@@ -572,10 +589,18 @@ export function reconcileUsbCopies(destDir: string, sdConsumerDir = config.dirs.
   } catch {
     return 0;
   }
+  const destPrefix = `${path.resolve(destDir)}${path.sep}`;
   for (const row of rows) {
     const base = path.basename(row.path);
     const onUsb = path.join(destDir, base);
     const onSd = path.join(sdConsumerDir, base);
+    // ⓪ 记录说"已在 U 盘"，但路径根本不在当前 U 盘目录（典型：旧 /media/mypi/upo 残留，文件其实在 SD）
+    //    → 标回"待拷贝"（路径保留），下一轮正常搬到 /mnt/usb，拷完才删 SD 上的那份
+    if (row.on_usb && !path.resolve(row.path).startsWith(destPrefix) && fs.existsSync(row.path)) {
+      filesRepo.resetUsb(row.id, row.path);
+      fixed += 1;
+      continue;
+    }
     // ① U 盘上有同名文件 → 记录指向它（修复"记录指向旧挂载点 /media/... "的情况）
     if (fs.existsSync(onUsb)) {
       const stat = (() => {
