@@ -149,6 +149,70 @@ function isExternalDisk(b: Block): boolean {
   return false;
 }
 
+/** 系统里所有挂载点（target / source / fstype） */
+function listMounts(): { target: string; source: string; fstype: string | null }[] {
+  try {
+    const out = execFileSync('findmnt', ['-rn', '-o', 'TARGET,SOURCE,FSTYPE'], { encoding: 'utf8', timeout: 5000 });
+    const rows: { target: string; source: string; fstype: string | null }[] = [];
+    for (const line of out.trim().split('\n')) {
+      if (!line.trim()) continue;
+      const [target, source, fstype] = line.split(/\s+/);
+      if (target && source) rows.push({ target, source, fstype: fstype || null });
+    }
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+/** 挂载点是不是**真的活着**（能 stat 且能写）。断电/拔盘留下的挂载点 stat 会失败。 */
+function isLiveMount(target: string): boolean {
+  try {
+    fs.statSync(target);
+    fs.accessSync(target, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 同一个分区被挂到多个地方时（典型：udisks 自动挂到 /media/mypi/upo，
+ * 我们/用户又挂了 /mnt/usb，或者拔插后多出 upo1），只留一个：
+ *   · 优先留我们的固定挂载点 /mnt/usb（路径稳定，web 项目不迷路）；
+ *   · 其它**能活得**的重复挂载和**失效**的旧挂载点一并 umount -l 掉。
+ * 返回保留下来的那个挂载点。
+ */
+function pickAndCleanMounts(mounts: { target: string; source: string }[], prefer = MOUNT_DIR): string | null {
+  if (!mounts.length) return null;
+  const live = mounts.filter((m) => isLiveMount(m.target));
+  const stale = mounts.filter((m) => !isLiveMount(m.target));
+  for (const m of stale) {
+    try {
+      execFileSync('umount', ['-l', m.target], { timeout: 5000 });
+      logger.child('usb').mark('USB', `清理失效挂载点（拔盘/断电残留）：${m.target}`, { target: m.target });
+    } catch {
+      /* 清不掉就算了，下面不用它 */
+    }
+  }
+  if (!live.length) return null;
+  // 优先固定挂载点
+  const preferred = live.find((m) => m.target === prefer) ?? live[0];
+  for (const m of live) {
+    if (m.target === preferred.target) continue;
+    try {
+      execFileSync('umount', ['-l', m.target], { timeout: 5000 });
+      logger.child('usb').mark('USB', `同一个 U 盘被重复挂载，已保留 ${preferred.target}、卸载 ${m.target}`, {
+        kept: preferred.target,
+        removed: m.target,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+  return preferred.target;
+}
+
 export function getUsbState(): UsbState {
   const blocks = lsblk();
   const disks = blocks.filter(isExternalDisk);
@@ -156,17 +220,24 @@ export function getUsbState(): UsbState {
   const parts = blocks.filter((b) => b.type === 'part' && [...diskNames].some((d) => b.name.startsWith(d)));
   const present = disks.length > 0;
 
-  const mounted = parts.find((p) => p.mountpoint);
-  if (mounted) {
+  // ⚠️ 同一个分区可能被挂到多个地方（udisks 的 /media/mypi/upo、我们的 /mnt/usb，
+  //    拔插后还可能出现 upo1）—— 以 findmnt 的实际挂载为准，挑一个活的、把多余的/失效的清掉。
+  const mounts = listMounts();
+  for (const p of parts) {
+    const src = `/dev/${p.name}`;
+    const mine = mounts.filter((m) => m.source === src || m.source.endsWith(`/${p.name}`));
+    if (!mine.length) continue;
+    const chosen = pickAndCleanMounts(mine);
+    if (!chosen) continue;
     return {
       present: true,
       mounted: true,
-      device: `/dev/${mounted.name}`,
-      mountpoint: mounted.mountpoint ?? undefined,
-      fstype: mounted.fstype ?? undefined,
-      label: mounted.model ?? mounted.fstype ?? undefined,
-      sizeBytes: parseSize(mounted.size),
-      freeBytes: freeOf(mounted.mountpoint as string),
+      device: src,
+      mountpoint: chosen,
+      fstype: p.fstype ?? undefined,
+      label: p.model ?? p.fstype ?? undefined,
+      sizeBytes: parseSize(p.size),
+      freeBytes: freeOf(chosen),
     };
   }
 
@@ -424,8 +495,19 @@ export function startUsbWorker(): void {
   const tick = () => {
     try {
       const s = getUsbState();
-      // 盘被拔掉 → 清除"刚弹出"的记忆，下次插入才允许再自动挂载
-      if (!s.present) lastEjectedDevice = null;
+      // 盘被拔掉 → 清除"刚弹出"的记忆，并把 /mnt/usb 上的失效挂载清掉（否则下次插会变 upo1）
+      if (!s.present) {
+        lastEjectedDevice = null;
+        try {
+          const stillMounted = listMounts().some((m) => m.target === MOUNT_DIR);
+          if (stillMounted) {
+            execFileSync('umount', ['-l', MOUNT_DIR], { timeout: 5000 });
+            logger.child('usb').mark('USB', `U 盘已拔出，清理失效挂载点 ${MOUNT_DIR}`);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       const prevMounted = cached.mounted;
       if (!s.mounted && s.device && s.device === lastEjectedDevice) {
         // 用户刚手动弹出的盘：巡检**不要**又自动挂回去
