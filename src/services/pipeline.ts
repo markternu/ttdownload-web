@@ -194,6 +194,7 @@ async function processEncrypting(): Promise<void> {
         sizeBytes,
         path: finalPath,
         container: u.container ?? null,
+        onUsb: wd.onUsb,
       });
       u.fileId = fileId;
       u.publishedName = path.basename(finalPath);

@@ -70,6 +70,8 @@ export interface PublishedFile {
   module: ModuleId
   /** 封装格式（ZIP / MP4 / MKV / AVI / RMVB / WMV…） */
   container?: string | null
+  /** U 盘状态：on_usb=已在 U 盘 / copying=正在拷贝 / error=拷贝失败 */
+  usbStatus?: 'on_usb' | 'copying' | 'error' | null
   sizeBytes: number
   createdAt: string
   downloadUrl: string // 管理端下载地址：/api/files/<id>/download（不鉴权）

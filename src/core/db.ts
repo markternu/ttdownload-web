@@ -111,6 +111,9 @@ ensureColumn('published_files', 'last_android_download_at', 'TEXT');
 ensureColumn('published_files', 'web_downloads', 'INTEGER NOT NULL DEFAULT 0');
 // 成品（加密归档产物）的封装格式：ZIP / MP4 / MKV / AVI / RMVB / WMV …（老库在这里补列）
 ensureColumn('published_files', 'container', 'TEXT');
+// 是否已经拷贝到 U 盘（断电恢复：拷贝完成后先写库、再删源）
+ensureColumn('published_files', 'on_usb', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('published_files', 'usb_copied_at', 'TEXT');
 ensureColumn('published_files', 'last_web_download_at', 'TEXT');
 
 const nowIso = (): string => new Date().toISOString();
@@ -402,6 +405,9 @@ interface PublishedRow {
   last_web_download_at: string | null;
   /** 封装格式（ZIP / MP4 / MKV / AVI / RMVB / WMV…），老数据可能为 null */
   container: string | null;
+  /** 是否已经拷贝到 U 盘（1=已在 U 盘） */
+  on_usb: number;
+  usb_copied_at: string | null;
 }
 
 export const filesRepo = {
@@ -413,14 +419,31 @@ export const filesRepo = {
     sizeBytes: number;
     path: string;
     container?: string | null;
+    /** 发布时是否直接落在 U 盘上（U 盘挂载时 consumer 就在 U 盘） */
+    onUsb?: boolean;
   }): number {
     const info = db
       .prepare(
-        `INSERT INTO published_files (task_id,name,title,module,size_bytes,path,created_at,downloaded,container)
-         VALUES (?,?,?,?,?,?,?,0,?)`,
+        `INSERT INTO published_files (task_id,name,title,module,size_bytes,path,created_at,downloaded,container,on_usb,usb_copied_at)
+         VALUES (?,?,?,?,?,?,?,0,?,?,?)`,
       )
-      .run(input.taskId ?? null, input.name, input.title, input.module, input.sizeBytes, input.path, nowIso(), input.container ?? null);
+      .run(
+        input.taskId ?? null,
+        input.name,
+        input.title,
+        input.module,
+        input.sizeBytes,
+        input.path,
+        nowIso(),
+        input.container ?? null,
+        input.onUsb ? 1 : 0,
+        input.onUsb ? nowIso() : null,
+      );
     return Number(info.lastInsertRowid);
+  },
+  /** 拷贝到 U 盘完成：把记录指向 U 盘上的新路径（⚠️ 必须在校验文件完整之后调用） */
+  markOnUsb(id: number, newPath: string): void {
+    db.prepare('UPDATE published_files SET path=?, on_usb=1, usb_copied_at=? WHERE id=?').run(newPath, nowIso(), id);
   },
   /** 补写/更新封装格式（老成品：点播放/下载原始文件解密后探测出来再写回） */
   setContainer(id: number, container: string): void {

@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { workDirs } from '../services/usbMount';
+import { usbCopyStatus, workDirs } from '../services/usbMount';
 import path from 'node:path';
 import { Router } from 'express';
 import { config } from '../core/config';
@@ -32,6 +32,14 @@ function toApi(row: NonNullable<ReturnType<typeof filesRepo.get>>): PublishedFil
     title: row.title,
     module: row.module,
     container: row.container ?? null,
+    // U 盘状态：'on_usb' 已在 U 盘；'copying' 正在拷；'error' 拷贝失败（源文件保留，下次重试）
+    usbStatus: row.on_usb
+      ? 'on_usb'
+      : usbCopyStatus(row.id) === 'copying'
+        ? 'copying'
+        : usbCopyStatus(row.id) === 'failed'
+          ? 'error'
+          : null,
     sizeBytes: row.size_bytes,
     createdAt: row.created_at,
     // 管理端下载（本页面按钮走这个，不鉴权、便于排障）

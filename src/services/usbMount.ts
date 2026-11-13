@@ -10,11 +10,13 @@
  * 服务以 root 运行（deploy.sh 里 User=root），所以 mount/umount 直接执行，无需 sudo。
  */
 import { execFileSync } from 'node:child_process';
+import { pipeline } from 'node:stream/promises';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../core/config';
 import { logger } from '../core/logger';
 import { getSettings } from './settings';
+import { filesRepo } from '../core/db';
 
 const MOUNT_DIR = '/mnt/usb';
 const TARGET_DIR = 'ttdownload';
@@ -213,80 +215,166 @@ export function ejectUsb(): UsbState {
 }
 
 /**
- * 原子写文件：先写 `.part` 临时名 → fsync 落盘 → rename 成最终名。
- * 这样中途拔盘 / 停电最多留下一个带 `.part` 标记的临时文件，
- * 绝不会出现"名字正常、内容却只写了一半"的损坏成品。失败时清理临时文件并抛错。
+ * 原子拷贝（**异步**，不阻塞事件循环 —— 拷几 GB 时网页照样能用）：
+ * 先写 `.part` → fsync 落盘 → rename 成最终名。中途拔盘/停电最多留一个 `.part`，
+ * 绝不会出现"名字正常、内容写了一半"的坏成品。
  */
-function copyFileAtomic(from: string, to: string): void {
+async function copyFileAtomic(from: string, to: string): Promise<void> {
   fs.mkdirSync(path.dirname(to), { recursive: true });
   const tmp = `${to}.part`;
-  const rfd = fs.openSync(from, 'r');
-  let wfd: number | null = null;
   try {
-    wfd = fs.openSync(tmp, 'w');
-    const buf = Buffer.alloc(1024 * 1024);
-    let n: number;
-    while ((n = fs.readSync(rfd, buf, 0, buf.length, null)) > 0) {
-      fs.writeSync(wfd, buf, 0, n);
+    await pipeline(fs.createReadStream(from, { highWaterMark: 1 << 20 }), fs.createWriteStream(tmp));
+    const fh = await fs.promises.open(tmp, 'r+');
+    try {
+      await fh.sync(); // 数据真正落盘（U 盘缓存冲进设备），否则拔盘会丢尾巴
+    } finally {
+      await fh.close();
     }
-    fs.fsyncSync(wfd); // 数据落盘（U 盘缓存冲进设备），否则拔盘会丢尾巴
-    fs.closeSync(wfd);
-    wfd = null;
-    fs.renameSync(tmp, to); // 同一文件系统内原子改名：要么旧文件、要么完整新文件
+    fs.renameSync(tmp, to); // 同一文件系统内原子改名：要么没有，要么完整
   } catch (e) {
-    if (wfd !== null) {
-      try { fs.closeSync(wfd); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* 设备可能已拔，删不掉就算了 */
     }
-    try { fs.unlinkSync(tmp); } catch { /* 设备可能已拔，删不掉就算了 */ }
     throw e;
+  }
+}
+
+
+/* ------------------------------------------------------------------ */
+/*  成品 → U 盘：逐个文件拷贝 + 状态 + 断电恢复                          */
+/* ------------------------------------------------------------------ */
+
+export type UsbCopyState = 'copying' | 'failed';
+/** 正在/刚刚拷贝的文件状态：fileId → copying / failed（成功就删掉，靠 DB 的 on_usb 表示"已在 U 盘"） */
+const copyJobs = new Map<number, { state: UsbCopyState; error?: string }>();
+
+/** 单个文件当前的拷贝状态（给文件清单显示） */
+export function usbCopyStatus(fileId: number): UsbCopyState | null {
+  return copyJobs.get(fileId)?.state ?? null;
+}
+
+/** 拷贝失败的详情（诊断用） */
+export function usbCopyError(fileId: number): string | null {
+  return copyJobs.get(fileId)?.error ?? null;
+}
+
+/**
+ * 把 SD 上还没搬到 U 盘的成品**逐个**搬过去：
+ *   copyFileAtomic（`.part` → fsync → rename）→ **先更新数据库指向 U 盘** → 再删源文件。
+ *
+ * 断电安全性（用户要求验证的）：
+ *   · 拷贝中途断电 → U 盘上只留 `xxx.part`（不会被当成成品；源文件完好），下次开机清掉 .part 重搬；
+ *   · rename 完成但还没写库 → 下次巡检 `reconcileUsbCopies()` 会"认领"U 盘上那个完整文件；
+ *   · 写库完成但还没删源 → 两边都有，记录已是 on_usb=1，下次不会重复搬（残留源文件由垃圾扫描报告）。
+ *   · 任何一步失败 **都不删源文件**，下次巡检自动重试。
+ */
+let copyRunning = false;
+
+export async function offloadToDir(destDir: string, srcDir = config.dirs.consumer): Promise<{ moved: number; bytes: number }> {
+  // 防重入：拷几 GB 时可能跨好几个 10 秒巡检，不能让两轮同时拷同一个文件
+  if (copyRunning) return { moved: 0, bytes: 0 };
+  copyRunning = true;
+  try {
+    return await offloadLoop(destDir);
   } finally {
-    fs.closeSync(rfd);
+    copyRunning = false;
   }
 }
 
-/** 递归剪切（跨文件系统用 copy + rm，不能用 rename——EXDEV） */
-function moveAcross(from: string, to: string): void {
-  const st = fs.statSync(from);
-  if (st.isDirectory()) {
-    fs.mkdirSync(to, { recursive: true });
-    for (const name of fs.readdirSync(from)) moveAcross(path.join(from, name), path.join(to, name));
-    fs.rmdirSync(from);
-  } else {
-    copyFileAtomic(from, to);
-    // ⚠️ 只在「完整文件原子落盘成功」之后才删源 —— 中途拔盘/停电源文件永远完好
-    fs.unlinkSync(from);
-  }
-}
-
-/** 把归档好的成品（consumer 目录）剪切到外部盘根目录的 ttdownload/ */
-export function offloadArchivedToUsb(): { moved: number; bytes: number } {
-  // U 盘挂载时，成品目录已经直接落在 U 盘（workDirs().consumer），新成品不再"二次剪切"。
-  // 这里只做一件事：把 U 盘插入**之前**留在 SD 上的旧成品补搬到 U 盘。
-  const wd = workDirs();
-  if (!wd.onUsb) return { moved: 0, bytes: 0 };
-  const src = config.dirs.consumer;
-  const dest = wd.consumer;
-  if (src === dest || !fs.existsSync(src)) return { moved: 0, bytes: 0 };
-  fs.mkdirSync(dest, { recursive: true });
+async function offloadLoop(destDir: string): Promise<{ moved: number; bytes: number }> {
+  fs.mkdirSync(destDir, { recursive: true });
   let moved = 0;
   let bytes = 0;
+  let rows: ReturnType<typeof filesRepo.list>['rows'];
   try {
-    for (const name of fs.readdirSync(src)) {
-      if (name.startsWith('.')) continue;
-      const from = path.join(src, name);
-      const to = path.join(dest, name);
-      const st = fs.statSync(from);
-      moveAcross(from, to);
+    rows = filesRepo.list({ pageSize: 1000 }).rows;
+  } catch {
+    return { moved: 0, bytes: 0 };
+  }
+  for (const row of rows) {
+    if (row.on_usb) continue;
+    if (!fs.existsSync(row.path)) continue; // 源不在 → 可能已搬到 U 盘，交给 reconcile 认领
+    const to = path.join(destDir, path.basename(row.path));
+    copyJobs.set(row.id, { state: 'copying' });
+    try {
+      await copyFileAtomic(row.path, to);    // 原子落盘：要么没有，要么完整（异步，不卡界面）
+      const st = fs.statSync(row.path);
+      filesRepo.markOnUsb(row.id, to);       // ⚠️ 先写库（指向 U 盘），再删源
+      copyJobs.delete(row.id);
+      try {
+        fs.unlinkSync(row.path);
+      } catch {
+        /* 源删不掉不影响：记录已在 U 盘，下次不会重复搬 */
+      }
       moved += 1;
-      bytes += st.isDirectory() ? 0 : st.size;
+      bytes += st.size;
+    } catch (e) {
+      copyJobs.set(row.id, { state: 'failed', error: (e as Error).message });
+      logger.child('usb').warn(`拷贝到 U 盘失败（源文件保留，下次重试）：${path.basename(row.path)}：${(e as Error).message}`);
     }
-    if (moved > 0) {
-      logger.child('usb').mark('USB', `SD 上已有的成品已补搬到外部盘：${moved} 项 / ${(bytes / 1024 / 1024).toFixed(1)}MB → ${dest}`, { moved, bytes });
-    }
-  } catch (e) {
-    logger.child('usb').warn(`补搬成品到外部盘失败：${(e as Error).message}`);
+  }
+  if (moved > 0) {
+    logger.child('usb').mark('USB', `已拷贝 ${moved} 个成品到 U 盘（${(bytes / 1024 / 1024).toFixed(1)}MB）`, { moved, bytes });
   }
   return { moved, bytes };
+}
+
+/**
+ * 断电恢复：文件已经完整落在 U 盘、但数据库还指着 SD（源被删掉了）→ 认领 U 盘上那个文件。
+ * 返回认领的数量。
+ */
+export function reconcileUsbCopies(destDir: string): number {
+  let fixed = 0;
+  let rows: ReturnType<typeof filesRepo.list>['rows'];
+  try {
+    rows = filesRepo.list({ pageSize: 1000 }).rows;
+  } catch {
+    return 0;
+  }
+  for (const row of rows) {
+    if (row.on_usb) continue;
+    if (fs.existsSync(row.path)) continue; // 源还在 → 正常流程会搬
+    const candidate = path.join(destDir, path.basename(row.path));
+    try {
+      if (!fs.statSync(candidate).isFile() || fs.statSync(candidate).size <= 0) continue;
+    } catch {
+      continue;
+    }
+    filesRepo.markOnUsb(row.id, candidate);
+    fixed += 1;
+  }
+  if (fixed > 0) logger.child('usb').mark('USB', `断电恢复：认领 U 盘上已完整的成品 ${fixed} 个`);
+  return fixed;
+}
+
+/** 断电恢复：清掉 U 盘上没写完的 `.part`（有 .part 说明那次拷贝没完成，源文件一定还在） */
+export function cleanupPartials(destDir: string): number {
+  let removed = 0;
+  try {
+    for (const name of fs.readdirSync(destDir)) {
+      if (!name.endsWith('.part')) continue;
+      try {
+        fs.unlinkSync(path.join(destDir, name));
+        removed += 1;
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* 目录不存在等 */
+  }
+  if (removed > 0) logger.child('usb').mark('USB', `清理 U 盘上未完成的临时文件 ${removed} 个`);
+  return removed;
+}
+
+/** U 盘挂载时：把 SD 上的旧成品补搬到 U 盘 */
+export async function offloadArchivedToUsb(): Promise<{ moved: number; bytes: number }> {
+  const wd = workDirs();
+  if (!wd.onUsb) return { moved: 0, bytes: 0 };
+  if (path.resolve(wd.consumer) === path.resolve(config.dirs.consumer)) return { moved: 0, bytes: 0 };
+  return offloadToDir(wd.consumer);
 }
 
 let cached: UsbState = getUsbState();
@@ -313,7 +401,13 @@ export function startUsbWorker(): void {
       }
       if (cached.mounted) {
         if (!prevMounted) logger.child('usb').mark('USB', `检测到外部盘并挂载：${cached.device}（${cached.label ?? ''}）`);
-        offloadArchivedToUsb();
+        const wd = workDirs();
+        if (wd.onUsb) {
+          // 断电恢复顺序：先清没写完的 .part → 认领"已完整但没写库"的 → 再补搬剩下的
+          cleanupPartials(wd.consumer);
+          reconcileUsbCopies(wd.consumer);
+        }
+        void offloadArchivedToUsb().catch((e) => logger.child('usb').warn(`补搬成品到 U 盘失败：${(e as Error).message}`));
       }
     } catch (e) {
       logger.child('usb').warn(`USB 巡检异常：${(e as Error).message}`);

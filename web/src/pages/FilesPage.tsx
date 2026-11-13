@@ -278,6 +278,20 @@ export default function FilesPage() {
         ) : null}
         {file.downloadedAt ? <p className="text-[11px] text-slate-400">{formatDateTime(file.downloadedAt)}</p> : null}
         {/* 播放文件状态：只在"正在解密"或"已有解密好的文件"时显示；没点过/超过 4 小时就不显示 */}
+        {/* U 盘状态：正在拷贝 / 已在 U 盘 / 拷贝失败 */}
+        {file.usbStatus === 'copying' ? (
+          <Badge tone="warning" dot>
+            正在拷贝到 U 盘…
+          </Badge>
+        ) : file.usbStatus === 'on_usb' ? (
+          <Badge tone="info" dot>
+            已在 U 盘
+          </Badge>
+        ) : file.usbStatus === 'error' ? (
+          <Badge tone="danger" dot>
+            U 盘拷贝失败（源文件保留，会自动重试）
+          </Badge>
+        ) : null}
         {file.playStatus === 'decrypting' ? (
           <Badge tone="warning" dot>
             播放文件：解密中…
