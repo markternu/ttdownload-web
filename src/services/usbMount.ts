@@ -378,7 +378,7 @@ function partTailMatches(from: string, tmp: string, start: number): boolean {
  * `.part.meta` 里记着源文件指纹：源变了就丢掉旧 `.part` 从头来，避免拼错内容。
  * 带**卡死看门狗**：长时间没有进度才中止（默认 300 秒，可由 USB_COPY_STALL_SEC 调整）。
  */
-async function copyFileAtomic(
+export async function copyFileAtomic(
   from: string,
   to: string,
   onProgress?: (copiedTotal: number) => void,

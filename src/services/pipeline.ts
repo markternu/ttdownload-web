@@ -7,7 +7,7 @@ import { filesRepo, tasksRepo } from '../core/db';
 import { logger, taskLog } from '../core/logger';
 import { archiveTaskFiles, moveWithDedup } from './archive';
 import { normalizeVideosForArchive } from './media';
-import { workDirs } from './usbMount';
+import { copyFileAtomic, workDirs } from './usbMount';
 import { encryptFile, stripExtension } from './crypto';
 import { encryptPassword, getSettings } from './settings';
 import { cleanupBtTaskDirs } from './btCleanup';
@@ -59,6 +59,43 @@ function unitsOf(task: Task & { payload?: Record<string, unknown> }): PublishUni
 }
 
 /** 归档：把模块下载好的文件移到 downd_ok_p2（打包/命名/V-L-T 标记） */
+/**
+ * 加密归档**之前**：如果 U 盘插着，先把**没有加密的原始文件**拷贝一份到 U 盘
+ * （目录：<U盘>/ttdownload/原始未加密/，同名同大小则跳过）。
+ * 用户要求：万一加密/归档出问题，U 盘上还能拿到原始文件。
+ * 备份失败不阻断流水线（只记警告），避免 U 盘抖动把正常归档卡死。
+ */
+export async function backupPlainToDir(files: string[], name: string, dir: string): Promise<{ copied: number; bytes: number }> {
+  let copied = 0;
+  let bytes = 0;
+  for (const f of files) {
+    try {
+      if (!fs.existsSync(f)) continue;
+      const dst = path.join(dir, path.basename(f));
+      const srcSize = fs.statSync(f).size;
+      if (fs.existsSync(dst) && fs.statSync(dst).size === srcSize) continue; // 已经备份过
+      await copyFileAtomic(f, dst);
+      copied += 1;
+      bytes += srcSize;
+    } catch (e) {
+      logger.child('pipeline').warn(`[MARK:ARCHIVE] 备份未加密原始文件到 U 盘失败（不阻断归档）：${(e as Error).message}`);
+    }
+  }
+  if (copied > 0) {
+    logger.child('pipeline').mark('ARCHIVE', `已把未加密原始文件备份到 U 盘：${name}（${copied} 个 / ${(bytes / 1024 ** 2).toFixed(1)}MB）`, {
+      copied,
+      bytes,
+    });
+  }
+  return { copied, bytes };
+}
+
+async function backupPlainToUsb(files: string[], name: string): Promise<void> {
+  const wd = workDirs();
+  if (!wd.onUsb) return;
+  await backupPlainToDir(files, name, path.join(path.dirname(wd.consumer), '原始未加密'));
+}
+
 async function processArchiving(): Promise<void> {
   const list = tasksRepo.byStatus(['archiving']) as (Task & { payload?: Record<string, unknown> })[];
   for (const task of list) {
@@ -74,6 +111,8 @@ async function processArchiving(): Promise<void> {
     for (const u of units) {
       // 断点续跑：已经归档过的单元不重复做
       if (u.archivePath && fs.existsSync(u.archivePath)) continue;
+      // 加密归档**之前**：U 盘插着的话，先把未加密的原始文件备份一份到 U 盘
+      await backupPlainToUsb(u.files, u.name);
       // 归档前：非 mp4 / moov 不在前的视频先重封装成 mp4+faststart
       //（失败不阻断归档，保留原文件继续走；这样成品天然能在线播放）
       const norm = await normalizeVideosForArchive(u.files);
@@ -183,8 +222,23 @@ async function processEncrypting(): Promise<void> {
       const encrypted = path.join(wd.encryptTmp, `${base}.data`);
       fs.renameSync(tmpOut, encrypted);            // 临时 → 正式（同分区原子改名）
       const stripped = stripExtension(encrypted);
-      const finalPath = moveWithDedup(stripped, wd.consumer, path.basename(stripped));
+      let finalPath = moveWithDedup(stripped, wd.consumer, path.basename(stripped));
       fs.rmSync(archivePath, { force: true });     // 密文落位 consumer 之后才删源
+      // 加密归档完成后再看一眼 U 盘：在的话把**加密好的成品**剪切到 U 盘
+      let onUsb = wd.onUsb;
+      try {
+        const wdNow = workDirs();
+        if (wdNow.onUsb && path.resolve(path.dirname(finalPath)) !== path.resolve(wdNow.consumer)) {
+          const dst = path.join(wdNow.consumer, path.basename(finalPath));
+          await copyFileAtomic(finalPath, dst);
+          fs.unlinkSync(finalPath);
+          finalPath = dst;
+          onUsb = true;
+          logger.child('pipeline').mark('PUBLISH', `加密归档完成，成品已剪切到 U 盘：${path.basename(dst)}`);
+        }
+      } catch (e) {
+        logger.child('pipeline').warn(`[MARK:PUBLISH] 成品剪切到 U 盘失败（留在本地，稍后自动补搬）：${(e as Error).message}`);
+      }
       const sizeBytes = fs.statSync(finalPath).size;
       const fileId = filesRepo.add({
         taskId: task.id,
@@ -194,7 +248,7 @@ async function processEncrypting(): Promise<void> {
         sizeBytes,
         path: finalPath,
         container: u.container ?? null,
-        onUsb: wd.onUsb,
+        onUsb,
       });
       u.fileId = fileId;
       u.publishedName = path.basename(finalPath);
